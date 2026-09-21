@@ -1,6 +1,6 @@
 # Session State
 
-Updated: 2026-09-21 (Asia/Seoul) — 실기기 첫 검증 완료(라벨 9건), 라벨 운용 수정 = **PR #2**(https://github.com/helperjby/GS-trade-tracker/pull/2, 브랜치 `claude/run-dev-label-check-34b190`)
+Updated: 2026-09-21 (Asia/Seoul) — Step 1 분석 1차 = SEAssist **PR #304** · 라벨 운용 수정 = **PR #2**(머지됨)
 
 ## 현재 상태
 
@@ -28,16 +28,23 @@ Updated: 2026-09-21 (Asia/Seoul) — 실기기 첫 검증 완료(라벨 9건), �
   ③ 상세 라벨이 원인 패킷보다 3~35초 늦음 → README 절차(동작 직후 짧은 라벨, 상세는 다음 줄); SEAssist
   `mine_packet_discovery.LEAD_BY_EVENT` 에 `market_manual` 등록은 PR-Y2 몫(현재 기본 3초). ④ 한글 입력 잘림
   (`악몽을 피우는 씨앗` → `을 는 앗`) — Python 읽기 경로는 줄 단위(cooked read)라 콘솔 호스트 + IME 쪽으로 추정,
-  `tools/console_input_probe.py` 로 진단한 뒤 `_Console` 읽기 방식을 정한다(미수정).
+  `tools/console_input_probe.py` 로 진단한 뒤 `_Console` 읽기 방식을 정한다(미수정). PR #2 머지 뒤 실기기 재확인: ㅂ 종료 O, 20:23 창 라벨 7건 전부 온전.
+- **Step 1 분석 1차(2026-09-21) = SEAssist PR #304**(https://github.com/helperjby/gersang-auto-eating/pull/304, #303 위 스택,
+  `docs/PACKET-MARKET-2026-09-21.md`): 육의전 목록 응답 = 8000 s2c **`0x321f`**, 9B 헤더(`[5:7]` 총 페이지 u16 · `[7:9]` 행 수 u16,
+  페이지 번호 없음) + **48B × 행**(등록 id · 아이템 id · 수량 · 가격 = u32 LE, 판매자 cp949 16B NUL, 미상 4B, 플래그 2B). 코퍼스
+  30프레임 전부 `len == 9 + 48×count`, 콘솔 라벨 8행의 수량·가격·판매자 **8/8 일치**. **아이템명은 없고 id 만** → H-2609-07 기각,
+  H-2609-08(프레임·행 구조, C 제안, 검정중) · H-2609-09(폭) 등록. 소비자 검색(`!육의전 <아이템>`)은 **id→이름 표가 따로 필요** —
+  PR-Y2/Y3 설계 전제. 도구 `scripts/packet_market_probe.py`(`--mask`), `mine LEAD_BY_EVENT["market_manual"]=30`.
+  등급 B 미달 사유: 음성 창(상점·창고·우편) 0, 페이지 넘김 라벨 창 0, 사냥 코퍼스 3창(F1_JBY 09-14 21:45 · jby 09-16 11:59 ·
+  F1_JBY 09-16 12:29)에 미라벨 `0x321f` 가 있어 육의전 열람 여부 사용자 확인 필요.
 
 ## 다음 행동
 
 1. `python tools\console_input_probe.py` 를 관측기와 같은 콘솔에서 돌려 살아남는 읽기 방식 확인 → `_Console` 수정 PR.
-2. Step 0 수집 — jby 포함 2~3 PC 에서 양성 창 ≥3·음성 창 ≥2(README 수집 절차). 음성 창(상점·창고)에서 `0x321f`
-   가 안 나오는지가 첫 대조점.
-3. Step 1 분석 — SEAssist 레포에서 `grep "<판매자명>"`(아이템명은 문자열로 없다) → `timeline` → `stats` → `sub`
-   → `body` → `bg`; `LEAD_BY_EVENT["market_manual"]`(30초 안팎) 등록; 결과를 SEAssist
-   `docs/PACKET-MARKET-2026-09-XX.md` + PROCESS §3 H-2609-07 행 갱신.
-4. PR-Y2(SEAssist): `MARKET_OPCODES`·전량 대기·`packet_market.py`·원장·코퍼스 → 동기화로 가져오기.
+2. Step 0 잔여 — **음성 창 ≥2**(상점·창고·우편: 목록 UI 열되 육의전 아님), **페이지 넘김 라벨 창 1개**(`2페이지`·`3페이지`),
+   용병(Lv) 목록 표본, 다른 PC 세션. 미라벨 3창의 육의전 열람 여부 확인 → H-2609-08 (1) 판정·등급 B 조건.
+3. Step 1 잔여 — `@40`(프레임 상수)·`@45`(1|2)·`@46`(0~7) 의미(서버·카테고리·등급 바꿔 열기), 아이템 id→이름 표 출처
+   (클라 리소스 / 라벨 누적 — 8건 시드 / OCR) 결정 → SEAssist PROCESS §3 H-2609-08 갱신. 재현: `python scripts/packet_market_probe.py --root <packet>`.
+4. PR-Y2(SEAssist): `MARKET_OPCODES = {0x321f}`(H-2609-08 B 승격 뒤)·전량 대기·`packet_market.py`(9B 헤더 + 48B 행 파서)·원장·코퍼스 → 동기화로 가져오기.
 5. PR-Y3(SEAssist `dashboard/`): market 테이블·`POST /api/market/observations`·`GET /api/market/search`.
 6. PR-Y1b(여기): 파서 → 스풀 → 업로드 관측 모드.
