@@ -1,7 +1,7 @@
 # Session State
 
-Updated: 2026-09-21 밤 (Asia/Seoul) — **PR-Y2 구현 완료(SEAssist 브랜치 `claude/market-y2-20260921`, 로컬 커밋 6개, 푸시·PR 대기)** ·
-**PR-Y2b 아이템 표 추출기 구현 완료(이 레포 브랜치 `claude/pr-y2-parser-item-mapping-06a025`, PR 대기)** · Step 1 = SEAssist #304·#305(머지)
+Updated: 2026-09-21 밤 (Asia/Seoul) — **PR-Y2 = SEAssist PR #306**(https://github.com/helperjby/gersang-auto-eating/pull/306, 브랜치 `claude/market-y2-20260921`, 커밋 6개, 리뷰·머지 대기) ·
+**PR-Y2b 아이템 표 추출기 = 이 레포 PR #5**(https://github.com/helperjby/GS-trade-tracker/pull/5, 리뷰·머지 대기) · Step 1 = SEAssist #304·#305(머지)
 
 ## 현재 상태
 
@@ -48,8 +48,7 @@ Updated: 2026-09-21 밤 (Asia/Seoul) — **PR-Y2 구현 완료(SEAssist 브랜�
   `packet_market.py` 파서(구조 불일치 None, C/D 필드 anomaly) → 엔진 `market_cb`·헬스 7종·`note_market` 원장·App status → `explore market`
   (라이브·오프라인·프로브 3중 대조, `--mask`)·`market --shadow` → 코퍼스 `market` 열 + 창 9개 등록(**45창 76,488프레임 / market 39 / jochul 5**,
   wordinput 56창 무변경) → 문서(PROCESS §3.1 B, H-2609-10/11 제안, FINDINGS §5.4, TOOLS, PACKET-MARKET 부록, CHANGELOG) → 패치 재검사
-  도구 `market` 열. 실캡처 80창: 9창 40페이지 라이브 == 오프라인 == 프로브, 라벨 8/8. 전체 스위트 green. **푸시·PR 생성은 사용자 확인 뒤**
-  (PR 본문 초안 = 스크래치패드 `pr_y2_body.md`). 머지 직전 수동: 9 파일을 `15. Gersang auto eating\packet\<디바이스>\packet_discovery\` 에 복사 → 두 검사 재실행.
+  도구 `market` 열. 실캡처 80창: 9창 40페이지 라이브 == 오프라인 == 프로브, 라벨 8/8. 전체 스위트 4,001 passed. **PR #306** 생성(2026-09-21 밤). 머지 직전 수동: 9 파일을 `15. Gersang auto eating\packet\<디바이스>\packet_discovery\` 에 복사 → 두 검사 재실행.
 - **아이템 id → 이름 표 출처 결정(2026-09-21)**: 클라 `gersang.gcs` 의 `육의전 검색 기능 리스트`(4,001행) — 라벨 8/8·관측 188 id 중 186(3251 강화품 표,
   1449232 미상 — 용병 탭 추정). **PR-Y2b 구현(이 레포)**: `src/yuktracker/item_names.py`(순차 zlib 스캔·마커 식별·정규화·캐시·클라 탐색),
   `paths.py`, `game_processes.process_image_path`, `tools/dump_item_names.py`(`--check` 실기기: 4,001행·앵커 8/8·0.22s, 실행 중 클라 폴더 자동 탐색),
@@ -58,9 +57,8 @@ Updated: 2026-09-21 밤 (Asia/Seoul) — **PR-Y2 구현 완료(SEAssist 브랜�
 
 ## 다음 행동
 
-1. **PR-Y2 푸시·PR**(사용자 확인): `git -C C:\dev\gersang\.claude\worktrees\market-y2-20260921 push -u origin claude/market-y2-20260921` →
-   `gh pr create --repo helperjby/gersang-auto-eating --base main`(본문 = `pr_y2_body.md`). 머지 직전 9창 복사 절차(PACKET-MARKET 부록).
-2. **PR-Y2b PR**(이 레포, 브랜치 `claude/pr-y2-parser-item-mapping-06a025`) — SEAssist PR 과 독립.
+1. **SEAssist PR #306 리뷰·머지** — 머지 직전 9창을 `15. Gersang auto eating\packet\<디바이스>\packet_discovery\` 에 복사하고 두 검사
+   재실행(PACKET-MARKET 부록). 2. **이 레포 PR #5 리뷰·머지** — SEAssist 와 독립.
 3. SEAssist PR-Y2 머지 뒤 여기 동기화: `tools/sync_seassist_core.py` `MODULES += "packet_market.py"` **먼저** → `--source <머지된 main>` →
    VENDOR.json → 스모크 테스트(`packet_market` import + `FlowDecoder(observe_market=True)`).
 4. Step 0 잔여 캡처 2창: ① 아이템 탭에서 라벨 5열(`아이템, 수량, 판매자, 단가, 기간` — 예 `정기의구슬(風), 10, <판매자>, 45,000,000, 장기`)
