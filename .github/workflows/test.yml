@@ -27,3 +27,10 @@ jobs:
 
       - name: Run tests
         run: python -X utf8 -m pytest tests -q -p no:cacheprovider
+
+      - name: Install hub dependencies
+        # hub/ 는 src/ 무결합 독립 배포(aiohttp 하나) — 관측기의 "런타임 의존성 0" 규칙과 별개
+        run: pip install -r hub/requirements.txt
+
+      - name: Run hub tests
+        run: python -X utf8 -m pytest hub/tests -q -p no:cacheprovider

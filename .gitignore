@@ -24,3 +24,7 @@ item_names*.json
 # OS
 Thumbs.db
 desktop.ini
+
+# 허브(hub/) 런타임 — 시크릿·DB 는 레포에 넣지 않는다
+hub/config.json
+hub/data/
