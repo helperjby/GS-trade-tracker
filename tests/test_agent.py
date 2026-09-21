@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import io
 import json
+import threading
 import time
 import unittest
 from pathlib import Path
@@ -175,6 +176,93 @@ class CaptureModeTest(_Base):
         self.assertEqual(rc, A.RC_OK)
         self.assertFalse((self.root / "packet_discovery").exists())
         self.assertIn("수집 창이 없어", self.out.getvalue())
+
+    def test_hangul_q_key_quits_without_label(self) -> None:
+        # 한글 IME 상태에서 q 키 = ㅂ — 실기기(2026-09-21)에서 'ㅂ' 라벨이 두 번 남고 종료되지 않았다.
+        opts = A.RunOptions(capture_min=5.0, pause_on_exit=False, attach_log=False)
+        rc = self._run(opts, "육의전 열기\nㅂ\n")
+        self.assertEqual(rc, A.RC_OK)
+        rows = self._rows()
+        self.assertEqual([r["detail"]["note"] for r in rows if r["kind"] == "label"], ["육의전 열기"])
+        self.assertEqual(rows[-1]["reason"], "manual")
+        self.assertNotIn("라벨 #2", self.out.getvalue())
+
+    def test_console_close_hook_ends_window_with_its_own_reason(self) -> None:
+        """콘솔 X — 설치 함수를 가로채 콜백을 잡고, 창이 열린 뒤 핸들러 스레드처럼 직접 부른다.
+
+        실제 프로세스는 핸들러가 돌아오면 죽지만 여기서는 이어서 q 로 끝내, `finally` 의 manual 마감이
+        이미 닫힌 창을 다시 닫지 않는 것(window_end 1행·reason=console_close)까지 본다.
+        """
+        captured: dict = {}
+
+        def fake_install(on_close):
+            captured["on_close"] = on_close
+            captured["removed"] = False
+
+            def remove():
+                captured["removed"] = True
+            return remove
+
+        release = threading.Event()
+
+        class _Stdin:
+            def __iter__(self):
+                release.wait(5.0)
+                yield "q\n"
+
+        def fire():
+            # 창이 열리고 안내 줄까지 찍힌 뒤(state["window"] = True 이후)에 닫기 이벤트를 흉내 낸다.
+            deadline = time.monotonic() + 5.0
+            while "콘솔에 한 줄 치고" not in self.out.getvalue() and time.monotonic() < deadline:
+                time.sleep(0.01)
+            captured["on_close"](A.CONSOLE_CLOSE_REASON)
+            release.set()
+
+        opts = A.RunOptions(capture_min=5.0, pause_on_exit=False, attach_log=False)
+        threading.Thread(target=fire, daemon=True).start()
+        with mock.patch.object(A, "_install_console_close_hook", fake_install):
+            rc = A.run(opts, engine_factory=_factory(), recorder=self.recorder, indexer=self.indexer,
+                       stdin=_Stdin(), out=self.out, sleep=lambda s: time.sleep(0.02))
+        self.assertEqual(rc, A.RC_OK)
+        self.assertTrue(captured["removed"])
+        rows = self._rows()
+        ends = [r for r in rows if r["kind"] == "window_end"]
+        self.assertEqual(len(ends), 1)
+        self.assertEqual(ends[0]["reason"], A.CONSOLE_CLOSE_REASON)
+        self.assertTrue(_EngineStub.instances[-1].stopped)
+        self.assertIn("콘솔 종료 신호", self.out.getvalue())
+
+
+class ConsoleCtrlEventTest(unittest.TestCase):
+    """`SetConsoleCtrlHandler` 판정부 — 닫기 계열만 동기 마감, Ctrl+C/Break 는 Python 에 넘긴다."""
+
+    def test_close_events_call_on_close_synchronously(self) -> None:
+        calls: list[str] = []
+        for ev in (A.CTRL_CLOSE_EVENT, A.CTRL_LOGOFF_EVENT, A.CTRL_SHUTDOWN_EVENT):
+            self.assertTrue(A._console_ctrl_event(ev, calls.append))
+        self.assertEqual(calls, [A.CONSOLE_CLOSE_REASON] * 3)
+
+    def test_ctrl_c_and_break_are_left_to_python(self) -> None:
+        calls: list[str] = []
+        for ev in (A.CTRL_C_EVENT, A.CTRL_BREAK_EVENT):
+            self.assertFalse(A._console_ctrl_event(ev, calls.append))
+        self.assertEqual(calls, [])
+
+    def test_on_close_exception_is_swallowed(self) -> None:
+        def boom(reason):
+            raise RuntimeError("x")
+        self.assertTrue(A._console_ctrl_event(A.CTRL_CLOSE_EVENT, boom))
+
+    def test_install_is_noop_off_windows(self) -> None:
+        with mock.patch.object(A.sys, "platform", "linux"):
+            remove = A._install_console_close_hook(lambda r: None)
+        remove()  # 예외 없음
+
+    @unittest.skipUnless(A.sys.platform == "win32", "Windows 콘솔 API")
+    def test_install_and_remove_on_windows(self) -> None:
+        # 실제 SetConsoleCtrlHandler 등록/해제가 예외 없이 도는지만 — 이벤트 발생은 실기기 검증.
+        remove = A._install_console_close_hook(lambda r: None)
+        remove()
 
 
 class ObserveModeTest(_Base):
