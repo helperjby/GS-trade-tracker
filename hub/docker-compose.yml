@@ -1,0 +1,10 @@
+services:
+  yuktracker-hub:
+    build: .
+    restart: unless-stopped
+    ports: ["8800:8800"]
+    volumes:
+      - "${HUB_DATA_DIR:-./data}:/data"
+      - "./config.json:/app/config.json:ro"
+    environment:
+      - TZ=Asia/Seoul
