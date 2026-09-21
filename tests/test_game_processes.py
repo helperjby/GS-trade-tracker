@@ -32,5 +32,30 @@ class GamePidsTest(unittest.TestCase):
         self.assertIn(os.getpid(), pids)
 
 
+class ProcessImagePathTest(unittest.TestCase):
+    @unittest.skipUnless(sys.platform == "win32", "QueryFullProcessImageNameW 는 Windows 전용")
+    def test_self_path_on_windows(self) -> None:
+        import os
+        from pathlib import Path
+        p = gp.process_image_path(os.getpid())
+        self.assertIsNotNone(p)
+        self.assertEqual(Path(p).name.lower(), Path(sys.executable).name.lower())
+        self.assertTrue(Path(p).is_file())
+
+    def test_invalid_pid_is_none(self) -> None:
+        self.assertIsNone(gp.process_image_path(0))
+        self.assertIsNone(gp.process_image_path(-1))
+
+    @unittest.skipUnless(sys.platform == "win32", "Windows 전용")
+    def test_missing_process_is_none(self) -> None:
+        # 존재할 가능성이 사실상 없는 큰 PID — OpenProcess 실패 → None(예외 없음).
+        self.assertIsNone(gp.process_image_path(0x7FFFFFF0))
+
+    def test_off_windows_is_none(self) -> None:
+        from unittest import mock
+        with mock.patch.object(gp.sys, "platform", "linux"):
+            self.assertIsNone(gp.process_image_path(1234))
+
+
 if __name__ == "__main__":
     unittest.main()

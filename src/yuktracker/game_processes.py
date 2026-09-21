@@ -19,6 +19,8 @@ GAME_PROC_NAMES: frozenset[str] = frozenset({"gersang.exe"})
 _TH32CS_SNAPPROCESS = 0x00000002
 _INVALID_HANDLE_VALUE = wintypes.HANDLE(-1).value
 _MAX_PATH = 260
+_PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+_IMAGE_PATH_BUF = 1024
 
 
 class _PROCESSENTRY32W(ctypes.Structure):
@@ -66,6 +68,40 @@ def snapshot_processes() -> list[tuple[int, str]]:
     finally:
         k32.CloseHandle(handle)
     return out
+
+
+def process_image_path(pid: int) -> str | None:
+    """실행 중 프로세스의 실행 파일 전체 경로 — `QueryFullProcessImageNameW`. 실패·비Windows 는 None.
+
+    `Module32FirstW` 가 아니라 이것인 이유: 64bit 파이썬에서 32bit 게임 프로세스의 모듈 스냅샷은
+    `ERROR_PARTIAL_COPY` 로 실패하지만, `PROCESS_QUERY_LIMITED_INFORMATION` 핸들의 이미지 이름 조회는
+    비트 수·승격과 무관하게 된다(실측 2026-09-21: 비승격 64bit 파이썬 → 32bit Gersang.exe 3개, 안티치트
+    가동 중). 클라 폴더(`gersang.gcs`)를 찾는 데 쓴다(`item_names.discover_client_dirs`).
+    """
+    if sys.platform != "win32" or int(pid) <= 0:
+        return None
+    try:
+        k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        k32.OpenProcess.argtypes = (wintypes.DWORD, wintypes.BOOL, wintypes.DWORD)
+        k32.OpenProcess.restype = wintypes.HANDLE
+        k32.QueryFullProcessImageNameW.argtypes = (
+            wintypes.HANDLE, wintypes.DWORD, wintypes.LPWSTR, ctypes.POINTER(wintypes.DWORD))
+        k32.QueryFullProcessImageNameW.restype = wintypes.BOOL
+        k32.CloseHandle.argtypes = (wintypes.HANDLE,)
+        k32.CloseHandle.restype = wintypes.BOOL
+        handle = k32.OpenProcess(_PROCESS_QUERY_LIMITED_INFORMATION, False, int(pid))
+        if not handle:
+            return None
+        try:
+            buf = ctypes.create_unicode_buffer(_IMAGE_PATH_BUF)
+            size = wintypes.DWORD(_IMAGE_PATH_BUF)
+            if not k32.QueryFullProcessImageNameW(handle, 0, buf, ctypes.byref(size)):
+                return None
+            return buf.value or None
+        finally:
+            k32.CloseHandle(handle)
+    except Exception:
+        return None
 
 
 def game_pids(snapshot: Callable[[], Iterable[tuple[int, str]]] = snapshot_processes) -> list[int]:
