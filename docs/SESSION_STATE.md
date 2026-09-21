@@ -1,6 +1,6 @@
 # Session State
 
-Updated: 2026-09-21 밤 (Asia/Seoul) — **PR-Y2 구현 완료(SEAssist 브랜치 `claude/market-y2-20260921`, 로컬 커밋 7개, 푸시·PR 대기)** ·
+Updated: 2026-09-21 밤 (Asia/Seoul) — **PR-Y2 구현 완료(SEAssist 브랜치 `claude/market-y2-20260921`, 로컬 커밋 6개, 푸시·PR 대기)** ·
 **PR-Y2b 아이템 표 추출기 구현 완료(이 레포 브랜치 `claude/pr-y2-parser-item-mapping-06a025`, PR 대기)** · Step 1 = SEAssist #304·#305(머지)
 
 ## 현재 상태
