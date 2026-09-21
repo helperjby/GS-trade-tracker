@@ -56,8 +56,14 @@ MODULES = (
 OWNED = ("__init__.py", "config.py", "VENDOR.json")
 
 
+def normalize(data: bytes) -> bytes:
+    """줄바꿈을 LF 로 — SEAssist 체크아웃은 Windows 라 CRLF 이고 이 레포는 `.gitattributes` 로 LF 다.
+    복사·해시·비교 전부 이 정규화를 거친다(CI 의 LF 체크아웃에서 해시가 어긋난 실패가 근거)."""
+    return data.replace(b"\r\n", b"\n")
+
+
 def _sha256(p: Path) -> str:
-    return hashlib.sha256(p.read_bytes()).hexdigest()
+    return hashlib.sha256(normalize(p.read_bytes())).hexdigest()
 
 
 def _git(source: Path, *args: str) -> str:
@@ -112,9 +118,9 @@ def sync(source: Path) -> int:
     files: dict[str, dict] = {}
     changed = 0
     for name in MODULES:
-        data = (src_dir / name).read_bytes()
+        data = normalize((src_dir / name).read_bytes())
         dst = DEST / name
-        if not dst.is_file() or dst.read_bytes() != data:
+        if not dst.is_file() or normalize(dst.read_bytes()) != data:
             dst.write_bytes(data)
             changed += 1
         files[name] = {"sha256": hashlib.sha256(data).hexdigest(), "bytes": len(data)}

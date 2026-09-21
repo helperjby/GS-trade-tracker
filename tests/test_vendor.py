@@ -33,9 +33,11 @@ class VendorManifestTest(unittest.TestCase):
         vendor = json.loads((VENDOR_DIR / "VENDOR.json").read_text(encoding="utf-8"))
         self.assertEqual(set(vendor["files"]), set(sync.MODULES))
         for name, meta in vendor["files"].items():
-            data = (VENDOR_DIR / name).read_bytes()
+            # 줄바꿈 정규화(LF) 뒤 해시 — 체크아웃의 CRLF/LF 차이는 드리프트가 아니다.
+            data = sync.normalize((VENDOR_DIR / name).read_bytes())
             self.assertEqual(hashlib.sha256(data).hexdigest(), meta["sha256"],
                              f"{name} 이 손으로 바뀌었다 — tools/sync_seassist_core.py 로만 갱신")
+            self.assertEqual(len(data), meta["bytes"], name)
         self.assertTrue(vendor.get("commit"), "출처 커밋이 비어 있다")
 
     def test_owned_files_are_not_synced(self) -> None:
