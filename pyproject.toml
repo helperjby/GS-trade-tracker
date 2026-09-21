@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "yuktracker"
+version = "0.1.0.dev0"
+description = "거상 육의전 시세 트래킹 — 클라이언트 s2c 패킷에서 육의전 목록을 관측하는 경량 프로그램"
+readme = "README.md"
+requires-python = ">=3.11"
+# 런타임 의존성 0 — stdlib + ctypes(Npcap wpcap.dll, Toolhelp32). 의도된 제약: exe 가 가볍고
+# SEAssist 미설치 PC 에서도 돈다. 새 의존성은 tests/test_vendor.py 의 import 경계가 막는다.
+dependencies = []
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "pyinstaller>=6"]
+
+[project.scripts]
+yuktracker = "yuktracker.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+"yuktracker.seassist" = ["VENDOR.json"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q -p no:cacheprovider"
