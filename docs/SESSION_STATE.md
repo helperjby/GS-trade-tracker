@@ -1,8 +1,11 @@
 # Session State
 
-Updated: 2026-09-21 (Asia/Seoul) — 프로젝트 신설, PR-Y1(수집 모드) 골격 작성
+Updated: 2026-09-21 (Asia/Seoul) — 프로젝트 신설, GitHub 레포 생성, PR-Y1(수집 모드) = PR #1
 
 ## 현재 상태
+
+- 레포: https://github.com/helperjby/GS-trade-tracker (private). `main` = 부트스트랩(문서만), **PR #1**
+  (https://github.com/helperjby/GS-trade-tracker/pull/1, 브랜치 `feat/y1-capture-mode`) 가 코드 전부(28 파일). 이후 변경은 이 레포의 PR 로.
 
 - 사용자 결정(2026-09-21): 소비자 봇 = 미루봇-IRIS, 허브 = SEAssist 대시보드 서버(Pi) 확장, 수집기 =
   **SEAssist GUI 가 아닌 별도 경량 프로그램(이 프로젝트, 별도 실행파일)**, 육의전 opcode 는 모름 → 발굴부터.
