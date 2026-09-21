@@ -11,7 +11,8 @@
 1. `README.md` — 지금 되는 것·수집 절차
 2. `docs/PLAN.md` — 전체 설계와 PR 순서(Step 0/1 → Y1 → Y2 → Y3 → Y1b → Y4)
 3. `docs/SESSION_STATE.md` — 현재 상태·다음 행동
-4. SEAssist `docs/PACKET-PROCESS.md` §1~§3 — 게이트 사다리·등급·가설 레지스트리(H-2609-07)
+4. SEAssist `docs/PACKET-PROCESS.md` §1~§3 — 게이트 사다리·등급·가설 레지스트리(H-2609-08 육의전 목록 B,
+   H-2609-10 아이템 id = 클라 표 코드, H-2609-11 `@45` = 기간) · `docs/PACKET-MARKET-2026-09-21.md`
 
 ## 진실의 원천 순서
 
@@ -30,6 +31,9 @@
   pywin32·requests 를 추가하지 않는다.
 - 원시 캡처(`window_*.jsonl`)·판매자명 등 실데이터를 레포에 넣지 않는다. 테스트 픽스처는 합성으로.
 - 게임에 입력을 보내는 코드는 이 프로젝트에 없다(읽기 전용). 이 경계를 넘는 기능은 여기 두지 않는다.
+- 클라 데이터 파일(`gersang.gcs` 등)은 **읽기 전용**으로만 연다(프로세스·메모리·네트워크 무접촉). 추출한
+  아이템 표·캐시는 레포 밖(`%APPDATA%\YukTracker`, `--out` 은 `.gitignore`)에 두고 재배포하지 않는다.
+  테스트는 합성 아카이브만 쓴다(실제 클라 경로는 항상 명시 주입).
 - 문서: 상태 변화는 `docs/SESSION_STATE.md`, 설계 변경은 `docs/PLAN.md` 에 날짜와 함께.
 
 ## 명령
