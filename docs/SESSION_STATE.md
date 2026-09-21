@@ -1,6 +1,6 @@
 # Session State
 
-Updated: 2026-09-21 (Asia/Seoul) — 실기기 첫 검증 완료(라벨 9건), 라벨 운용 수정(브랜치 `claude/run-dev-label-check-34b190`)
+Updated: 2026-09-21 (Asia/Seoul) — 실기기 첫 검증 완료(라벨 9건), 라벨 운용 수정 = **PR #2**(https://github.com/helperjby/GS-trade-tracker/pull/2, 브랜치 `claude/run-dev-label-check-34b190`)
 
 ## 현재 상태
 
