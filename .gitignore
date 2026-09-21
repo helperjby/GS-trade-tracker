@@ -1,0 +1,24 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+
+# 빌드 산출물 — exe 는 릴리스 때 deploy/ 로 복사한다
+build/
+build_temp/
+dist/
+*.spec
+
+# 런타임 산출물 (로그·수집 창은 원장 폴더에 남는다 — 레포에 넣지 않는다)
+log/
+wordinput_review/
+*.jsonl
+*.pcapng
+
+# OS
+Thumbs.db
+desktop.ini

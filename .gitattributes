@@ -1,0 +1,5 @@
+# OneDrive 폴더의 Windows 체크아웃 — 저장소에는 LF, 배치 파일만 CRLF.
+* text=auto eol=lf
+*.bat text eol=crlf
+*.png binary
+*.jsonl binary
