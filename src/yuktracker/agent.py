@@ -21,7 +21,9 @@ SEAssist 의 패킷 엔진은 War/Mon 매크로 세션이 도는 동안에만 �
 ------
 엔진 콜백(status/event/segment)은 스니퍼 스레드에서 온다 — 여기서는 print 와 recorder enqueue
 뿐이다(둘 다 비블로킹). 콘솔 입력은 별도 데몬 스레드가 읽는다. 메인 스레드는 1초 틱으로
-자동 종료(시간 만료·용량 상한)만 살핀다.
+자동 종료(시간 만료·용량 상한)만 살핀다. 콘솔 닫기(X)·로그오프·셧다운은 Windows 가 만든 핸들러
+스레드로 오고, 거기서 창 마감(`window_end`)까지 **동기로** 끝낸다 — 핸들러가 돌아오면 프로세스가
+죽어 `finally` 는 돌지 않는다(실기기 2026-09-21: X 로 닫은 창이 `window_end` 없이 끊겼다).
 """
 from __future__ import annotations
 
@@ -46,6 +48,18 @@ DEFAULT_CAPTURE_MIN = 5.0
 FLOW_WAIT_SEC = 120.0
 #: 콘솔 라벨의 event 이름 — 발굴 도구(`mine_packet_discovery.py`)의 자극 표에 이 이름으로 나온다.
 LABEL_EVENT = "market_manual"
+#: 종료로 읽는 줄(소문자 비교). ``ㅂ`` = 한글 2벌식에서 q 키 — 실기기(2026-09-21)에서 한글 IME 상태로 q 를
+#: 쳐 `ㅂ` 라벨이 두 번 남았다. 한/영 상태와 무관하게 종료되게 한다.
+QUIT_WORDS = ("q", "quit", "exit", "ㅂ")
+#: Windows 콘솔 제어 이벤트(`SetConsoleCtrlHandler` HandlerRoutine 의 dwCtrlType).
+CTRL_C_EVENT = 0
+CTRL_BREAK_EVENT = 1
+CTRL_CLOSE_EVENT = 2
+CTRL_LOGOFF_EVENT = 5
+CTRL_SHUTDOWN_EVENT = 6
+_CLOSE_EVENTS = frozenset({CTRL_CLOSE_EVENT, CTRL_LOGOFF_EVENT, CTRL_SHUTDOWN_EVENT})
+#: 콘솔 닫기·로그오프·셧다운으로 마감된 창의 `window_end.reason` — `packet_explore.py list` 종료 열에 보인다.
+CONSOLE_CLOSE_REASON = "console_close"
 #: 종료 뒤 콘솔을 붙잡아 두는 상한 — 승격 재기동으로 뜬 새 콘솔은 프로그램이 끝나면 닫혀
 #: 저장 위치 안내를 못 본다.
 FINAL_WAIT_SEC = 600.0
@@ -116,6 +130,53 @@ def _attach_console_log(out: TextIO) -> None:
     handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s", "%H:%M:%S"))
     log.addHandler(handler)
     _console_log_attached = True
+
+
+def _console_ctrl_event(event: int, on_close: Callable[[str], None]) -> bool:
+    """콘솔 제어 이벤트 1건 → 처리했으면 True (HandlerRoutine 의 순수 판정부, 테스트 대상).
+
+    닫기·로그오프·셧다운만 받는다 — 창 마감을 **이 스레드에서 동기로** 끝낸 뒤 True. Windows 는
+    CTRL_CLOSE 핸들러에 약 5초를 주고 `end_window` 의 writer join 상한은 1초라 충분하다.
+    Ctrl+C·Ctrl+Break 는 False 로 넘겨 CRT/Python 의 기존 처리(KeyboardInterrupt → `finally` 마감)를
+    그대로 둔다. ``on_close`` 의 예외는 삼킨다 — 핸들러에서 새면 프로세스가 그 자리에서 죽는다.
+    """
+    if int(event) not in _CLOSE_EVENTS:
+        return False
+    try:
+        on_close(CONSOLE_CLOSE_REASON)
+    except Exception:
+        pass
+    return True
+
+
+def _install_console_close_hook(on_close: Callable[[str], None]) -> Callable[[], None]:
+    """`SetConsoleCtrlHandler` 로 `_console_ctrl_event` 를 건다 → 해제 함수. 비Windows·실패는 no-op.
+
+    관측기가 이 훅 때문에 죽어서는 안 되므로 어떤 예외도 밖으로 내지 않는다. ctypes 콜백 객체는 해제
+    함수에 붙여 GC 를 막는다(참조가 사라진 콜백이 호출되면 크래시).
+    """
+    if sys.platform != "win32":
+        return lambda: None
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        handler_type = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.DWORD)
+        callback = handler_type(lambda event: _console_ctrl_event(event, on_close))
+        kernel32 = ctypes.windll.kernel32
+        if not kernel32.SetConsoleCtrlHandler(callback, True):
+            return lambda: None
+
+        def remove() -> None:
+            try:
+                kernel32.SetConsoleCtrlHandler(callback, False)
+            except Exception:
+                pass
+
+        remove._callback = callback  # type: ignore[attr-defined]  # GC 방지
+        return remove
+    except Exception:
+        return lambda: None
 
 
 class _Console(threading.Thread):
@@ -191,7 +252,7 @@ def run(opts: RunOptions, *, engine_factory=None, recorder=None,
         if state["finished"]:
             final.set()
             return
-        if t.lower() in ("q", "quit", "exit"):
+        if t.lower() in QUIT_WORDS:
             stop.set()
             return
         if not t:
@@ -209,6 +270,16 @@ def run(opts: RunOptions, *, engine_factory=None, recorder=None,
         say("[패킷] Npcap 설치(https://npcap.com)와 관리자 권한을 확인하세요")
         return _finish(RC_ENGINE, opts, say, final, state)
 
+    def on_console_close(reason: str) -> None:
+        # 콘솔 X·로그오프·셧다운 — 핸들러 스레드에서 창을 마감하고 엔진을 세운다(프로세스는 곧 죽는다).
+        say("[발굴] 콘솔 종료 신호 — 수집 창을 마감합니다")
+        close_window(reason)
+        try:
+            engine.stop()
+        except Exception:
+            pass
+
+    remove_close_hook = _install_console_close_hook(on_console_close)
     rc = RC_OK
     try:
         if opts.capture_min:
@@ -228,6 +299,7 @@ def run(opts: RunOptions, *, engine_factory=None, recorder=None,
     except KeyboardInterrupt:
         say("중단 요청(Ctrl+C)")
     finally:
+        remove_close_hook()
         close_window("manual")
         try:
             engine.stop()
@@ -267,8 +339,8 @@ def _open_window(opts, engine, recorder, indexer, state, stop, say, clock, sleep
     if not ok:
         return RC_WINDOW
     state["window"] = True
-    say("[발굴] 콘솔에 한 줄 치고 Enter = 라벨(예: '육의전 열기' · '검색 소나무' · '2페이지' · '닫기'). "
-        "q + Enter = 종료")
+    say("[발굴] 콘솔에 한 줄 치고 Enter = 라벨(예: '육의전 열기' · '검색 소나무' · '2페이지' · '닫기') — "
+        "동작 직후 짧게, 목록 상세 메모는 다음 줄로. q + Enter = 종료(한글 상태의 ㅂ 도 종료)")
     return RC_OK
 
 

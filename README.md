@@ -37,9 +37,15 @@ dist\YukTracker.exe         # build.bat 산출물(UAC 매니페스트 내장) �
 1. 거상 클라이언트를 켜고 서버에 접속한 상태에서 관측기를 관리자로 실행 → `[패킷] 캡처 시작 — 서버 …`
    줄이 뜨면 스니퍼가 붙은 것. `[발굴] 패킷 수집 시작 — 최대 N분 → <폴더>` 가 창 파일 위치다.
 2. **정지 30초 → 육의전 열기 → 잘 안 팔리는 고유한 아이템명 1개 검색 → 페이지 넘김 → 카테고리 열람 →
-   빈 결과 검색 1회 → 닫기 → 정지 30초.** 각 동작 직후 콘솔에 한 줄(예: `육의전 열기`, `검색 소나무`,
-   `2페이지`)을 치고 Enter — `market_manual` 라벨로 창 안에 남는다. `q` + Enter 로 종료(시간이 다 되면
-   자동 종료).
+   빈 결과 검색 1회 → 닫기 → 정지 30초.** 각 동작 **직후** 콘솔에 짧은 한 줄(예: `육의전 열기`, `검색 소나무`,
+   `2페이지`)을 치고 Enter — `market_manual` 라벨로 창 안에 남는다. `q` + Enter 로 종료(한글 상태의 `ㅂ` 도
+   종료, 시간이 다 되면 자동 종료).
+   - **라벨은 동작 직후에 짧게.** 분석 도구(SEAssist `mine_packet_discovery.py`)는 라벨 앞 3초까지만 거슬러
+     보므로(`market_manual` 은 lookback 미등록), 목록 내용을 옮겨 적는 긴 메모는 짧은 라벨 **다음 줄**에 따로
+     친다(실기기 09-21: 상세 메모가 원인 패킷보다 3~35초 늦었다). 분석 때 `--lead 40` 으로 넓힐 수는 있다.
+   - 콘솔을 X 로 닫아도 창은 `window_end(console_close)` 로 마감되지만 `q` 가 정석이다. 한글이 잘려 들어가면
+     (`[발굴] 라벨 #n 기록 — …` 확인 줄이 친 것과 다르면) 같은 줄을 다시 친다 — 원인 진단은 아래 개발 절의
+     `tools\console_input_probe.py`.
 3. 양성 창 ≥3(서로 다른 PC/세션) + 음성 창 ≥2(상점·창고처럼 목록 UI 는 열지만 육의전은 아닌 창)를
    모은다. 가격 65,536 이상·수량 1과 여러 개·용병(Lv)과 물품·긴 이름을 섞는다.
 4. 분석은 SEAssist 레포에서: `python scripts/packet_explore.py --root <packet 폴더> grep "<아이템명>"`
@@ -57,6 +63,7 @@ python -m pytest                  # 설치 없이 돈다(tests/conftest.py 가 s
 python tools\sync_seassist_core.py --check     # 벤더 사본 == SEAssist 소스 ?
 python tools\sync_seassist_core.py             # SEAssist(C:\dev\gersang) 에서 재동기화 → VENDOR.json 갱신
 build.bat                         # 드리프트 검사 → 테스트 → PyInstaller → dist\YukTracker.exe
+python tools\console_input_probe.py   # 콘솔 한글 입력 진단 — 관측기와 같은 콘솔·같은 IME 에서 직접 타이핑
 ```
 
 - Python 3.11+, **런타임 의존성 0**(stdlib + ctypes). Npcap 은 시스템 설치(SEAssist `docs/INSTALL.md` §5).
