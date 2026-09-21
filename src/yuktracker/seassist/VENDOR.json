@@ -1,0 +1,55 @@
+{
+  "source": "C:\\dev\\gersang\\.claude\\worktrees\\yuguijeon-packet-analysis-d6a358",
+  "source_subdir": "src/core",
+  "commit": "62e33db519a4bb238c6f0657d87457a97c34d8d1",
+  "branch": "claude/yuguijeon-packet-analysis-d6a358",
+  "dirty": false,
+  "synced_at": "2026-09-21T08:45:11+00:00",
+  "owned": [
+    "__init__.py",
+    "config.py",
+    "VENDOR.json"
+  ],
+  "files": {
+    "admin.py": {
+      "sha256": "e4edc3be2015e619ac85a938032e20ea2d11e87fe6fabca638c4ba8071c7c70e",
+      "bytes": 2464
+    },
+    "gersang_protocol.py": {
+      "sha256": "bf07c451df508e03081d5421cb0f9f353136296b6cbec5bc886df5f6c87881ba",
+      "bytes": 68935
+    },
+    "ledger_paths.py": {
+      "sha256": "3f0af0ae3d3ce2fd4673a3c1611323db6dd80156aac8f5bcba1a79042c852877",
+      "bytes": 4900
+    },
+    "log_history.py": {
+      "sha256": "0717f6bb69edede06fdfdefb26c93435ff0e8c8c6d416f1ad7ca9bb561f13d18",
+      "bytes": 3514
+    },
+    "logger.py": {
+      "sha256": "bb8db4e12c1a5dbac957c1ea03acca6d636658d26f6c05ce5eaf1633954d45d1",
+      "bytes": 6428
+    },
+    "packet_discovery_ledger.py": {
+      "sha256": "6ad0a4bc013f9fdb683d2692d35a87e5b863a1cea0972f68092e00a1a41c5048",
+      "bytes": 36425
+    },
+    "packet_state_source.py": {
+      "sha256": "17388a75639642e8a45a9e295134bc9f74c18075391055edb5d5ab711dcd9a91",
+      "bytes": 54407
+    },
+    "pcap_ffi.py": {
+      "sha256": "84ee92625cfb49f42bdf47a7d313deac8ec068e8a0545a7fcd8ce9e8131b3856",
+      "bytes": 37458
+    },
+    "tcp_flow_map.py": {
+      "sha256": "d7f26b0f1d4ff83404856290214b5823e935d01b8ee577e055bc2816b44db636",
+      "bytes": 11953
+    },
+    "wordinput_packet_state.py": {
+      "sha256": "6865e46c01720ddbc29dee684ae2945536b897f5aab7f25c6cf5dfa2d1d2a8ad",
+      "bytes": 6476
+    }
+  }
+}
