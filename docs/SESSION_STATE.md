@@ -1,7 +1,7 @@
 # Session State
 
 Updated: 2026-09-22 새벽 (Asia/Seoul) — **방향 전환(사용자 결정 2026-09-22): SEAssist 레포에는 더 이상 머지하지 않는다.**
-**PR-Y3 허브 = 이 레포 `hub/`**(브랜치 `claude/hub-market-api-20260922`, PR #5 위 스택, 리뷰·머지 대기 — PR 링크는 아래 "PR-Y3" 항목) ·
+**PR-Y3 허브 = 이 레포 PR #6**(https://github.com/helperjby/GS-trade-tracker/pull/6, 브랜치 `claude/hub-market-api-20260922`, PR #5 위 스택, 리뷰·머지 대기) ·
 **PR-Y2b = 이 레포 PR #5**(https://github.com/helperjby/GS-trade-tracker/pull/5, `/code-review 5 high` 15건 전부 반영 c042521 2026-09-22, 머지 대기) ·
 SEAssist PR #306(PR-Y2) **미머지 → 닫음 예정, 이 레포로 이식(PR-Y2')** · Step 1 = SEAssist #304·#305(머지, 동결 시점 참조)
 
