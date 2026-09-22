@@ -1,9 +1,30 @@
 # Session State
 
-Updated: 2026-09-22 오전 (Asia/Seoul) — **방향 전환(사용자 결정 2026-09-22): SEAssist 레포에는 더 이상 머지하지 않는다.**
+Updated: 2026-09-22 오후 (Asia/Seoul) — **허브 공개 업로드(Tailscale Funnel + 초대 코드 자기등록, 아래 절, PR #10 머지 대기)** ·
+**방향 전환(사용자 결정 2026-09-22): SEAssist 레포에는 더 이상 머지하지 않는다.**
 **PR #5(PR-Y2b 아이템 표)·PR #6(PR-Y3 허브) 머지 완료**(https://github.com/helperjby/GS-trade-tracker/pull/5 840d8d3 · https://github.com/helperjby/GS-trade-tracker/pull/6 1ed43ef,
 각 `/code-review high` 15건·14건 전부 반영) · **허브 Pi 배포 완료(2026-09-22 11:24, `~/yuktracker-hub`, :8800, G7 `stats` 응답 확인 — 아래 "허브 배포")** ·
 SEAssist PR #306(PR-Y2) **미머지 → 닫음 예정, 이 레포로 이식(PR-Y2')** · Step 1 = SEAssist #304·#305(머지, 동결 시점 참조)
+
+## 허브 공개 업로드 — Tailscale Funnel + 초대 코드 자기등록 (2026-09-22 오후, PR #10)
+
+- 배경: 관측기 exe 는 **Npcap 만 있는 일반 사용자 PC** 에서 돈다 → VPN 전제 불가(사용자 질문 "Tailscale 뿐인가?"에서 출발). 사용자 결정:
+  공개 경로 = Pi 의 **Tailscale Funnel**(사용자 PC 에 아무것도 안 깖, 포트포워딩 없음), 업로드 인증 = **초대 코드 자기등록**(기기별 토큰 +
+  허브 발급 `device_id`), 관리 `secret` 은 조회 전용·exe 금지. Funnel 사실은 KB 1223/1311 + tailscale 소스 `ipn/ipnlocal/serve.go` 로 확인
+  (클라 `Tailscale-*` 헤더 삭제 후 `Tailscale-Funnel-Request` 부착, `X-Forwarded-For` Set, `--set-path` 는 StripPrefix).
+- 구현(브랜치 `claude/hub-public-funnel-20260922`, PR #9 위 스택 → #9 머지 뒤 retarget): `hub/server.py` — 공개 판정 = `proxy_header` 존재,
+  조회 라우트는 자격 검사 전 403 `not_public`, 공개 요청의 관리 시크릿은 어느 라우트에서도 무시, `POST /api/market/register`(429 → closed →
+  400 → 401 `bad_invite` → 403 `registration_full` → 발급), 기기 토큰 업로드(403 `device_revoked`/`device_mismatch`, 기기 당 429),
+  `RateLimiter` 3종(인증 실패는 공개 IP 만 — 직접 접속은 docker 브리지 IP 를 봇과 공유해 세면 봇이 막힌다), 설정 `invite_code`(8자↑·예시값·
+  `secret` 동일 거부)·`max_devices`·`admin_public`·`proxy_header`·limit 3개; `hub/db.py` — `devices` 표(additive)·메서드·stats
+  `label`/`devices_registered`/`devices_revoked`·busy timeout; `hub/devices.py` — list/revoke/unrevoke/note CLI(서버와 같은 DB, 취소 즉시
+  반영, 없는 DB 는 만들지 않음). Plan 에이전트 검토 반영: XFF **마지막** 항목, `registration_full` 은 5xx 아닌 403(exe 가 조용히 재시도하지
+  않게), `device_id` 는 exe 가 POST 시점에 채움, 취소는 soft. hub 테스트 **67 passed**(신규 39), 로컬 스모크 17단계 통과(127.0.0.1:8801).
+- 문서: HUB-PROTOCOL §0 전송 전제 개정·§1 devices·§3-0·§3-1·§3-4·§3-6·§6·§7, hub/README "공개 노출" 절(Funnel 절차·외부망 게이트·운영 메모,
+  `sed` 순서 INVITE 먼저), PLAN §PR-Y3 공개 항목·§PR-Y1b(관측기 키 `hub_url`·`hub_device_id`·`hub_token`, 첫 실행 등록, 429/401/403 규약)·G7.
+- 남은 것: `/code-review 10 high` 반영 → 머지 → Pi: hub/ 재복사 → `config.json` 에 `invite_code` 추가 → `docker compose up -d --build` →
+  `sudo tailscale funnel --bg 8800`(관리 콘솔 HTTPS·`funnel` 노드 속성) → 폰 LTE 게이트(`GET /` 200 · stats 403 · register 200/401) →
+  `devices.py list`. 그 뒤 PR-Y2' → PR-Y1b(등록 UX 포함).
 
 ## 현재 상태
 
@@ -99,6 +120,6 @@ SEAssist PR #306(PR-Y2) **미머지 → 닫음 예정, 이 레포로 이식(PR-Y
 3. **PR-Y2' 이식(이 레포)**: #306 worktree 의 프레이머 확장·`packet_market.py`·엔진 `market_cb`/헬스·테스트·`docs/PACKET-MARKET.md`(마스킹)·
    실캡처 대조 도구 → 이 레포 소유 코드로. 벤더 동결 처리 방식(패치 계층 vs 소유 전환, `sync_seassist_core.py`·`VENDOR.json`·`test_vendor` 핀)
    결정 포함. 검증 = 합성 프레임 테스트 + `%TEMP%\market-y2-corpus` 45창 오프라인 재생(9창 40페이지·라벨 8/8 재현).
-4. PR-Y1b(여기): `market_cb` → `load_item_table` 이름 해석 → 스풀 → `hub_url/hub_secret`(`%APPDATA%\YukTracker\config.json`)로 업로드
-   (HUB-PROTOCOL §3-1). 5. 실기기: Step 0 잔여 캡처 2창(라벨 5열 `@45` 검정 · 용병 탭 열람 · 수량 ≥65,536·타 PC 세션) ·
+4. PR-Y1b(여기): `market_cb` → `load_item_table` 이름 해석 → 스풀 → 첫 실행 `--invite-code` 등록(§3-0) → `hub_url/hub_device_id/hub_token`
+   (`%APPDATA%\YukTracker\config.json`)로 HTTPS 업로드(HUB-PROTOCOL §3-1; 429 대기·401/403 정지·`device_id` 는 POST 시점). 5. 실기기: Step 0 잔여 캡처 2창(라벨 5열 `@45` 검정 · 용병 탭 열람 · 수량 ≥65,536·타 PC 세션) ·
    `python tools\console_input_probe.py` 진단 → `_Console` 수정 PR. 6. PR-Y4 미루봇: `http://127.0.0.1:8800`, HUB-PROTOCOL §3-2/§3-3(`Lv.` 표시 보류).

@@ -1,5 +1,10 @@
-"""hub DB — 정규화 한 정의 · prune 경계 · 스키마 재오픈 · 배치 롤백."""
+"""hub DB — 정규화 한 정의 · prune 경계 · 스키마 재오픈 · 배치 롤백 · 기기 표."""
 from __future__ import annotations
+
+import re
+import sqlite3
+
+import pytest
 
 import db as db_mod
 
@@ -114,4 +119,67 @@ def test_insert_rolls_back_whole_batch_on_error(tmp_path):
     else:
         raise AssertionError("예외가 나야 한다")
     assert d.market_stats(20.0)["observations"] == 0  # 첫 관측도 롤백
+    d.close()
+
+
+# ---- 기기 표 ----
+
+def test_devices_create_lookup_record_revoke_note(tmp_path):
+    d = _open(tmp_path)
+    a = d.create_device("PC-A", "h1", 100.0, "203.0.113.7")
+    assert re.fullmatch(r"d-[0-9a-f]{10}", a)
+    assert d.get_device_by_token_hash("h1") == {"device_id": a, "label": "PC-A", "revoked_ts": None,
+                                                 "upload_count": 0, "last_seen_ts": None}
+    assert d.get_device_by_token_hash("nope") is None
+    d.record_device_upload(a, 150.0, True)
+    d.record_device_upload(a, 160.0, False)          # 저장 실패(500)는 last_seen 만
+    dev = d.get_device_by_token_hash("h1")
+    assert (dev["upload_count"], dev["last_seen_ts"]) == (1, 160.0)
+    assert d.count_active_devices() == 1
+    assert d.set_device_revoked(a, 200.0) is True and d.count_active_devices() == 0
+    assert d.get_device_by_token_hash("h1")["revoked_ts"] == 200.0
+    assert d.set_device_revoked("d-0000000000", 200.0) is False
+    assert d.set_device_note(a, "메모") is True and d.set_device_note("d-0000000000", "x") is False
+    assert d.set_device_revoked(a, None) is True and d.count_active_devices() == 1
+    (entry,) = d.list_devices()
+    assert entry == {"device_id": a, "label": "PC-A", "created_ts": 100.0, "created_ip": "203.0.113.7",
+                     "last_seen_ts": 160.0, "upload_count": 1, "revoked_ts": None, "note": "메모"}
+    with pytest.raises(sqlite3.IntegrityError):     # token_hash UNIQUE — 재생성으로 못 푼다
+        d.create_device("PC-B", "h1", 300.0, None)
+    assert d.count_active_devices() == 1             # 실패한 삽입은 롤백
+    b = d.create_device("PC-B", "h2", 300.0, None)
+    assert [x["device_id"] for x in d.list_devices()] == [a, b]   # created_ts 순
+    d.close()
+
+
+def test_device_id_collision_is_regenerated(tmp_path, monkeypatch):
+    d = _open(tmp_path)
+    ids = iter(["d-aaaaaaaaaa", "d-aaaaaaaaaa", "d-bbbbbbbbbb"])
+    monkeypatch.setattr(db_mod, "new_device_id", lambda: next(ids))
+    assert d.create_device("A", "h1", 1.0, None) == "d-aaaaaaaaaa"
+    assert d.create_device("B", "h2", 2.0, None) == "d-bbbbbbbbbb"   # 충돌 1회 → 재생성
+    d.close()
+
+
+def test_reopen_keeps_devices_and_prune_ignores_them(tmp_path):
+    d = _open(tmp_path)
+    a = d.create_device("A", "h1", 1.0, None)
+    d.close()
+    d2 = _open(tmp_path)
+    assert d2.prune(10**9) == (0, 0)
+    assert [x["device_id"] for x in d2.list_devices()] == [a]
+    assert d2.get_device_by_token_hash("h1")["device_id"] == a
+    d2.close()
+
+
+def test_stats_joins_label_and_counts(tmp_path):
+    d = _open(tmp_path)
+    a = d.create_device("PC-A", "h1", 1.0, None)
+    b = d.create_device("PC-B", "h2", 2.0, None)
+    d.set_device_revoked(b, 3.0)
+    d.insert_market_observations(a, [_obs("o1", 10.0, [_row()])], 10.0)
+    d.insert_market_observations("ADMIN", [_obs("o2", 10.0, [_row(listing_id=2)])], 10.0)
+    s = d.market_stats(20.0)
+    assert [(x["device_id"], x["label"], x["observations"]) for x in s["devices"]] == [("ADMIN", None, 1), (a, "PC-A", 1)]
+    assert (s["devices_registered"], s["devices_revoked"]) == (1, 1)
     d.close()

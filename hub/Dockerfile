@@ -5,7 +5,7 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY server.py db.py ./
+COPY server.py db.py devices.py ./
 
 EXPOSE 8800
 # DB 는 항상 볼륨(/data) — config.json 의 db_path 가 무엇이든 이 환경변수가 이긴다(server.load_config).

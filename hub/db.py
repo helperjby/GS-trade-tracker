@@ -1,14 +1,21 @@
-"""육의전 시세 허브 — SQLite 영속 계층. 단일 writer(서버 이벤트루프 스레드) 전용, 동기 호출.
+"""육의전 시세 허브 — SQLite 영속 계층. 동기 호출.
 
 스키마와 의미는 docs/HUB-PROTOCOL.md 가 정본. 배포된 DB 는 마이그레이션하지 않는다 —
 테이블·인덱스는 ``CREATE … IF NOT EXISTS`` 로 additive 하게만 더한다.
 
-세 표:
+네 표:
 - ``market_observations`` — 관측기가 올린 페이지(프레임) 1개 = 1행. ``obs_id`` PK 가 재전송 dedup.
   ``payload_json`` 은 봉투 원문이되 **행은 정규화된 키를 뺀 미지 키만** 남긴다(``payload_for_storage``) —
   행 본문은 ``market_listings`` 에 있으니 두 번 쓰지 않는다(SD 카드 쓰기·30일 저장량 절반).
 - ``market_listings`` — 등록(판매 건) 1개의 **최신 상태**. 같은 등록을 여러 번 보면 upsert.
 - ``market_item_names`` — 관측기가 함께 보낸 아이템 id→이름 누적(이름을 못 푼 행을 검색 때 보충).
+- ``devices`` — 초대 코드로 자기등록한 관측기 기기: 허브가 발급한 ``device_id`` 와 업로드 토큰의 sha256.
+  토큰 원문은 저장하지 않는다(등록 응답 1회만). 취소(``revoked_ts``)는 다음 요청부터 바로 먹는다 — 서버는
+  요청마다 이 표를 본다. prune 대상이 아니다.
+
+writer: market 표는 서버 이벤트루프 하나만 쓴다. ``devices`` 는 ``devices.py``(관리 CLI, 별도 프로세스)가 드물게
+한 행 UPDATE 를 넣는다 — WAL + busy timeout(``Database(timeout=)``) 아래서 서버의 업로드 트랜잭션과 안전하게 교차하고,
+최악은 서버 쪽 ``storage_error``(500) 한 번인데 관측기는 5xx 를 재시도한다.
 
 시각 규칙: ``seen_ts = min(agent_ts, recv_ts)`` — 스풀에 묵었다가 늦게 올라온 관측은 관측 시각을,
 관측기 시계가 서버보다 앞서면 서버 시각을 쓴다. 신선도 판정은 전부 ``seen_ts`` 계열(``last_seen_ts``).
@@ -22,6 +29,7 @@ from __future__ import annotations
 
 import json
 import os
+import secrets
 import sqlite3
 
 SCHEMA = """
@@ -47,12 +55,21 @@ CREATE INDEX IF NOT EXISTS idx_market_listings_seen_key ON market_listings(last_
 CREATE TABLE IF NOT EXISTS market_item_names (
   item_id INTEGER PRIMARY KEY, item_name TEXT NOT NULL, item_name_norm TEXT NOT NULL,
   first_seen_ts REAL NOT NULL, last_seen_ts REAL NOT NULL, last_device TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS devices (
+  device_id TEXT PRIMARY KEY,
+  label TEXT NOT NULL DEFAULT '',
+  token_hash TEXT NOT NULL UNIQUE,
+  created_ts REAL NOT NULL, created_ip TEXT,
+  last_seen_ts REAL, upload_count INTEGER NOT NULL DEFAULT 0,
+  revoked_ts REAL, note TEXT NOT NULL DEFAULT '');
 """
 
 DEFAULT_CATEGORY = "item"
 #: 행에서 ``market_listings`` 로 정규화되는 키 — payload_json 에는 이 밖의(미지) 키만 남긴다.
 ROW_NORMALIZED_KEYS = frozenset({"listing_id", "item_id", "item_name", "quantity", "price", "seller",
                                  "category", "flag45", "flag46"})
+#: device_id 생성 시도 상한 — 40비트 난수라 충돌은 사실상 없지만 무한 루프는 두지 않는다.
+DEVICE_ID_ATTEMPTS = 5
 
 
 def norm_item_name(name) -> str:
@@ -68,6 +85,12 @@ def listing_key(listing_id: int, item_id: int, seller: str) -> str:
     """등록 1건의 키 — 등록 id 만으로는 서버가 번호를 재사용할 때 다른 판매 건이 섞일 수 있어
     아이템 id·판매자를 붙인다(같은 등록의 수량 감소·재관측은 같은 키)."""
     return f"{listing_id}:{item_id}:{seller}"
+
+
+def new_device_id() -> str:
+    """허브가 발급하는 기기 id — ``d-`` + 10 hex. 사용자 PC 이름(display_name·hostname)은 여러 사용자가 같을 수
+    있어 식별자로 못 쓴다; 표시용 ``label`` 로만 받는다."""
+    return "d-" + secrets.token_hex(5)
 
 
 def _clean_name(value) -> str | None:
@@ -133,13 +156,16 @@ ON CONFLICT(item_id) DO UPDATE SET
   last_seen_ts   = MAX(last_seen_ts, excluded.last_seen_ts)
 """
 
+_DEVICE_COLUMNS = "device_id, label, created_ts, created_ip, last_seen_ts, upload_count, revoked_ts, note"
+
 
 class Database:
-    def __init__(self, path: str) -> None:
+    def __init__(self, path: str, timeout: float = 5.0) -> None:
+        """``timeout`` = sqlite busy timeout(초) — 다른 프로세스(devices.py)가 잠근 동안 기다리는 시간."""
         if path != ":memory:":
             parent = os.path.dirname(os.path.abspath(path))
             os.makedirs(parent, exist_ok=True)
-        self._con = sqlite3.connect(path)
+        self._con = sqlite3.connect(path, timeout=float(timeout))
         self._con.row_factory = sqlite3.Row
         self._con.execute("PRAGMA journal_mode=WAL")
         self._con.execute("PRAGMA synchronous=NORMAL")
@@ -200,6 +226,59 @@ class Database:
             raise
         return accepted, duplicates, rows_applied
 
+    # ---- 기기 (POST /api/market/register · 업로드 인증 · devices.py) ----
+
+    def create_device(self, label: str, token_hash: str, now: float, ip: str | None) -> str:
+        """기기 행 생성 → 발급한 ``device_id``. PK 충돌이면 id 를 다시 만든다(``DEVICE_ID_ATTEMPTS`` 회).
+        ``token_hash`` UNIQUE 충돌(32바이트 난수라 사실상 불가)은 재생성으로 못 풀어 IntegrityError 로 나간다."""
+        last_error: sqlite3.IntegrityError | None = None
+        for _ in range(DEVICE_ID_ATTEMPTS):
+            device_id = new_device_id()
+            try:
+                self._con.execute(
+                    "INSERT INTO devices (device_id, label, token_hash, created_ts, created_ip) VALUES (?, ?, ?, ?, ?)",
+                    (device_id, label, token_hash, now, ip))
+            except sqlite3.IntegrityError as e:
+                self._con.rollback()
+                last_error = e
+                continue
+            self._con.commit()
+            return device_id
+        raise sqlite3.IntegrityError(f"devices 삽입 {DEVICE_ID_ATTEMPTS}회 충돌") from last_error
+
+    def get_device_by_token_hash(self, token_hash: str) -> dict | None:
+        r = self._con.execute(
+            "SELECT device_id, label, revoked_ts, upload_count, last_seen_ts FROM devices WHERE token_hash = ?",
+            (token_hash,)).fetchone()
+        return dict(r) if r is not None else None
+
+    def count_active_devices(self) -> int:
+        """취소되지 않은 기기 수 — 등록 정원(``max_devices``) 판정용."""
+        return int(self._con.execute("SELECT COUNT(*) FROM devices WHERE revoked_ts IS NULL").fetchone()[0])
+
+    def record_device_upload(self, device_id: str, now: float, ok: bool) -> None:
+        """인증된 업로드 1회 기록 — ``last_seen_ts`` 는 항상, ``upload_count`` 는 저장에 성공했을 때만 +1."""
+        self._con.execute(
+            "UPDATE devices SET last_seen_ts = ?, upload_count = upload_count + ? WHERE device_id = ?",
+            (now, 1 if ok else 0, device_id))
+        self._con.commit()
+
+    def list_devices(self) -> list[dict]:
+        """토큰 해시는 싣지 않는다(CLI 출력·로그로 새지 않게)."""
+        return [dict(r) for r in self._con.execute(
+            f"SELECT {_DEVICE_COLUMNS} FROM devices ORDER BY created_ts, device_id").fetchall()]
+
+    def set_device_revoked(self, device_id: str, revoked_ts: float | None) -> bool:
+        """취소(시각) 또는 복구(None). 반환 = 그런 기기가 있었는지."""
+        cur = self._con.execute("UPDATE devices SET revoked_ts = ? WHERE device_id = ?", (revoked_ts, device_id))
+        self._con.commit()
+        return cur.rowcount == 1
+
+    def set_device_note(self, device_id: str, note: str) -> bool:
+        cur = self._con.execute("UPDATE devices SET note = ? WHERE device_id = ?", (note, device_id))
+        self._con.commit()
+        return cur.rowcount == 1
+
     # ---- 조회 (GET /api/market/*) ----
 
     @staticmethod
@@ -252,10 +331,13 @@ class Database:
         def one(sql: str, *params):
             return con.execute(sql, params).fetchone()[0]
 
-        devices = [{"device_id": r["device_id"], "observations": r["c"], "last_recv_ts": r["m"]}
+        # 관측을 올린 device_id 별 집계 + 등록 기기면 label(관리 시크릿으로 올린 자유 device_id 는 null).
+        devices = [{"device_id": r["device_id"], "label": r["label"], "observations": r["c"],
+                    "last_recv_ts": r["m"]}
                    for r in con.execute(
-                       "SELECT device_id, COUNT(*) AS c, MAX(recv_ts) AS m FROM market_observations "
-                       "GROUP BY device_id ORDER BY device_id").fetchall()]
+                       "SELECT o.device_id, d.label AS label, COUNT(*) AS c, MAX(o.recv_ts) AS m "
+                       "FROM market_observations o LEFT JOIN devices d ON d.device_id = o.device_id "
+                       "GROUP BY o.device_id ORDER BY o.device_id").fetchall()]
         return {
             "observations": one("SELECT COUNT(*) FROM market_observations"),
             "listings": one("SELECT COUNT(*) FROM market_listings"),
@@ -266,13 +348,15 @@ class Database:
             "fresh_sec": float(fresh_sec),
             "latest_recv_ts": one("SELECT MAX(recv_ts) FROM market_observations"),
             "devices": devices,
+            "devices_registered": one("SELECT COUNT(*) FROM devices WHERE revoked_ts IS NULL"),
+            "devices_revoked": one("SELECT COUNT(*) FROM devices WHERE revoked_ts IS NOT NULL"),
         }
 
     # ---- 보존 ----
 
     def prune(self, now: float, market_days: int = 30) -> tuple:
         """보존 기간 초과분 삭제 — 관측은 ``recv_ts``, 목록은 ``last_seen_ts`` 가 cutoff **미만**인 행만
-        (경계값 보존). 학습 표(``market_item_names``)는 작고 계속 쓸모 있어 지우지 않는다.
+        (경계값 보존). 학습 표(``market_item_names``)와 기기 표(``devices``)는 작고 계속 쓸모 있어 지우지 않는다.
         반환 (삭제된 관측 수, 삭제된 목록 행 수).
         """
         cutoff = now - int(market_days) * 86400

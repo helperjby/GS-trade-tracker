@@ -1,7 +1,8 @@
 """테스트 공용 헬퍼 — pytest-aiohttp 미도입 방침이라 각 테스트가 ``asyncio.run(...)`` +
 ``aiohttp.test_utils`` 를 직접 쓴다(SEAssist dashboard 테스트와 같은 패턴, CI 의존성 = aiohttp + pytest).
 
-데이터는 전부 합성 — 판매자 ``판매자A`` 류, 기기 ``DEV-1`` 류. 실제 판매자명·창 파일은 쓰지 않는다.
+데이터는 전부 합성 — 판매자 ``판매자A`` 류, 기기 ``DEV-1`` 류, IP 는 TEST-NET(203.0.113.0/24·198.51.100.0/24).
+실제 판매자명·창 파일은 쓰지 않는다.
 """
 from __future__ import annotations
 
@@ -14,6 +15,9 @@ import server as server_mod
 
 SECRET = "test-secret"
 AUTH = {"Authorization": "Bearer " + SECRET}
+INVITE = "test-invite-code"
+#: Funnel 경유 흉내 — tailscaled 가 붙이는 두 헤더(HUB-PROTOCOL §0). 값은 무관, 존재만 본다.
+PROXY = {"Tailscale-Funnel-Request": "?1", "X-Forwarded-For": "203.0.113.7"}
 
 #: 실제 응답(0x321f) 페이지의 행 직렬화 키 — SEAssist ``packet_market.row_to_dict`` + 관측기의 ``item_name``.
 ROW_DEFAULTS = {
@@ -26,6 +30,7 @@ ROW_DEFAULTS = {
 def make_cfg(tmp_path, **over) -> dict:
     cfg = copy.deepcopy(server_mod.DEFAULTS)
     cfg["secret"] = SECRET
+    cfg["invite_code"] = INVITE
     cfg["db_path"] = str(tmp_path / "hub.db")
     cfg.update(over)
     return cfg
@@ -72,3 +77,14 @@ async def post(client, payload, headers=AUTH):
 async def get(client, path: str, params=None, headers=AUTH):
     resp = await client.get(path, params=params, headers=headers)
     return resp.status, await resp.json()
+
+
+async def register(client, invite=INVITE, label="PC-1", headers=None, **extra):
+    """``POST /api/market/register`` — 무 Bearer. ``headers=PROXY`` 면 Funnel 경유 흉내."""
+    payload = {"v": 1, "invite_code": invite, "label": label, **extra}
+    resp = await client.post("/api/market/register", json=payload, headers=headers)
+    return resp.status, await resp.json()
+
+
+def device_auth(token: str) -> dict:
+    return {"Authorization": "Bearer " + token}

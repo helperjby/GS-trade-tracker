@@ -1,12 +1,33 @@
 # 육의전 시세 허브 — 프로토콜 (HUB-PROTOCOL v1, 2026-09-22)
 
-관측기(YukTracker, PR-Y1b) → 허브(`hub/`, Pi:8800) → 미루봇-IRIS(PR-Y4) 사이의 계약. 구현은 `hub/server.py`·`hub/db.py`,
-테스트 `hub/tests/`. 이 문서가 정본이고 코드가 어긋나면 코드가 틀린 것이다.
+관측기(YukTracker, PR-Y1b) → 허브(`hub/`, Pi:8800) → 미루봇-IRIS(PR-Y4) 사이의 계약. 구현은 `hub/server.py`·`hub/db.py`·
+`hub/devices.py`, 테스트 `hub/tests/`. 이 문서가 정본이고 코드가 어긋나면 코드가 틀린 것이다.
 
 ## 0. 공통 규칙
 
-- 전송: HTTP/1.1 평문 + JSON(UTF-8). tailnet/LAN 안에서만(포트포워딩 금지). 인증은 **공유 시크릿 1개** —
-  `/api/*` 전부 `Authorization: Bearer <secret>`, 불일치·누락은 `401 {"error":"unauthorized"}`. `GET /` 만 무인증.
+- 전송: JSON(UTF-8) over HTTP/1.1. 허브는 **Tailscale Funnel** 로 포트째 공개 인터넷에 나간다(`https://<pi-node>.<tailnet>.ts.net/`
+  → Pi 의 127.0.0.1:8800, 공유기 포트포워딩 없음) — 관측기가 **Npcap 만 있는 일반 사용자 PC** 에서 올려야 하므로 VPN 은 전제하지
+  않는다(2026-09-22 결정). Pi 안(봇 127.0.0.1)·LAN·tailnet 의 **직접 접속**은 평문 HTTP 그대로. 자격은 두 종류:
+  - **관리 시크릿** `secret` — 조회(`search`·`listings`·`stats`)와 제작자 업로드. **Funnel 을 타지 않는다**: exe 에 넣지 않고,
+    공개 요청에서는 어느 라우트에서도 인정하지 않는다(`admin_public` false).
+  - **기기 토큰** — 초대 코드로 자기등록(§3-0)한 기기마다 1개. `POST /api/market/observations` 에만 통한다.
+
+  공개 요청 판정 = tailscaled 가 Funnel 요청에 붙이는 `Tailscale-Funnel-Request` 헤더(`proxy_header`)의 **존재**(값 무관).
+  tailscaled 는 클라이언트가 보낸 같은 이름의 헤더를 지운 뒤 붙이므로 공개 쪽에서 위조·제거가 안 되고, 직접 접속 클라이언트가
+  붙이면 스스로 더 제한될 뿐이다. 속도제한·로그의 클라이언트 IP 는 공개 요청이면 `X-Forwarded-For` **마지막** 항목(프록시가
+  붙인 원 IP), 직접 접속이면 소켓 peer — 컨테이너 안에서는 docker 브리지 IP 라 봇·Funnel 프록시가 같아 신호가 못 된다.
+
+  | 라우트 | 공개(Funnel) 요청 | 자격 |
+  |---|---|---|
+  | `GET /` | 허용 | 없음 |
+  | `POST /api/market/register` | 허용 | 초대 코드(본문) + IP 속도제한 |
+  | `POST /api/market/observations` | 허용 | 기기 토큰 `Authorization: Bearer <token>`; 직접 접속이면 관리 시크릿도 |
+  | `GET /api/market/search` `listings` `stats` | **`403 {"ok":false,"error":"not_public"}`**(자격 검사 전) | 관리 시크릿 `Authorization: Bearer <secret>` |
+
+  자격 없음·불일치·범위 밖(기기 토큰으로 조회, 공개 요청의 관리 시크릿)은 전부 `401 {"error":"unauthorized"}`.
+- 속도제한(프로세스 메모리, 재기동이면 리셋): 등록 IP 당 `register_limit_per_hour`(10), 업로드 기기 당 `upload_limit_per_min`(120,
+  관리 시크릿은 무제한), 인증 실패 **공개 요청** IP 당 `auth_fail_limit_per_min`(30 — 직접 접속은 브리지 IP 를 봇과 공유하므로
+  세지 않는다). 초과는 `429 {"ok":false,"error":"rate_limited","retry_after":N}` + `Retry-After: N` — N 초 뒤 재시도(§3-1 관측기 규약).
 - **additive-only**: 필드는 더하기만 하고 이름·의미를 바꾸지 않는다. 읽는 쪽은 미지 키를 무시한다(tolerant reader).
   응답의 `"v": 1` 은 이 문서의 판.
 - 시각은 전부 Unix epoch 초(float). 서버 응답엔 항상 `server_time` 이 있어 클라이언트 시계 오프셋을 보정할 수 있다.
@@ -34,6 +55,13 @@ CREATE TABLE market_listings (          -- 등록(판매 건) 1개의 최신 상
 CREATE TABLE market_item_names (        -- 학습 표: 관측기가 보낸 id→이름 누적
   item_id INTEGER PRIMARY KEY, item_name TEXT NOT NULL, item_name_norm TEXT NOT NULL,
   first_seen_ts REAL NOT NULL, last_seen_ts REAL NOT NULL, last_device TEXT NOT NULL);
+CREATE TABLE devices (                  -- 초대 코드로 자기등록한 관측기 기기 (§3-0); prune 대상 아님
+  device_id TEXT PRIMARY KEY,           -- 허브 발급 "d-"+10hex — 사용자 PC 이름은 다른 사용자와 겹칠 수 있어 식별자로 안 쓴다
+  label TEXT NOT NULL DEFAULT '',       -- 사용자 표시명(display_name·hostname), 인쇄 가능 문자 ≤64
+  token_hash TEXT NOT NULL UNIQUE,      -- sha256(token) hex — 토큰 원문은 등록 응답 1회만, 저장하지 않는다
+  created_ts REAL NOT NULL, created_ip TEXT,
+  last_seen_ts REAL, upload_count INTEGER NOT NULL DEFAULT 0,   -- 인증된 업로드마다 last_seen, 저장 성공이면 +1
+  revoked_ts REAL, note TEXT NOT NULL DEFAULT '');              -- 취소 = 다음 요청부터 403 (요청마다 조회, 캐시 없음)
 ```
 
 - `listing_key` 에 아이템 id·판매자를 붙이는 이유: 등록 id 가 재사용돼도 다른 판매 건이 섞이지 않게. 같은 등록의
@@ -45,6 +73,8 @@ CREATE TABLE market_item_names (        -- 학습 표: 관측기가 보낸 id→
   (중복 obs_id 는 가산 없음). 인덱스 `(last_seen_ts, listing_key)` 가 §3-3 커서를 받친다.
 - 이름 학습: 행에 `item_name` 이 있으면 `market_item_names` 에 upsert. 조회 때 행의 `item_name` 이 NULL 이면 이 표로
   보충한다(`COALESCE`) — 표가 없는 PC 의 관측도 다른 PC 가 한 번이라도 이름을 보냈으면 검색된다.
+- 기기 표: market 표는 서버 이벤트루프만 쓰지만 `devices` 는 관리 CLI `hub/devices.py`(별도 프로세스, §3-6)가 드물게 한 행 UPDATE 를
+  넣는다 — WAL + busy timeout. 취소된 기기·재등록으로 버려진 옛 행은 지우지 않는다(`stats` 에 남아 추적).
 
 ## 2. 정규화 한 정의
 
@@ -54,6 +84,34 @@ CREATE TABLE market_item_names (        -- 학습 표: 관측기가 보낸 id→
 **부분 문자열**(`instr`), 예: `봉인의 돌` → `봉인의돌` 은 `봉인의돌`·`봉인의돌(상)` 에 맞는다.
 
 ## 3. REST
+
+### 3-0. `POST /api/market/register` — 초대 코드 → 기기 토큰 (무 Bearer, 공개)
+
+```jsonc
+// → 요청
+{"v":1, "invite_code":"<커뮤니티에 공유된 초대 코드>", "label":"DESKTOP-ABC"}   // label 선택(표시용, 인쇄 가능 문자 ≤64, 없음·null = "")
+// ← 200
+{"ok":true,"v":1,"device_id":"d-3f9a1c7e2b","token":"<43자 urlsafe>","server_time":1758500000.5}
+```
+
+검사 순서(고정): ① IP 속도제한 — 성공·실패 모두 센다(코드 비교 전에 무차별 대입 상한) → ② 등록 닫힘 → ③ 본문 → ④ 코드 →
+⑤ 정원 → ⑥ 발급.
+
+| 응답 | 조건 |
+|---|---|
+| `429 rate_limited` + `Retry-After` | IP 당 `register_limit_per_hour` 초과 |
+| `403 {"ok":false,"error":"registration_closed"}` | 설정 `invite_code` 가 비어 있음 |
+| `400 {"ok":false,"error":"bad_request","field"?}` | 비 JSON·dict 아님 / `invite_code` 가 문자열 아님·빈 값 / `label` 이 문자열 아님·64자 초과·제어 문자 |
+| `401 {"ok":false,"error":"bad_invite"}` | 코드 불일치(상수 시간 비교) |
+| `403 {"ok":false,"error":"registration_full"}` | 활성(미취소) 기기 ≥ `max_devices` — 5xx 가 아닌 이유: 관측기가 조용히 재시도하지 않게 |
+| `500 {"ok":false,"error":"storage_error","server_time"}` | DB 오류 |
+
+- `device_id` 는 허브가 발급한다. 관측기는 `device_id`·`token` 을 저장하고 이후 업로드의 `device_id` 에 **그 값**을 쓴다(§3-1) —
+  초대 코드는 저장하지 않는다(재등록은 명시적 `--invite-code` 실행에서만).
+- 등록은 비멱등: 재등록(재설치·토큰 분실)은 새 기기이고 옛 행은 남는다. 200 뒤 저장 실패 같은 고아 행은 `last_seen_ts` null 로 보이고
+  취소하면 된다.
+- 취소(§3-6)는 **soft** — 같은 초대 코드로 다시 등록할 수 있다. 남용은 `invite_code` 교체(설정 + 재기동): 기존 토큰은 살고 신규 등록만
+  막힌다.
 
 ### 3-1. `POST /api/market/observations` — 관측기 업로드 (at-least-once, 배치)
 
@@ -75,7 +133,7 @@ CREATE TABLE market_item_names (        -- 학습 표: 관측기가 보낸 id→
 
 | 필드 | 형 | 규칙 |
 |---|---|---|
-| `device_id` | str 1~128 | 관측기 기기명(SEAssist `display_name` 과 같은 값). 요청 단위 |
+| `device_id` | str 1~128 | 기기 토큰이면 §3-0 이 발급한 `device_id`(다르면 `403 device_mismatch`), 관리 시크릿이면 자유 문자열(기기명). 요청 단위 |
 | `obs_id` | str 1~128 | PK. 같은 값 재전송은 `duplicates` 로 세고 **아무것도 바꾸지 않는다** |
 | `agent_ts` | number | 관측기 벽시계(프레임 수신 시각). 서버는 `seen_ts = min(agent_ts, recv_ts)` 로 쓴다. 허용 범위 `[recv_ts − retention_market_days, recv_ts + max_agent_ts_ahead_sec(86400)]` — 밖이면 `400 agent_ts_out_of_range`(시계가 리셋된 기기의 관측이 200 을 받고 조회에 안 보이다 prune 에 사라지는 것을 막는다) |
 | `opcode` | int | 관측 프레임 opcode(현재 `0x321f`) |
@@ -93,12 +151,18 @@ CREATE TABLE market_item_names (        -- 학습 표: 관측기가 보낸 id→
 | `400 {"ok":false,"error":"bad_request","index"?,"field"?}` | 비 JSON / dict 아님 / 필수 필드 형·범위·길이 위반 — `index` 는 관측 순번, `field` 는 `rows[3].price` 꼴. **그 요청은 아무것도 쓰지 않는다** |
 | `400 … "error":"too_many"` | 관측 >100 또는 관측당 행 >64 (`max_observations_per_request`·`max_rows_per_observation`) |
 | `400 … "error":"agent_ts_out_of_range","index","field":"agent_ts"` | `agent_ts` 가 허용 범위 밖(관측기 시계 리셋·폭주) — 관측기는 그 배치를 격리하고 시계를 의심한다 |
-| `401` | Bearer 불일치 |
+| `401 {"error":"unauthorized"}` | 토큰 없음·무효, 공개 요청의 관리 시크릿 |
+| `403 {"ok":false,"error":"device_revoked"}` | 기기 토큰이 취소됨(§3-6) — 관측기는 업로드를 멈추고 사용자에게 알린다 |
+| `403 {"ok":false,"error":"device_mismatch","device_id":"<기대값>"}` | 기기 토큰인데 본문 `device_id` 가 토큰의 기기와 다름(400 검증 뒤) — 관측기 설정 불일치 |
+| `429 {"ok":false,"error":"rate_limited","retry_after":N}` + `Retry-After` | 기기 당 `upload_limit_per_min` 초과(관리 시크릿은 무제한) |
 | `413` | 본문 4MiB 초과(aiohttp) — 관측기는 배치를 나눈다 |
 | `500 {"ok":false,"error":"storage_error","server_time"}` | 검증 통과 뒤 DB 오류(디스크·잠금) — 관측기는 5xx 로 재시도 |
 
 관측기 규약(PR-Y1b): 스풀 파일을 성공 응답(200) 뒤에만 지운다. 네트워크 실패·5xx 는 지수 백오프 재시도, 400 은 그 배치를
-격리 폴더로 옮기고 로그를 남긴다(재시도해도 같은 400). 같은 `obs_id` 가 두 번 가는 것은 정상(허브가 dedup).
+격리 폴더로 옮기고 로그를 남긴다(재시도해도 같은 400). **429 는 `Retry-After` 초 기다렸다 재시도**(스풀 유지, 격리 아님).
+**401·403 은 업로더를 멈추고**(스풀 유지) 상태 줄에 사유를 보인다 — 자동 재등록 금지, 사용자가 `--invite-code` 로 다시 등록한다;
+`device_mismatch` 는 응답의 `device_id` 와 설정을 대조한다. `device_id` 는 스풀 파일이 아니라 **POST 시점**에 채운다(재등록 뒤
+옛 스풀이 영구 mismatch 되지 않게). 같은 `obs_id` 가 두 번 가는 것은 정상(허브가 dedup).
 
 ### 3-2. `GET /api/market/search?q=&item_id=&limit=&max_age_sec=` — 이름 검색 (미루봇 `!육의전 <아이템>`)
 
@@ -143,12 +207,27 @@ CREATE TABLE market_item_names (        -- 학습 표: 관측기가 보낸 id→
 ```jsonc
 {"v":1,"server_time":…,"observations":412,"listings":1380,"items":97,"item_names":95,
  "fresh_listings":210,"fresh_sec":86400.0,"latest_recv_ts":1758500055.2,
- "devices":[{"device_id":"DEV-A","observations":300,"last_recv_ts":…},{"device_id":"DEV-B","observations":112,"last_recv_ts":…}]}
+ "devices":[{"device_id":"d-3f9a1c7e2b","label":"DESKTOP-ABC","observations":300,"last_recv_ts":…},   // label: 등록 기기의 표시명,
+            {"device_id":"DEV-B","label":null,"observations":112,"last_recv_ts":…}],                 //        관리 시크릿 업로드는 null
+ "devices_registered":7,"devices_revoked":1}                                                          // devices 표 집계(활성 / 취소)
 ```
 
 ### 3-5. `GET /` — 무인증 상태 줄
 
-`{"service":"yuktracker-hub","v":1,"server_time":…}` — 접속·healthcheck 확인용, 데이터 없음.
+`{"service":"yuktracker-hub","v":1,"server_time":…}` — 접속·healthcheck 확인용, 데이터 없음. 공개 요청도 200.
+
+### 3-6. 기기 관리 — `hub/devices.py` (HTTP 아님, Pi 에서)
+
+```bash
+docker compose exec yuktracker-hub python devices.py list                      # device_id label created last_seen uploads revoked note
+docker compose exec yuktracker-hub python devices.py revoke <device_id> --note "사유"
+docker compose exec yuktracker-hub python devices.py unrevoke <device_id>
+docker compose exec yuktracker-hub python devices.py note <device_id> "메모"
+```
+
+서버와 같은 SQLite 파일(`HUB_DB_PATH`)에 직접 쓴다 — 서버는 요청마다 토큰을 조회하므로 취소는 다음 업로드부터 `403 device_revoked`.
+HTTP 관리 라우트를 두지 않는 이유: 공개 표면을 늘리지 않고 셸에 시크릿이 필요 없다. 토큰 해시는 출력하지 않는다. 없는 DB 경로는
+만들지 않는다(exit 1).
 
 ## 4. 시각·신선도
 
@@ -172,8 +251,16 @@ CREATE TABLE market_item_names (        -- 학습 표: 관측기가 보낸 id→
 시크릿으로 쓰기 API 가 LAN 에 열린다) `db_path`(상대 경로는 **config 파일 폴더 기준**; 환경변수 `HUB_DB_PATH` 가 있으면 그것이
 이긴다 — 컨테이너는 Dockerfile 이 `/data/hub.db` 로 고정) `retention_market_days`(30) `search_max_age_sec`(86400)
 `search_limit_default`(20) `search_limit_max`(100) `listings_limit_default`(500) `listings_limit_max`(2000)
-`max_observations_per_request`(100) `max_rows_per_observation`(64) `max_agent_ts_ahead_sec`(86400). 관측기 쪽 키(PR-Y1b):
-`hub_url`·`hub_secret`(`%APPDATA%\YukTracker\config.json`).
+`max_observations_per_request`(100) `max_rows_per_observation`(64) `max_agent_ts_ahead_sec`(86400).
+
+공개·등록(2026-09-22): `invite_code`(비어 있으면 등록 닫힘; 있으면 **8자 이상**, 예시값 `CHANGE-ME-INVITE`·`secret` 과 같은 값은 기동
+거부 — 초대 코드는 커뮤니티에 공유하는 반공개 값) `max_devices`(500, 활성 기준) `admin_public`(false) `proxy_header`
+(`Tailscale-Funnel-Request`; Cloudflare Tunnel 로 바꾸면 `CF-Connecting-IP`) `register_limit_per_hour`(10) `upload_limit_per_min`(120)
+`auth_fail_limit_per_min`(30). 설정은 기동 때 읽는다 — 초대 코드 교체는 `config.json` 수정 뒤 `docker compose restart`.
+
+관측기 쪽 키(PR-Y1b, `%APPDATA%\YukTracker\config.json`): `hub_url`(공개 Funnel 주소; exe 내장 기본값) · `hub_device_id` · `hub_token`
+(§3-0 응답 저장). 초대 코드는 `--invite-code` 인자/첫 실행 프롬프트로만 받고 저장하지 않는다. 구 `hub_secret` 키는 폐기 — 관리
+시크릿은 exe 에 들어가지 않는다.
 
 ## 7. 변경 이력
 
@@ -181,3 +268,7 @@ CREATE TABLE market_item_names (        -- 학습 표: 관측기가 보낸 id→
 - 2026-09-22 v1 리뷰 반영(PR #6, additive): §3-3 복합 keyset 커서(`since_key`·`next_since_key`·행 `listing_key`), §3-1 i64 범위·
   문자열 상한·`agent_ts_out_of_range`·`500 storage_error`·payload 행은 미지 키만, §3-2 `item_id` 400, §1 이름 upsert 규칙,
   §6 secret 규칙·`db_path` 기준·`HUB_DB_PATH`·`max_agent_ts_ahead_sec`, DB `synchronous=NORMAL`.
+- 2026-09-22 v1 공개 업로드(additive, 사용자 결정: 관측기는 Npcap 만 있는 일반 사용자 PC 에서 돈다 → VPN 전제 폐기): §0 전송 전제
+  개정 — Tailscale Funnel 공개 + 자격 2종(관리 시크릿은 직접 접속 전용·exe 금지, 기기 토큰) + `Tailscale-Funnel-Request` 공개 판정 +
+  속도제한 429; §1 `devices`; §3-0 register; §3-1 `device_id` 규칙·401/403/429·관측기 규약; §3-4 `label`·`devices_registered/revoked`;
+  §3-6 `devices.py`; §6 새 설정 키·관측기 키(`hub_secret` 폐기).
