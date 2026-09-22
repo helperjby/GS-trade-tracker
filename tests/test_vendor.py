@@ -53,6 +53,10 @@ class ImportBoundaryTest(unittest.TestCase):
         "__future__", "argparse", "base64", "ctypes", "collections", "dataclasses", "datetime",
         "hashlib", "ipaddress", "json", "logging", "os", "pathlib", "platform", "queue", "re",
         "socket", "subprocess", "sys", "threading", "time", "traceback", "types", "typing",
+        # zlib — item_names.py 가 클라 gersang.gcs 의 스트림을 inflate 한다(내장 확장, PyInstaller 기본 포함).
+        "zlib",
+        # tempfile — item_names.py 캐시 쓰기의 고유 이름 tmp(mkstemp) — 관측기 두 개가 겹쳐도 안전.
+        "tempfile",
     }
 
     def test_static_imports(self) -> None:
@@ -63,7 +67,7 @@ class ImportBoundaryTest(unittest.TestCase):
             self.assertEqual(external, set(), f"{path.relative_to(SRC)}: 허용 밖 import {external}")
 
     def test_runtime_import_is_light(self) -> None:
-        code = ("import sys; import yuktracker.agent, yuktracker.cli; "
+        code = ("import sys; import yuktracker.agent, yuktracker.cli, yuktracker.item_names; "
                 "bad=[m for m in ('cv2','numpy','PIL','win32gui','win32api','google') "
                 "if m in sys.modules]; print('HEAVY=' + ','.join(bad))")
         out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True,

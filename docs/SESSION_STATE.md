@@ -1,6 +1,7 @@
 # Session State
 
-Updated: 2026-09-21 (Asia/Seoul) — Step 1 분석 = SEAssist **PR #304**(머지) + **#305**(페이지·음성 2창 → B 제안) · 라벨 운용 수정 = **PR #2**(머지)
+Updated: 2026-09-22 (Asia/Seoul) — **PR-Y2 = SEAssist PR #306**(https://github.com/helperjby/gersang-auto-eating/pull/306, 브랜치 `claude/market-y2-20260921`, 커밋 6개, 리뷰·머지 대기) ·
+**PR-Y2b 아이템 표 추출기 = 이 레포 PR #5**(https://github.com/helperjby/GS-trade-tracker/pull/5, `/code-review 5 high` 15건 전부 반영 2026-09-22, 머지 대기) · Step 1 = SEAssist #304·#305(머지)
 
 ## 현재 상태
 
@@ -41,13 +42,35 @@ Updated: 2026-09-21 (Asia/Seoul) — Step 1 분석 = SEAssist **PR #304**(머지
   열기(`0x2f1c`)에서 `0x321f` 0 → **음성 2/2**. 합계 양성 9창·5세션·3PC / 음성 2창, 예측 (1)~(4) 위반 0 → **등급 B 제안**(리뷰어 판정,
   스윕·경계값 일부 미실시라 A 아님). `물품구매` 버튼·창 닫기는 s2c 없음.
 
+- **PR-Y2 구현(2026-09-21 밤, SEAssist worktree `C:\dev\gersang\.claude\worktrees\market-y2-20260921`, 브랜치 `claude/market-y2-20260921`
+  ← `origin/main` b54cb73 = #303·#304·#305 전부 머지된 상태)**: 사용자 결정 ① PR-Y2 → PR-Y2b 순서 ② **H-2609-08 을 B 로 승격**(리뷰어 판정)
+  ③ 아이템 이름은 관측기가 업로드 때 붙임. 커밋: 프레이머(`MARKET_OPCODES`·`is_market`·`observe_market` opt-in 전량 대기 3,081B·`MarketObservation`) +
+  `packet_market.py` 파서(구조 불일치 None, C/D 필드 anomaly) → 엔진 `market_cb`·헬스 7종·`note_market` 원장·App status → `explore market`
+  (라이브·오프라인·프로브 3중 대조, `--mask`)·`market --shadow` → 코퍼스 `market` 열 + 창 9개 등록(**45창 76,488프레임 / market 39 / jochul 5**,
+  wordinput 56창 무변경) → 문서(PROCESS §3.1 B, H-2609-10/11 제안, FINDINGS §5.4, TOOLS, PACKET-MARKET 부록, CHANGELOG) → 패치 재검사
+  도구 `market` 열. 실캡처 80창: 9창 40페이지 라이브 == 오프라인 == 프로브, 라벨 8/8. 전체 스위트 4,001 passed. **PR #306** 생성(2026-09-21 밤). 머지 직전 수동: 9 파일을 `15. Gersang auto eating\packet\<디바이스>\packet_discovery\` 에 복사 → 두 검사 재실행.
+- **아이템 id → 이름 표 출처 결정(2026-09-21)**: 클라 `gersang.gcs` 의 `육의전 검색 기능 리스트`(4,001행) — 라벨 8/8·관측 188 id 중 186(3251 강화품 표,
+  1449232 미상 — 용병 탭 추정). **PR-Y2b 구현(이 레포)**: `src/yuktracker/item_names.py`(순차 zlib 스캔·마커 식별·정규화·캐시·클라 탐색),
+  `paths.py`, `game_processes.process_image_path`, `tools/dump_item_names.py`(`--check` 실기기: 4,001행·앵커 8/8·0.22s, 실행 중 클라 폴더 자동 탐색),
+  합성 아카이브 테스트, `zlib` 허용, `.gitignore item_names*.json`, README·AGENTS·PLAN 갱신. UI 열 대응(사용자 스크린샷): 물품명·판매개수·판매자·단가
+  ↔ `@4`·`@8`·`@24`·`@16`; 레벨 = 용병 탭 전용(추후); 기간(장기/단기) ↔ `@45` 후보(H-2609-11).
+- **PR #5 리뷰 반영(2026-09-22, `/code-review 5 high` 15건 전부)**: 캐시 유효성 = 같은 경로 (크기, mtime) / 다른 사본 전체 sha256
+  (앞 1MiB `head_sha256` 제거, `CACHE_VERSION` 2 — 크기 같은 패치를 영원히 놓치던 결함) · `refresh` 여도 캐시 폴백 유지 · id 는 ASCII 숫자만
+  (`²` 행 하나가 표 전체를 잃게 하던 `isdigit`→`int`) · 크기 상한은 읽기 전 stat + 읽는 동안 변경 감지(캐시 오염 방지) · `write_json` mkstemp ·
+  `ItemTable.raw` int 키 정규화 한 번 · 고정 폴더(`--client-dir`/env)에 gcs 없으면 다른 클라로 안 넘어감 + `%VAR%`/`~` 확장 ·
+  `LoadResult(origin/gcs_path/error)` 로 도구가 hit/miss·종료 코드를 정확히(gcs 있는데 표 없음 = rc 1, `--check` 는 캐시 폴백도 실패) ·
+  `--ids-from` 은 `아이템=N` 만 + UTF-8→cp949 · `paths.app_dir` 순수(`--help` 가 폴더 안 만듦, 심 `appdata_base` 공용) ·
+  `process_image_path` 32767 재시도 · 시각 `Z` 한 형식 · 문서 수치 정정(8.4MB·1,247 스트림·추출 0.12s). 실기기: `--check --refresh`
+  4,001행·앵커 8/8·0.16s, 사본 Gersang2 는 sha 로 캐시 hit, `--client-dir C:\AKInteractive`(gcs 없음) → 경고 + rc 2.
+
 ## 다음 행동
 
-1. `python tools\console_input_probe.py` 를 관측기와 같은 콘솔에서 돌려 살아남는 읽기 방식 확인 → `_Console` 수정 PR.
-2. Step 0 잔여 — 음성 2/2 완료(09-21). A 등급용(급하지 않음): 용병(Lv) 목록 행, 수량 ≥65,536 경계, 다른 PC 세션 추가,
-   PR-Y2 파서로 G6 코퍼스 재생. B 승격 판정은 SEAssist 리뷰(PR #305).
-3. Step 1 잔여 — `@40`(프레임 상수)·`@45`(1|2)·`@46`(0~7) 의미(서버·카테고리·등급 바꿔 열기), 아이템 id→이름 표 출처
-   (클라 리소스 / 라벨 누적 — 8건 시드 / OCR) 결정 → SEAssist PROCESS §3 H-2609-08 갱신. 재현: `python scripts/packet_market_probe.py --root <packet>`.
-4. PR-Y2(SEAssist): `MARKET_OPCODES = {0x321f}`(H-2609-08 B 승격 뒤)·전량 대기·`packet_market.py`(9B 헤더 + 48B 행 파서)·원장·코퍼스 → 동기화로 가져오기.
-5. PR-Y3(SEAssist `dashboard/`): market 테이블·`POST /api/market/observations`·`GET /api/market/search`.
-6. PR-Y1b(여기): 파서 → 스풀 → 업로드 관측 모드.
+1. **SEAssist PR #306 리뷰·머지** — 머지 직전 9창을 `15. Gersang auto eating\packet\<디바이스>\packet_discovery\` 에 복사하고 두 검사
+   재실행(PACKET-MARKET 부록). 2. **이 레포 PR #5 머지**(리뷰 15건 반영 완료 2026-09-22) — SEAssist 와 독립; 머지 뒤 PR #6 base → `main`.
+3. SEAssist PR-Y2 머지 뒤 여기 동기화: `tools/sync_seassist_core.py` `MODULES += "packet_market.py"` **먼저** → `--source <머지된 main>` →
+   VENDOR.json → 스모크 테스트(`packet_market` import + `FlowDecoder(observe_market=True)`).
+4. Step 0 잔여 캡처 2창: ① 아이템 탭에서 라벨 5열(`아이템, 수량, 판매자, 단가, 기간` — 예 `정기의구슬(風), 10, <판매자>, 45,000,000, 장기`)
+   → H-2609-11(`@45`) 검정 ② **용병 탭** 열람 → 같은 `0x321f` 인지·레벨 필드·1449232 류 행. A 승격용: 수량 ≥65,536·타 PC 세션.
+5. `python tools\console_input_probe.py` 로 콘솔 한글 입력 잘림 진단 → `_Console` 수정 PR.
+6. PR-Y3(SEAssist `dashboard/`): market 테이블(`item_id` + `item_name` null 허용 + 학습 표 `market_item_names`)·`POST /api/market/observations`·
+   `GET /api/market/search`. 7. PR-Y1b(여기): `market_cb` → 이름 해석(`load_item_table`) → 스풀 → 업로드. 8. PR-Y4 미루봇(`Lv.` 표시 보류).

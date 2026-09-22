@@ -1,4 +1,4 @@
-"""SEAssist `config` 모듈의 심 — 벤더 사본이 부르는 두 함수만 (이 프로젝트 소유, 동기화 제외).
+"""SEAssist `config` 모듈의 심 — 벤더 사본이 부르는 두 함수 + 공용 `appdata_base()` (이 프로젝트 소유, 동기화 제외).
 
 SEAssist 의 `config.py` 는 3,900줄짜리 설정·프로파일 모듈이고 템플릿 b64·시나리오 상수를
 끌고 온다. 벤더 사본(`packet_discovery_ledger`·`ledger_paths`)이 실제로 쓰는 것은
@@ -35,9 +35,13 @@ SETTINGS_KEYS = (
 )
 
 
+def appdata_base() -> Path:
+    """`%APPDATA%`(없으면 홈) — 이 심과 프로젝트의 `paths.app_dir` 이 같은 폴백 규칙을 쓴다."""
+    return Path(os.environ.get("APPDATA") or Path.home())
+
+
 def app_dir() -> Path:
-    base = os.environ.get("APPDATA") or str(Path.home())
-    p = Path(base) / APP_DIR_NAME
+    p = appdata_base() / APP_DIR_NAME
     p.mkdir(parents=True, exist_ok=True)
     return p
 

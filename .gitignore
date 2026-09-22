@@ -18,6 +18,8 @@ log/
 wordinput_review/
 *.jsonl
 *.pcapng
+# 클라 리소스에서 추출한 아이템 표(tools/dump_item_names.py --out) — 재배포하지 않는다, 캐시는 %APPDATA%\YukTracker
+item_names*.json
 
 # OS
 Thumbs.db
