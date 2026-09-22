@@ -51,7 +51,10 @@ SEAssist PR #306(PR-Y2) **미머지 → 닫음 예정, 이 레포로 이식(PR-Y
   --build`(포트 8800·8801) → `sudo tailscale funnel --bg 8801`(관리 콘솔 HTTPS·`funnel` 노드 속성) → 폰 LTE 게이트(`GET /` 200 · stats 403
   (더미 Bearer) · register 200/401) → `devices.py list`. 그 뒤 PR-Y2' → PR-Y1b(등록 UX 포함).
 
-## PR-Y2' 이식 (2026-09-22 저녁, 이 레포)
+## PR-Y2' 이식 (2026-09-22 저녁, 이 레포 — **PR #11 머지 완료**)
+
+> https://github.com/helperjby/GS-trade-tracker/pull/11 (a780059). PR-Y1b(#12)는 그 위 스택이었고
+> 머지와 함께 base 가 `main` 으로 자동 전환됐다.
 
 - **벤더 동결 처리 = 전량 소유 전환**(사용자 결정). 후보 셋 중 (a) 별도 모듈/서브클래스는 불가능에 가깝다 — 육의전 전량 대기
   분기가 `StreamFramer.feed()` 루프 안(`observe_wordinput` 과 같은 자리)에 있어야 해서 서브클래스는 100줄 루프 복제가 된다.
