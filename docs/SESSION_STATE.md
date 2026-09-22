@@ -1,9 +1,54 @@
 # Session State
 
-Updated: 2026-09-22 오전 (Asia/Seoul) — **방향 전환(사용자 결정 2026-09-22): SEAssist 레포에는 더 이상 머지하지 않는다.**
+Updated: 2026-09-22 오후 (Asia/Seoul) — **허브 공개 업로드(Tailscale Funnel + 초대 코드 자기등록, 아래 절, PR #10 머지 대기)** ·
+**방향 전환(사용자 결정 2026-09-22): SEAssist 레포에는 더 이상 머지하지 않는다.**
 **PR #5(PR-Y2b 아이템 표)·PR #6(PR-Y3 허브) 머지 완료**(https://github.com/helperjby/GS-trade-tracker/pull/5 840d8d3 · https://github.com/helperjby/GS-trade-tracker/pull/6 1ed43ef,
 각 `/code-review high` 15건·14건 전부 반영) · **허브 Pi 배포 완료(2026-09-22 11:24, `~/yuktracker-hub`, :8800, G7 `stats` 응답 확인 — 아래 "허브 배포")** ·
 SEAssist PR #306(PR-Y2) **미머지 → 닫음 예정, 이 레포로 이식(PR-Y2')** · Step 1 = SEAssist #304·#305(머지, 동결 시점 참조)
+
+## 허브 공개 업로드 — Tailscale Funnel + 초대 코드 자기등록 (2026-09-22 오후, PR #10)
+
+- 배경: 관측기 exe 는 **Npcap 만 있는 일반 사용자 PC** 에서 돈다 → VPN 전제 불가(사용자 질문 "Tailscale 뿐인가?"에서 출발). 사용자 결정:
+  공개 경로 = Pi 의 **Tailscale Funnel**(사용자 PC 에 아무것도 안 깖, 포트포워딩 없음), 업로드 인증 = **초대 코드 자기등록**(기기별 토큰 +
+  허브 발급 `device_id`), 관리 `secret` 은 조회 전용·exe 금지. Funnel 사실은 KB 1223/1311 + tailscale 소스 `ipn/ipnlocal/serve.go` 로 확인
+  (클라 `Tailscale-*` 헤더 삭제 후 `Tailscale-Funnel-Request` 부착, `X-Forwarded-For` Set, `--set-path` 는 StripPrefix).
+- 구현(브랜치 `claude/hub-public-funnel-20260922`, PR #9 위 스택 → #9 머지 뒤 retarget): `hub/server.py` — 공개 판정 = `proxy_header` 존재,
+  조회 라우트는 자격 검사 전 403 `not_public`, 공개 요청의 관리 시크릿은 어느 라우트에서도 무시, `POST /api/market/register`(429 → closed →
+  400 → 401 `bad_invite` → 403 `registration_full` → 발급), 기기 토큰 업로드(403 `device_revoked`/`device_mismatch`, 기기 당 429),
+  `RateLimiter` 3종(인증 실패는 공개 IP 만 — 직접 접속은 docker 브리지 IP 를 봇과 공유해 세면 봇이 막힌다), 설정 `invite_code`(8자↑·예시값·
+  `secret` 동일 거부)·`max_devices`·`admin_public`·`proxy_header`·limit 3개; `hub/db.py` — `devices` 표(additive)·메서드·stats
+  `label`/`devices_registered`/`devices_revoked`·busy timeout; `hub/devices.py` — list/revoke/unrevoke/note CLI(서버와 같은 DB, 취소 즉시
+  반영, 없는 DB 는 만들지 않음). Plan 에이전트 검토 반영: XFF **마지막** 항목, `registration_full` 은 5xx 아닌 403(exe 가 조용히 재시도하지
+  않게), `device_id` 는 exe 가 POST 시점에 채움, 취소는 soft. 1차 커밋 1131ac2: hub 테스트 67 passed, 로컬 스모크 17단계 통과.
+- **`/code-review 10 high` 13건 전부 반영**(2차 커밋): ① 헤더 부재 = 직접 접속이라는 fail-open → **공개 리스너 `public_port` 8801 분리**
+  (`serve()` 가 관리 8800 + 공개 8801 을 한 프로세스에서, DB·limiter 공유; 공개 리스너는 헤더 무관 전부 공개, 8800 의 헤더 검사는 2차
+  방어; compose `8801:8801`, Funnel 은 8801), ② 인증 실패 집계는 토큰 검사 **뒤**(공유 NAT 의 정상 기기 안 막힘), ③ XFF 없는 공개
+  요청은 `public:?` 버킷 + 경고 1회, ④ 정원 = 활성 정의(`device_idle_days` + 미업로드 하루) — **아래 09-22 사용자 결정으로 폐기**,
+  ⑤ 거부(400/403)도 last_seen, ⑥ 기기 기록은 관측과 같은 트랜잭션(커밋 1회, 실패 시 무기록), ⑦ 등록 본문
+  4KiB(411/413, 파싱 전), ⑧ 429 가 취소 검사보다 먼저, ⑨ 초대 코드 strip(config·요청), ⑩ CLI 중복 취소는 시각 보존·"이미 활성",
+  ⑪ 전각 폭 정렬, ⑫ stats 가 `count_active_devices` 재사용(`devices_active` 추가), ⑬ README 게이트 더미 Bearer·본문 모양·`hub_secret` 문장.
+- 문서: HUB-PROTOCOL §0 전송 전제 개정·§1 devices·§3-0·§3-1·§3-4·§3-6·§6·§7, hub/README "공개 노출" 절(Funnel 절차·외부망 게이트·운영 메모,
+  `sed` 순서 INVITE 먼저), PLAN §PR-Y3 공개 항목·§PR-Y1b(관측기 키 `hub_url`·`hub_device_id`·`hub_token`, 첫 실행 등록, 429/401/403 규약)·G7.
+- **기기 명단 규칙 확정(2026-09-22 사용자 지시, PR #10 에 반영)**: ① 배포 대상 = **아는 사람 최대 7명** → `max_devices` 기본 500 → **7**.
+  ② **활성 여부에 따른 자동 제외 없음** → `device_idle_days`·미업로드 유예(`UNSEEN_GRACE_SEC`)·`devices.py revoke --stale` 삭제,
+  "등록"의 정의는 `revoked_ts IS NULL` 하나(`_ACTIVE_WHERE`). 한 번도 안 올린 기기도 자리를 차지하고, 자리를 비우는 유일한 길은
+  관리자의 `revoke`. ③ 관리자가 **제거**(`revoke`, soft — 행은 감사용으로 남음)와 **별칭**(`devices` 표 `alias` + `devices.py alias`)을
+  할 수 있다 — 별칭은 기기가 등록 때 스스로 적은 `label` 과 별개이고 목록·서버 로그에서 앞선다. `stats` 는 `devices_active` 대신
+  `devices_max`(설정 정원)를 싣는다. 검증: hub 82 passed, CLI 왕복(별칭 지정·해제·제거로 자리 반환) 실행 확인.
+- **고정 기기 전제로 범위 축소(2026-09-22 사용자 지시)**: 배포 대상이 지인 고정 기기(slot1~5 배정, 최대 7)라 슬롯 고갈·
+  XFF 우회 방어·자가 치유 로직은 하지 않기로. 남긴 기술 부채는 "서버 먹통 방지" 셋뿐이고 전부 반영: ① compose 공개
+  리스너 `127.0.0.1:8801:8801`(Funnel 은 같은 호스트 프록시라 무영향, LAN 직접 접속만 차단 — 제작자 PC 는 Tailscale VPN
+  으로 8800 직결이라 8800 은 전 인터페이스 유지), ② `request.json()` 이 `LookupError` 도 받아 charset 폭탄이 500+
+  트레이스백 대신 400(무인증 라우트의 로그·디스크 고갈 차단), ③ `Database._tx` 로 모든 쓰기의 commit/rollback 보장 —
+  `prune` 두 DELETE·`touch_device` 가 잠금으로 실패해도 트랜잭션이 안 남는다(한 명의 불안정한 업로드가 WAL 스냅샷을
+  붙들어 나머지 전원을 멈추던 경로). 검증: 잠긴 DB 상대로 둘 다 `in_transaction=False`, 잠금 해제 직후 CLI 의 제거가
+  즉시 보임. charset `bogus-enc` → 400. hub 82 passed · 루트 92 passed.
+- **재설치 동작 확인(사용자 질문)**: `device_id` 는 허브가 등록마다 새로 발급 → 재설치 재등록은 409 거부도, 기존 행
+  갱신도 아니고 **새 행 추가**(옛 행이 자리를 계속 차지). 실패는 재설치 시점이 아니라 다음 사람 등록 때 `registration_full`
+  로 뒤늦게 난다 → 운영 규칙 = "재설치하면 알려줘" + 관리자가 같은 별칭 두 줄 중 옛 `device_id` 를 `revoke`. hub/README 에 기록.
+- 남은 것: PR #9 → #10 머지 → Pi: hub/ 재복사 → `config.json` 에 `invite_code`(+`public_port` 8801 기본) 추가 → `docker compose up -d
+  --build`(포트 8800·8801) → `sudo tailscale funnel --bg 8801`(관리 콘솔 HTTPS·`funnel` 노드 속성) → 폰 LTE 게이트(`GET /` 200 · stats 403
+  (더미 Bearer) · register 200/401) → `devices.py list`. 그 뒤 PR-Y2' → PR-Y1b(등록 UX 포함).
 
 ## 현재 상태
 
@@ -98,7 +143,8 @@ SEAssist PR #306(PR-Y2) **미머지 → 닫음 예정, 이 레포로 이식(PR-Y
 - **허브 배포(2026-09-22 11:24, Pi `<user>@<pi-lan-ip>`)**: `hub/` 만 tar 로 `~/yuktracker-hub` 에 복사, 컨테이너 `yuktracker-hub-yuktracker-hub-1`
   (restart unless-stopped, `0.0.0.0:8800`, 기동 로그 `db_path=/data/hub.db`), DB `~/yuktracker-hub/data/hub.db`(compose 기본 `./data` → `/data`,
   Dockerfile `HUB_DB_PATH`). 시크릿은 Pi 가 생성(32자 `token_urlsafe`, `~/yuktracker-hub/config.json` chmod 600) — 레포·문서·채팅에 적지 않는다,
-  관측기 `hub_secret`(PR-Y1b)·미루봇(PR-Y4)이 이 값을 공유. 확인: 컨테이너 안·LAN `<pi-lan-ip>:8800`·tailnet `<pi-tailnet-ip>:8800` 에서 `GET /` 200,
+  미루봇(PR-Y4)이 이 값을 쓴다(09-22 오전 계획의 "관측기 `hub_secret` 공유"는 같은 날 오후 폐기 — 관측기는 기기 토큰, 위 "허브 공개 업로드" 절).
+  확인: 컨테이너 안·LAN `<pi-lan-ip>:8800`·tailnet `<pi-tailnet-ip>:8800` 에서 `GET /` 200,
   `stats` 인증 200(전부 0·devices []), 무인증 401. **`/mnt/dashdata` 는 이 Pi 에 없다**(루트가 SSD `/dev/sda2` 로 이전, 대시보드도 `~/dashboard/data`)
   → hub/README 의 데이터 폴더 예시를 `./data` 기본으로 정정. 갱신 절차 = hub/ 재복사 → `docker compose up -d --build`(DB 는 볼륨이라 유지).
   PR #5 머지 뒤 #6 base 는 GitHub 이 자동으로 `main` 으로 바꿨다(브랜치 자동 삭제).
@@ -110,6 +156,6 @@ SEAssist PR #306(PR-Y2) **미머지 → 닫음 예정, 이 레포로 이식(PR-Y
 3. **PR-Y2' 이식(이 레포)**: #306 worktree 의 프레이머 확장·`packet_market.py`·엔진 `market_cb`/헬스·테스트·`docs/PACKET-MARKET.md`(마스킹)·
    실캡처 대조 도구 → 이 레포 소유 코드로. 벤더 동결 처리 방식(패치 계층 vs 소유 전환, `sync_seassist_core.py`·`VENDOR.json`·`test_vendor` 핀)
    결정 포함. 검증 = 합성 프레임 테스트 + `%TEMP%\market-y2-corpus` 45창 오프라인 재생(9창 40페이지·라벨 8/8 재현).
-4. PR-Y1b(여기): `market_cb` → `load_item_table` 이름 해석 → 스풀 → `hub_url/hub_secret`(`%APPDATA%\YukTracker\config.json`)로 업로드
-   (HUB-PROTOCOL §3-1). 5. 실기기: Step 0 잔여 캡처 2창(라벨 5열 `@45` 검정 · 용병 탭 열람 · 수량 ≥65,536·타 PC 세션) ·
+4. PR-Y1b(여기): `market_cb` → `load_item_table` 이름 해석 → 스풀 → 첫 실행 `--invite-code` 등록(§3-0) → `hub_url/hub_device_id/hub_token`
+   (`%APPDATA%\YukTracker\config.json`)로 HTTPS 업로드(HUB-PROTOCOL §3-1; 429 대기·401/403 정지·`device_id` 는 POST 시점). 5. 실기기: Step 0 잔여 캡처 2창(라벨 5열 `@45` 검정 · 용병 탭 열람 · 수량 ≥65,536·타 PC 세션) ·
    `python tools\console_input_probe.py` 진단 → `_Console` 수정 PR. 6. PR-Y4 미루봇: `http://127.0.0.1:8800`, HUB-PROTOCOL §3-2/§3-3(`Lv.` 표시 보류).
