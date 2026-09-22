@@ -3,9 +3,11 @@ chcp 65001 > nul
 setlocal
 cd /d "%~dp0"
 
-echo === [1/4] Vendor drift check (src/yuktracker/seassist == C:\dev\gersang) ===
+echo === [1/4] Vendor drift check (src/yuktracker/seassist == SEASSIST_REPO) ===
 python tools\sync_seassist_core.py --check
-if errorlevel 1 (
+if errorlevel 2 (
+  echo --- SEAssist 체크아웃이 없어 벤더 드리프트 검사를 건너뜁니다. 해시 핀은 [2/4] 테스트가 검사합니다.
+) else if errorlevel 1 (
   echo *** 벤더 사본이 SEAssist 소스와 다릅니다. tools\sync_seassist_core.py 로 동기화한 뒤 다시 빌드하세요.
   goto :err
 )

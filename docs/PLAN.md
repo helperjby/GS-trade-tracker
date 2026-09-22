@@ -1,8 +1,8 @@
 # 육의전 패킷 → 공유 DB → 미루봇 `!육의전` — 구현 계획 (2026-09-21 승인, 2026-09-22 정정)
 
-> 원본은 Claude Code 플랜(`C:\Users\A\.claude\plans\system-reminder-you-are-operating-splendid-globe.md`).
+> 원본은 로컬 Claude Code 플랜(레포 밖).
 > 2026-09-21 사용자 지시로 관측기를 SEAssist 레포 안이 아니라 **이 프로젝트(별도 실행파일)** 에 두는 것으로
-> 바뀌었다. **2026-09-22 사용자 결정으로 SEAssist 레포(`15. Gersang auto eating`, `C:\dev\gersang`)에는 더 이상
+> 바뀌었다. **2026-09-22 사용자 결정으로 SEAssist 레포(비공개)에는 더 이상
 > 머지하지 않는다** — 열려 있던 SEAssist PR #306(PR-Y2)도 머지하지 않고 이 레포로 이식하고(PR-Y2'), 허브는 SEAssist
 > `dashboard/` 확장이 아니라 **이 레포의 독립 서버 `hub/`** 다. 아래는 두 정정을 반영한 판이다.
 
@@ -11,15 +11,15 @@
 - **육의전**은 유저가 판매 아이템을 등록하는 인게임 거래소. 목록은 **유저가 직접 육의전을 열 때만** s2c
   패킷으로 내려온다. 다른 패킷 기반 서드파티(geota 등)가 이미 이걸로 시세를 만든다.
 - 미루봇-IRIS(카카오톡)의 **GS-01 육의전 검색·알람**은 원본을 geota 웹으로 잡았다가 HTTP 403 에 막혀 대기
-  중(`32. 미루봇-IRIS/docs/GS-01_SOURCE_CONTRACT.md`). 파일럿 봇의 `!육의전 <아이템>`·`!알람등록/해제/목록`
-  명령·출력 형식(`27. IRIS/bots/gersang_bot.py:50-71`)을 계승한다.
+  중(미루봇-IRIS 프로젝트의 `docs/GS-01_SOURCE_CONTRACT.md`). 파일럿 봇의 `!육의전 <아이템>`·`!알람등록/해제/목록`
+  명령·출력 형식(미루봇-IRIS 파일럿 봇 `bots/gersang_bot.py`)을 계승한다.
 - 목표: **1~7명의 클라에서 육의전 패킷을 관측 → 파싱 → 공유 저장소에 합류 → 미루봇이 읽어 `!육의전` 을
   켠다.** 육의전 DB 는 "누군가 마지막으로 본 것"의 부분·지연 스냅샷이므로 **관측 시각**을 항상 함께 다룬다.
 - 사용자 결정(2026-09-21): ① 소비자 봇 = 미루봇-IRIS ② 허브 = SEAssist 대시보드 서버(Pi) 확장(**→ 09-22 에 ③' 로 대체**)
   ③ 수집기 = **별도 경량 프로그램(이 프로젝트)** ④ opcode·필드는 모름 → 발굴부터.
 - **사용자 결정(2026-09-22)**: ①' SEAssist 레포에는 더 이상 머지하지 않는다 — 육의전 트랙의 코드·문서는 전부 이 레포.
   ②' SEAssist PR #306(PR-Y2, 프레이머 확장·`packet_market.py`·코퍼스 등록)은 **미머지** → 이 레포로 이식(PR-Y2'). 이식 원본은
-  worktree `C:\dev\gersang\.claude\worktrees\market-y2-20260921`(브랜치 `claude/market-y2-20260921`, e905cd1).
+  비공개 레포의 로컬 worktree(경로·브랜치는 레포에 적지 않는다).
   ③' 허브 = 이 레포 `hub/` 독립 서버(aiohttp+sqlite, Pi 별도 컨테이너·포트 8800). ④' 벤더 사본은 SEAssist main b54cb73 시점에
   **동결** — 이후 프로토콜 변경은 이 레포 소유 코드로 들어간다(방식은 PR-Y2' 계획에서).
 - 규칙: 새 opcode 는 SEAssist `docs/PACKET-PROCESS.md` §3 레지스트리 ID 없이 FINDINGS 에 못 들어가고, 등급 D 로는 런타임
@@ -98,7 +98,7 @@ python scripts/mine_packet_discovery.py --all --lead-sec 30
   (b) `sync_seassist_core.py` 에 패치 계층(복사 뒤 이 레포 패치 적용, `VENDOR.json` 에 패치 해시) (c) 사본을 이 레포 소유 코드로 전환
   (`VENDOR.json` 은 출처 기록으로만, `test_vendor` 핀은 변경 시 갱신). 어느 쪽이든 `--check` 는 b54cb73 체크아웃 기준.
 - 검증: 합성 프레임 테스트 + `%TEMP%\market-y2-corpus`(45창)·`market-y2-review`(11창) 오프라인 재생으로 9창 40페이지·라벨 8/8 재현.
-  SEAssist 고정 아카이브(`15. Gersang auto eating\packet`)에는 손대지 않는다(머지 직전 복사 절차 폐기).
+  SEAssist 고정 아카이브(비공개 레포의 `packet` 폴더)에는 손대지 않는다(머지 직전 복사 절차 폐기).
 
 ### 아이템 id → 이름 표 (2026-09-21 결정, PR-Y2b 이 레포 PR #5)
 - **출처 = 클라 리소스** `C:\AKInteractive\Gersang\gersang.gcs` 안의 zlib 스트림 `;\t육의전 검색 기능 리스트`

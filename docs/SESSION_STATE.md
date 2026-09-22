@@ -7,29 +7,40 @@ SEAssist PR #306(PR-Y2) **미머지 → 닫음 예정, 이 레포로 이식(PR-Y
 
 ## 현재 상태
 
-- 레포: https://github.com/helperjby/GS-trade-tracker (private). `main` = 부트스트랩(문서만), **PR #1**
+- 레포: https://github.com/helperjby/GS-trade-tracker (**public** — 2026-09-22 공개. 기기명·Pi 주소·사용자명·
+  비공개 레포 경로/브랜치/링크를 문서·PR·커밋 메시지에 적지 않는다). `main` = 부트스트랩(문서만), **PR #1**
   (https://github.com/helperjby/GS-trade-tracker/pull/1, 브랜치 `feat/y1-capture-mode`) 가 코드 전부(28 파일). 이후 변경은 이 레포의 PR 로.
+- **공개 정리(PR #9)의 남은 노출 — 작업 트리만 고쳤다**: 기기명·Pi 사용자명/LAN·tailnet 주소·비공개 레포 PR 링크는
+  ① **git 이력**(`git show <구커밋>:hub/README.md` 로 그대로 읽힌다), ② **머지된 PR #1~#4 본문**(기기명·비공개 레포 링크)에
+  아직 남아 있다. 둘 다 파일 수정으로는 지워지지 않는다 — ①은 이력 재작성(`git filter-repo` + force push, 협업자 합의 필요),
+  ②는 `gh pr edit` 로 본문 교체(단 GitHub 은 본문 편집 이력도 보존한다). 노출된 값은 시크릿이 아니라 주소·이름이므로
+  회전 대상은 없지만, "공개 레포에서 제거됐다"고 가정하지 않는다. 벤더 사본 잔여는 아래 벤더 절 참조.
 
 - 사용자 결정(2026-09-21): 소비자 봇 = 미루봇-IRIS, 허브 = SEAssist 대시보드 서버(Pi) 확장(→ 09-22 대체), 수집기 =
   **SEAssist GUI 가 아닌 별도 경량 프로그램(이 프로젝트, 별도 실행파일)**, 육의전 opcode 는 모름 → 발굴부터.
-- **사용자 결정(2026-09-22)**: ① SEAssist 레포(`15. Gersang auto eating`, `C:\dev\gersang`)에는 더 이상 머지하지 않는다 — 육의전 트랙은
-  전부 이 레포에서. ② 열려 있는 SEAssist PR #306(PR-Y2)도 머지하지 않고 이 레포로 **이식**(PR-Y2'). 이식 원본 = worktree
-  `C:\dev\gersang\.claude\worktrees\market-y2-20260921`(브랜치 `claude/market-y2-20260921`, e905cd1, 커밋 6개) — #306 닫기는 사용자,
+- **사용자 결정(2026-09-22)**: ① SEAssist 레포(비공개)에는 더 이상 머지하지 않는다 — 육의전 트랙은
+  전부 이 레포에서. ② 열려 있는 SEAssist PR #306(PR-Y2)도 머지하지 않고 이 레포로 **이식**(PR-Y2'). 이식 원본 = 비공개 레포의
+  로컬 worktree(경로·브랜치·커밋은 레포에 적지 않는다, 커밋 6개) — #306 닫기는 사용자,
   worktree 는 이식이 끝날 때까지 보존. ③ 허브 = SEAssist dashboard 확장이 아니라 **이 레포의 독립 서버 `hub/`**(aiohttp+sqlite, Pi 별도
   컨테이너·포트 8800). ④ 벤더 사본은 SEAssist main **b54cb73**(= #303·#304·#305 머지 상태; 벤더 모듈 내용은 62e33db 와 동일) 시점에
-  동결 — 이후 변경(프레이머 확장·파서)은 이 레포 소유 코드로, 방식(패치 계층 vs 소유 전환)은 PR-Y2' 계획에서. ⑤ 고정 아카이브
-  `15. Gersang auto eating\packet` 에 9창을 복사하는 "머지 직전 절차"는 폐기(#306 미머지). 지난 세션의 임시 root
+  동결 — 이후 변경(프레이머 확장·파서)은 이 레포 소유 코드로, 방식(패치 계층 vs 소유 전환)은 PR-Y2' 계획에서. ⑤ 비공개 레포의
+  고정 아카이브에 9창을 복사하는 "머지 직전 절차"는 폐기(#306 미머지). 지난 세션의 임시 root
   `%TEMP%\market-y2-corpus`(45창)·`%TEMP%\market-y2-review`(11창)는 이식 검증용으로 남겨 둔다.
-- SEAssist 레포 쪽 선행 변경 = **PR #303**(https://github.com/helperjby/gersang-auto-eating/pull/303, 커밋 62e33db, 머지됨): 경로 함수를
+- SEAssist 레포 쪽 선행 변경 = **PR #303**(비공개 레포, 커밋 62e33db, 머지됨): 경로 함수를
   `src/core/ledger_paths.py` 로 분리(wordinput_runner 재수출), `packet_state_source` 의 numpy/PIL
   지연 import, `admin.relaunch_as_admin(module=)` — 벤더 사본이 cv2·genai 없이 돌기 위한 것.
 - 이 프로젝트: `src/yuktracker/`(cli·agent·game_processes·item_names·paths) + 벤더 사본 + 테스트 + `build.bat`/`run_dev.bat` + **`hub/`**(허브 서버).
   관측기는 수집 모드만 있다(파서·업로드는 PR-Y2'·PR-Y1b).
 - 벤더 사본은 SEAssist 62e33db 와 일치(`VENDOR.json`, `--check` 통과). 비승격 스모크(`--no-elevate`)는 rc 2(관리자 아님) 로 정상 종료.
   `--check` 는 로컬 체크아웃이 62e33db/b54cb73 벤더 모듈과 같을 때만 통과한다 —
-  09-21 현재 `C:\dev\gersang` 본체는 `codex/monster-sweep`(5e8fdba) 이라 "불일치 6건" 이 뜨지만 벤더 사본은 무변경(`tests/test_vendor.py` 해시 핀 green).
-- **실기기 첫 검증 완료(2026-09-21, 디바이스 HIC0TCR, Windows Terminal + 한글 IME)**: `run_dev.bat` 로 창 3개
-  (`<OneDrive>\SEAssist\wordinput_review\HIC0TCR\packet_discovery\`), 마지막 창(18:08, 547세그, 유실 0, writer 오류 0)에
+  09-21 현재 비공개 레포 본체는 다른 브랜치라 "불일치 6건" 이 뜨지만 벤더 사본은 무변경(`tests/test_vendor.py` 해시 핀 green).
+  **벤더 사본의 실기기명 잔여(공개 노출, 미해결)**: `gersang_protocol.py`(주석에 실기기명 5건 + 날짜별 세션 기록)와
+  `packet_discovery_ledger.py`(운영 대수·OneDrive 연동 여부) 두 파일. **둘 다 `VENDOR.json` 해시 핀 대상**이라 손으로 고치면
+  `test_vendor` 가 깨지고, AGENTS.md "사본을 손으로 고치지 않는다" 규칙에도 걸린다 → PR-Y2' 의 벤더 동결 처리(패치 계층 vs 소유 전환)에서
+  같이 결정한다. GitHub 코드 검색으로 이 기기명들이 이 프로젝트에 매칭된다는 뜻이므로 문서 쪽 치환만으로 가려졌다고 보지 않는다.
+- **실기기 첫 검증 완료(2026-09-21, 실기기 1대, Windows Terminal + 한글 IME)**: `run_dev.bat` 로 창 3개
+  (`<OneDrive>\SEAssist\wordinput_review\<디바이스>\packet_discovery\` — `<디바이스>` 폴더명 = 그 PC 의 기기명,
+  `ledger_paths._device_name`), 마지막 창(18:08, 547세그, 유실 0, writer 오류 0)에
   `market_manual` 라벨 9건 — SEAssist `packet_explore.py list` 에 `market_manual×9` 로 보인다. 라벨에 적은 판매자명이
   CP949 로 s2c 세그먼트 안에서 확인됐고, 프레이머(`timeline`)로는 **opcode `0x321f` · sub 218 · len 489** 프레임
   (창당 1~4회, `초기화` 라벨 직전). 본문은 48B × 10 항목, 아이템명 문자열은 없다(ID). 실데이터는 레포에 넣지 않는다.
@@ -39,8 +50,7 @@ SEAssist PR #306(PR-Y2) **미머지 → 닫음 예정, 이 레포로 이식(PR-Y
   `mine_packet_discovery.LEAD_BY_EVENT["market_manual"]=30` 은 #304 로 머지됨. ④ 한글 입력 잘림
   (`악몽을 피우는 씨앗` → `을 는 앗`) — Python 읽기 경로는 줄 단위(cooked read)라 콘솔 호스트 + IME 쪽으로 추정,
   `tools/console_input_probe.py` 로 진단한 뒤 `_Console` 읽기 방식을 정한다(미수정). PR #2 머지 뒤 실기기 재확인: ㅂ 종료 O, 20:23 창 라벨 7건 전부 온전.
-- **Step 1 분석(2026-09-21) = SEAssist PR #304·#305**(https://github.com/helperjby/gersang-auto-eating/pull/304 ·
-  https://github.com/helperjby/gersang-auto-eating/pull/305, 머지, `docs/PACKET-MARKET-2026-09-21.md`): 육의전 목록 응답 = 8000 s2c **`0x321f`**,
+- **Step 1 분석(2026-09-21) = SEAssist PR #304·#305**(비공개 레포, 머지, `docs/PACKET-MARKET-2026-09-21.md`): 육의전 목록 응답 = 8000 s2c **`0x321f`**,
   9B 헤더(`[5:7]` 총 페이지 u16 · `[7:9]` 행 수 u16, 페이지 번호 없음) + **48B × 행**(등록 id · 아이템 id · 수량 · 가격 = u32 LE, 판매자 cp949
   16B NUL, 미상 4B, 플래그 2B). 코퍼스 30프레임 전부 `len == 9 + 48×count`, 콘솔 라벨 8행 **8/8 일치**. **아이템명은 없고 id 만** →
   H-2609-07 기각, H-2609-08(프레임·행 구조) · H-2609-09(폭) 등록. 페이지 번호는 요청에만 → 소비자는 등록 id 로 페이지를 이어 붙인다.
@@ -50,7 +60,7 @@ SEAssist PR #306(PR-Y2) **미머지 → 닫음 예정, 이 레포로 이식(PR-Y
   `market_cb`·헬스 7종·`note_market` 원장·App status → `explore market`(라이브·오프라인·프로브 3중 대조, `--mask`)·`market --shadow` →
   코퍼스 `market` 열 + 창 9개 등록(45창 76,488프레임 / market 39 / jochul 5) → 문서(PROCESS §3.1 B, H-2609-10/11 제안, FINDINGS §5.4, TOOLS,
   PACKET-MARKET 부록, CHANGELOG) → 패치 재검사 도구 `market` 열. 실캡처 80창: 9창 40페이지 라이브 == 오프라인 == 프로브, 라벨 8/8. 전체 스위트
-  4,001 passed. **PR #306**(https://github.com/helperjby/gersang-auto-eating/pull/306) — **09-22 결정으로 머지하지 않는다**(이식 원본).
+  4,001 passed. **PR #306**(비공개 레포) — **09-22 결정으로 머지하지 않는다**(이식 원본).
 - **아이템 id → 이름 표(2026-09-21 결정) = PR-Y2b, 이 레포 PR #5**: 클라 `gersang.gcs` 의 `육의전 검색 기능 리스트`(4,001행) — 라벨 8/8·관측 188 id 중
   186(3251 강화품 표, 1449232 미상 — 용병 탭 추정). `src/yuktracker/item_names.py`(순차 zlib 스캔·마커 식별·정규화·캐시·클라 탐색), `paths.py`,
   `game_processes.process_image_path`, `tools/dump_item_names.py`(`--check` 실기기: 4,001행·앵커 8/8·0.22s), 합성 아카이브 테스트(92 passed — 리뷰 반영 뒤),
@@ -85,10 +95,10 @@ SEAssist PR #306(PR-Y2) **미머지 → 닫음 예정, 이 레포로 이식(PR-Y
   hub/README, PLAN 갱신. **검증**: hub 28 passed(`-W error::NotAppKeyWarning`) · 루트 92 passed · 실서버 스모크 16/16(127.0.0.1:8801,
   scratchpad config: CHANGE-ME 기동 거부 → DB 가 config 폴더 옆 → POST 2/3 → 재POST 중복 2 → search 3 → keyset 커서 limit=1 로 3행+빈 호출 →
   stats → 401 → 잘못된 행·2⁶³·agent_ts 0·item_id abc 전부 400 → stats 불변).
-- **허브 배포(2026-09-22 11:24, Pi `jby@192.168.0.14`)**: `hub/` 만 tar 로 `~/yuktracker-hub` 에 복사, 컨테이너 `yuktracker-hub-yuktracker-hub-1`
-  (restart unless-stopped, `0.0.0.0:8800`, 기동 로그 `db_path=/data/hub.db`), DB `/home/jby/yuktracker-hub/data/hub.db`(compose 기본 `./data` → `/data`,
+- **허브 배포(2026-09-22 11:24, Pi `<user>@<pi-lan-ip>`)**: `hub/` 만 tar 로 `~/yuktracker-hub` 에 복사, 컨테이너 `yuktracker-hub-yuktracker-hub-1`
+  (restart unless-stopped, `0.0.0.0:8800`, 기동 로그 `db_path=/data/hub.db`), DB `~/yuktracker-hub/data/hub.db`(compose 기본 `./data` → `/data`,
   Dockerfile `HUB_DB_PATH`). 시크릿은 Pi 가 생성(32자 `token_urlsafe`, `~/yuktracker-hub/config.json` chmod 600) — 레포·문서·채팅에 적지 않는다,
-  관측기 `hub_secret`(PR-Y1b)·미루봇(PR-Y4)이 이 값을 공유. 확인: 컨테이너 안·LAN `192.168.0.14:8800`·tailnet `100.123.248.88:8800` 에서 `GET /` 200,
+  관측기 `hub_secret`(PR-Y1b)·미루봇(PR-Y4)이 이 값을 공유. 확인: 컨테이너 안·LAN `<pi-lan-ip>:8800`·tailnet `<pi-tailnet-ip>:8800` 에서 `GET /` 200,
   `stats` 인증 200(전부 0·devices []), 무인증 401. **`/mnt/dashdata` 는 이 Pi 에 없다**(루트가 SSD `/dev/sda2` 로 이전, 대시보드도 `~/dashboard/data`)
   → hub/README 의 데이터 폴더 예시를 `./data` 기본으로 정정. 갱신 절차 = hub/ 재복사 → `docker compose up -d --build`(DB 는 볼륨이라 유지).
   PR #5 머지 뒤 #6 base 는 GitHub 이 자동으로 `main` 으로 바꿨다(브랜치 자동 삭제).
