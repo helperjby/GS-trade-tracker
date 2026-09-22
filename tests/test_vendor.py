@@ -78,6 +78,10 @@ class ImportBoundaryTest(unittest.TestCase):
         "zlib",
         # tempfile — item_names.py 캐시 쓰기의 고유 이름 tmp(mkstemp) — 관측기 두 개가 겹쳐도 안전.
         "tempfile",
+        # urllib·ssl·http — hub_client.py 의 허브 업로드(PR-Y1b). urllib.request 하나로 POST 하고,
+        # ssl 은 인증서 검증 실패를 "무한 재시도" 가 아니라 안내로 돌리려고, http.client 는 그 예외
+        # 계열(HTTPException)을 잡으려고 쓴다. 전부 stdlib 이고 PyInstaller 기본 포함이다.
+        "urllib", "ssl", "http",
     }
 
     def test_static_imports(self) -> None:

@@ -55,7 +55,8 @@ python -m pytest                                   # 관측기 테스트 (tests/
 python -X utf8 -m pytest hub/tests -q              # 허브 테스트 (aiohttp 필요: pip install -r hub/requirements.txt)
 python tools\sync_seassist_core.py --check         # 출처 대비 차이 == VENDOR.json diverged 선언 ? (rc 1 = 불일치)
 python tools\sync_seassist_core.py --upstream      # 상류 체크아웃과 파일별 비교(정보용, %SEASSIST_REPO% 없으면 rc 2)
-run_dev.bat [--capture N | --capture 0]
-build.bat
+run_dev.bat [--invite-code CODE] [--capture N]     # 관측·업로드(+ 발굴 수집 창)
+python tools\market_probe.py --root <패킷 루트>     # 수집 창 오프라인 재생(라이브 vs 프로브 대조)
+build.bat                                          # %YUKTRACKER_HUB_URL% 이 있으면 exe 에 주소를 주입
 python hub\server.py --config hub\config.json      # 허브 로컬 실행 (배포는 hub/README.md)
 ```

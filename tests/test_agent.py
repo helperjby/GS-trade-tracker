@@ -25,12 +25,13 @@ class _EngineStub:
     instances: list["_EngineStub"] = []
 
     def __init__(self, pids_provider, *, status_cb=None, event_cb=None, segment_cb=None,
-                 enter_anchor=True, start_ok=True, start_msg="패킷 스니퍼 시작",
+                 market_cb=None, enter_anchor=True, start_ok=True, start_msg="패킷 스니퍼 시작",
                  capturing=True):
         self.pids_provider = pids_provider
         self.status_cb = status_cb
         self.event_cb = event_cb
         self.segment_cb = segment_cb
+        self.market_cb = market_cb
         self.enter_anchor = enter_anchor
         self._start_ok = start_ok
         self._start_msg = start_msg
@@ -53,7 +54,13 @@ class _EngineStub:
 
     def health_snapshot(self):
         return {"packets": 3, "fed_segments": 2, "tracked_flows": 1, "battle_events": 0,
-                "opens": 1}
+                "opens": 1, "market_frames": 2, "market_rows": 12}
+
+
+def _no_market(opts, say, stdin):
+    """허브·아이템 표 배선을 끄고 도는 `market_setup` — 이 파일의 테스트는 수집 창 계약을 본다.
+    (사용자 프로필의 설정·클라 탐색을 건드리지 않는다. 배선 자체는 test_market_setup.py.)"""
+    return A.Market()
 
 
 def _factory(**kw):
@@ -75,10 +82,12 @@ class _Base(unittest.TestCase):
         self.indexer = A.PidIndexer(lambda: [4321, 1234])
         self.out = io.StringIO()
 
-    def _run(self, opts, stdin_text: str, factory=None, sleep=None, clock=None):
+    def _run(self, opts, stdin_text: str, factory=None, sleep=None, clock=None,
+             market_setup=_no_market):
         return A.run(opts, engine_factory=factory or _factory(), recorder=self.recorder,
                      indexer=self.indexer, stdin=io.StringIO(stdin_text), out=self.out,
-                     clock=clock or time.monotonic, sleep=sleep or (lambda s: time.sleep(0.02)))
+                     clock=clock or time.monotonic, sleep=sleep or (lambda s: time.sleep(0.02)),
+                     market_setup=market_setup)
 
     def _rows(self) -> list[dict]:
         d = self.root / "packet_discovery"
@@ -273,7 +282,40 @@ class ObserveModeTest(_Base):
         eng = _EngineStub.instances[-1]
         self.assertTrue(eng.started and eng.stopped)
         self.assertFalse(self.recorder.window_open)
-        self.assertIn("관측 대기", self.out.getvalue())
+        self.assertIn("모드: 관측", self.out.getvalue())
+        # 수집 창이 없어도 육의전 헬스는 종료 줄에 남는다(관측은 창과 무관하게 돈다).
+        self.assertIn("육의전 2쪽 12행", self.out.getvalue())
+
+    def test_market_callback_and_uploader_come_from_market_setup(self) -> None:
+        """엔진에 넘어가는 `market_cb` 는 배선이 만든 관측자다 — 끊기면 육의전이 통째로 죽는다."""
+        seen = {}
+
+        class _Up:
+            def __init__(self):
+                self.stopped = False
+                self.uploaded = 3
+                self.quarantined = self.queue_dropped = 0
+                self.spool = SimpleNamespace(pending=lambda: [1, 2])
+                self.stopped_reason = ""
+                self.halted = False
+
+            def stop(self):
+                self.stopped = True
+
+            def is_alive(self):
+                return False
+
+        def setup(opts, say, stdin):
+            obs = SimpleNamespace(pages=2, rows=12, unknown_item=1)
+            seen["market"] = A.Market(cb="MARKET_CB", uploader=_Up(), observer=obs)
+            return seen["market"]
+
+        opts = A.RunOptions(capture_min=None, pause_on_exit=False, attach_log=False)
+        self.assertEqual(self._run(opts, "q\n", market_setup=setup), A.RC_OK)
+        self.assertEqual(_EngineStub.instances[-1].market_cb, "MARKET_CB")
+        self.assertTrue(seen["market"].uploader.stopped, "종료 때 업로더를 멈춘다")
+        self.assertIn("[육의전] 관측 2쪽 12행 / 이름 미해석 1행 / 업로드 3건 · 대기 2배치",
+                      self.out.getvalue())
 
 
 class PauseOnExitTest(_Base):

@@ -18,6 +18,9 @@ log/
 wordinput_review/
 *.jsonl
 *.pcapng
+# 빌드 시 주입되는 허브 기본 주소 — 공개 레포 소스에 tailnet 주소를 두지 않는다(tools/gen_build_config.py)
+src/yuktracker/_build_config.py
+
 # 클라 리소스에서 추출한 아이템 표(tools/dump_item_names.py --out) — 재배포하지 않는다, 캐시는 %APPDATA%\YukTracker
 item_names*.json
 

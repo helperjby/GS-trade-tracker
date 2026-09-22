@@ -1,4 +1,4 @@
-"""관측기 본체 — SEAssist 스니퍼 엔진 배선 · 발굴 수집 창 · 콘솔 라벨 (PR-Y1 = 수집 모드).
+"""관측기 본체 — 스니퍼 엔진 배선 · 육의전 관측·업로드 · 발굴 수집 창 · 콘솔 라벨.
 
 왜 별도 프로그램인가
 --------------------
@@ -7,15 +7,17 @@ SEAssist 의 패킷 엔진은 War/Mon 매크로 세션이 도는 동안에만 �
 엔진(`packet_state_source`)·프레이머(`gersang_protocol`)·수집기(`packet_discovery_ledger`)를
 벤더 사본으로 **그대로 재사용**하되, 슬롯·러너·Tk 없이 관리자 콘솔 하나로 도는 관측기를 둔다.
 
-이 단계(PR-Y1)의 범위
----------------------
+범위
+----
 - 게임 프로세스(`gersang.exe`)를 전부 자동으로 잡아 pseudo-슬롯(클라1·2·…)으로 엔진에 넘긴다.
 - ``capture_min`` 이 있으면 그 길이의 발굴 창(`window_*.jsonl`)을 SEAssist GUI `[패킷 수집]` 과
   **같은 형식·같은 폴더**에 남긴다 — SEAssist 의 `packet_explore.py`/`mine_packet_discovery.py`
   가 그대로 읽는다. 콘솔에 한 줄 치면 `market_manual` 라벨이 찍힌다(육의전 열기·검색·페이지
   넘김 시각을 창 안에 남기는 유일한 수단).
-- 파서·업로드는 없다. 육의전 opcode 가 발굴(SEAssist PACKET-PROCESS H-2609-07)로 확정된 뒤
-  PR-Y2(프로토콜)·PR-Y1b(관측 모드) 가 붙는다.
+- 육의전 목록(`0x321f`)이 오면 엔진이 파싱한 페이지를 `market_cb` 로 받아 아이템 이름을 붙이고
+  스풀에 넣는다(`market_observer` → `spool`). 업로더 스레드가 허브로 올린다 — 첫 실행에는
+  초대 코드로 기기를 등록한다(`hub_setup`, `docs/HUB-PROTOCOL.md` §3-0). 허브 주소·토큰이 없으면
+  업로드 없이 관측만 한다.
 
 스레드
 ------
@@ -35,7 +37,7 @@ import time
 from dataclasses import dataclass
 from typing import Callable, Iterable, Optional, TextIO
 
-from . import __version__
+from . import __version__, app_config, hub_setup, market_observer, spool
 from .game_processes import game_pids
 from .seassist import ledger_paths
 from .seassist.logger import get_logger
@@ -115,6 +117,16 @@ class RunOptions:
     pause_on_exit: bool = True
     #: SEAssist 로거(헬스 INFO 줄)를 콘솔로 흘린다. 테스트에서는 False.
     attach_log: bool = True
+    #: 허브 주소 오버라이드(빈 값 = 설정·환경변수·빌드 주입 순).
+    hub_url: str = ""
+    #: 첫 실행 등록용 초대 코드(빈 값 = 콘솔 프롬프트). 저장하지 않는다.
+    invite_code: str = ""
+    #: 허브 목록에 보일 이름(빈 값 = 호스트명).
+    device_label: str = ""
+    #: 아이템 표를 찾을 클라 폴더(빈 값 = 실행 중 gersang.exe → 기본 설치 경로).
+    client_dir: str = ""
+    #: False 면 스풀·업로더를 아예 띄우지 않는다(`--no-upload`).
+    upload: bool = True
 
 
 def _attach_console_log(out: TextIO) -> None:
@@ -195,10 +207,58 @@ class _Console(threading.Thread):
             pass
 
 
+@dataclass
+class Market:
+    """육의전 배선 한 묶음 — 콜백(엔진에 넘길 것)과 업로더(종료 때 멈출 것)."""
+    cb: Optional[Callable[..., None]] = None
+    uploader: Optional[spool.Uploader] = None
+    observer: Optional[market_observer.MarketObserver] = None
+
+
+def setup_market(opts: RunOptions, say: Callable[[str], None], stdin: Optional[TextIO], *,
+                 config_path=None, spool_dir=None, names=None,
+                 register=None, post=None) -> Market:
+    """아이템 표 → 설정 → (필요하면) 첫 실행 등록 → 스풀·업로더.
+
+    업로드가 안 되는 상황(주소 없음·등록 실패·`--no-upload`)에서도 **관측 콜백은 만든다** —
+    콘솔에 페이지가 보여야 사용자가 "되고 있다"를 안다. 주입 인자는 테스트용이다.
+    """
+    kw = {"register": register} if register is not None else {}
+    table = names if names is not None else market_observer.ItemNames.load(client_dir=opts.client_dir)
+    if table.rows:
+        say(f"[아이템표] {table.rows}건 (gcs {table.gcs_path})")
+    else:
+        say("[아이템표] 없음 — 아이템 이름 없이 관측합니다(허브가 다른 PC 의 이름으로 채웁니다).")
+
+    cfg = app_config.load(config_path)
+    local_id = app_config.ensure_local_id(cfg, config_path)
+    uploader = None
+    hub_url = app_config.resolve_hub_url(opts.hub_url, cfg)
+    if not opts.upload:
+        say("[허브] --no-upload — 업로드 없이 관측만 합니다.")
+    elif not hub_url:
+        say("[허브] 주소가 없습니다 — --hub-url 로 주거나 빌드에 주입하세요(업로드 없이 관측만).")
+    elif hub_setup.ensure_registered(cfg, hub_url, invite_code=opts.invite_code,
+                                     label=opts.device_label, say=say, stdin=stdin,
+                                     config_path=config_path, **kw):
+        store = spool.Spool(spool_dir)
+        uploader = spool.Uploader(store, hub_url=hub_url, token=cfg.hub_token,
+                                  device_id=lambda: cfg.hub_device_id, say=say, names=table,
+                                  **({"post": post} if post is not None else {}))
+        say(f"[허브] {hub_url} 기기 {cfg.hub_device_id}")
+        waiting = len(store.pending())
+        if waiting:
+            say(f"[허브] 지난 실행의 스풀 {waiting}건부터 올립니다.")
+    observer = market_observer.MarketObserver(
+        local_id, table, say=say, enqueue=uploader.enqueue if uploader is not None else None)
+    return Market(cb=observer, uploader=uploader, observer=observer)
+
+
 def run(opts: RunOptions, *, engine_factory=None, recorder=None,
         indexer: Optional[PidIndexer] = None, stdin: Optional[TextIO] = None,
         out: Optional[TextIO] = None, clock: Callable[[], float] = time.monotonic,
-        sleep: Callable[[float], None] = time.sleep) -> int:
+        sleep: Callable[[float], None] = time.sleep,
+        market_setup: Callable[..., Market] = setup_market) -> int:
     """관측기 1회 실행. 주입 인자는 전부 테스트용(기본 = 실 엔진·전역 recorder·stdin/stdout)."""
     out = out if out is not None else sys.stdout
     stdin = stdin if stdin is not None else sys.stdin
@@ -214,8 +274,7 @@ def run(opts: RunOptions, *, engine_factory=None, recorder=None,
     if opts.attach_log:
         _attach_console_log(out)
 
-    mode = (f"수집 {opts.capture_min:g}분" if opts.capture_min
-            else "관측 대기(파서 미탑재 — 스니퍼 생존·흐름 락 확인용)")
+    mode = (f"관측 + 수집 {opts.capture_min:g}분" if opts.capture_min else "관측")
     try:
         ledger = ledger_paths.packet_dir()
     except Exception:
@@ -232,9 +291,11 @@ def run(opts: RunOptions, *, engine_factory=None, recorder=None,
         # 전투 IN/OUT·조철·미상 팝업 — 스트림이 실제로 디코드되고 있다는 생존 증거.
         say(f"[패킷] 클라{slot_idx + 1} 이벤트 — {kind}")
 
+    market = market_setup(opts, say, stdin)
+
     engine = factory(
         indexer.provide, status_cb=say, event_cb=event_cb,
-        segment_cb=recorder.note_segment,
+        segment_cb=recorder.note_segment, market_cb=market.cb,
         enter_anchor=os.environ.get("SEASSIST_PACKET_ENTER_ANCHOR", "1").strip() != "0")
 
     def close_window(reason: str) -> None:
@@ -305,14 +366,48 @@ def run(opts: RunOptions, *, engine_factory=None, recorder=None,
             engine.stop()
         except Exception:
             pass
+        _stop_uploader(market)
         try:
             h = engine.health_snapshot()
             say(f"[패킷] 종료 헬스 — 패킷 {h.get('packets', 0)} / 세그 {h.get('fed_segments', 0)} / "
                 f"흐름 {h.get('tracked_flows', 0)} / 전투 {h.get('battle_events', 0)} / "
-                f"오픈 {h.get('opens', 0)} / 라벨 {state['labels']}")
+                f"오픈 {h.get('opens', 0)} / 라벨 {state['labels']} / "
+                f"육의전 {h.get('market_frames', 0)}쪽 {h.get('market_rows', 0)}행"
+                f"(거부 {h.get('market_rejected', 0)} · 유실 {h.get('market_dropped', 0)})")
         except Exception:
             pass
+        _say_upload_health(market, say)
     return _finish(rc, opts, say, final, state)
+
+
+def _stop_uploader(market: Market) -> None:
+    """업로더를 멈추고 잠깐 기다린다 — 큐에 남은 관측을 스풀에 내려놓을 시간(전송은 다음 실행)."""
+    up = market.uploader
+    if up is None:
+        return
+    try:
+        up.stop()
+        if up.is_alive():
+            up.join(timeout=3.0)
+    except Exception:
+        pass
+
+
+def _say_upload_health(market: Market, say: Callable[[str], None]) -> None:
+    obs, up = market.observer, market.uploader
+    if obs is None:
+        return
+    line = f"[육의전] 관측 {obs.pages}쪽 {obs.rows}행 / 이름 미해석 {obs.unknown_item}행"
+    if up is not None:
+        try:
+            waiting = len(up.spool.pending())
+        except Exception:
+            waiting = -1
+        line += (f" / 업로드 {up.uploaded}건 · 대기 {waiting}배치 · 격리 {up.quarantined}"
+                 f" · 큐 유실 {up.queue_dropped}")
+        if up.halted:
+            line += f" · 정지({up.stopped_reason})"
+    say(line)
 
 
 def _open_window(opts, engine, recorder, indexer, state, stop, say, clock, sleep) -> int:

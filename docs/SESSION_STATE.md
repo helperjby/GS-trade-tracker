@@ -1,7 +1,7 @@
 # Session State
 
-Updated: 2026-09-22 저녁 (Asia/Seoul) — **PR-Y2' 이식 완료(아래 절): 벤더 전량 소유 전환 + 육의전 프레이머·파서·엔진 콜백 ·
-다음은 PR-Y1b(관측 모드·등록 UX·업로드)** · 허브 공개 업로드 PR #10 **머지 완료** ·
+Updated: 2026-09-22 저녁 (Asia/Seoul) — **PR-Y2' 이식 + PR-Y1b 관측·업로드 완료(아래 두 절) — 다음은 실기기 G7** ·
+허브 공개 업로드 PR #10 **머지 완료** ·
 **방향 전환(사용자 결정 2026-09-22): SEAssist 레포에는 더 이상 머지하지 않는다.**
 **PR #5(PR-Y2b 아이템 표)·PR #6(PR-Y3 허브) 머지 완료**(https://github.com/helperjby/GS-trade-tracker/pull/5 840d8d3 · https://github.com/helperjby/GS-trade-tracker/pull/6 1ed43ef,
 각 `/code-review high` 15건·14건 전부 반영) · **허브 Pi 배포 완료(2026-09-22 11:24, `~/yuktracker-hub`, :8800, G7 `stats` 응답 확인 — 아래 "허브 배포")** ·
@@ -51,7 +51,10 @@ SEAssist PR #306(PR-Y2) **미머지 → 닫음 예정, 이 레포로 이식(PR-Y
   --build`(포트 8800·8801) → `sudo tailscale funnel --bg 8801`(관리 콘솔 HTTPS·`funnel` 노드 속성) → 폰 LTE 게이트(`GET /` 200 · stats 403
   (더미 Bearer) · register 200/401) → `devices.py list`. 그 뒤 PR-Y2' → PR-Y1b(등록 UX 포함).
 
-## PR-Y2' 이식 (2026-09-22 저녁, 이 레포)
+## PR-Y2' 이식 (2026-09-22 저녁, 이 레포 — **PR #11 머지 완료**)
+
+> https://github.com/helperjby/GS-trade-tracker/pull/11 (a780059). PR-Y1b(#12)는 그 위 스택이었고
+> 머지와 함께 base 가 `main` 으로 자동 전환됐다.
 
 - **벤더 동결 처리 = 전량 소유 전환**(사용자 결정). 후보 셋 중 (a) 별도 모듈/서브클래스는 불가능에 가깝다 — 육의전 전량 대기
   분기가 `StreamFramer.feed()` 루프 안(`observe_wordinput` 과 같은 자리)에 있어야 해서 서브클래스는 100줄 루프 복제가 된다.
@@ -73,6 +76,31 @@ SEAssist PR #306(PR-Y2) **미머지 → 닫음 예정, 이 레포로 이식(PR-Y
   고정 코퍼스 45창 = 8창 39페이지(9번째 등록 창은 음성이라 0페이지, 매니페스트의 market 39 와 일치).
 - 문서: `docs/PACKET-MARKET.md` 신규(이 트랙의 프로토콜 정본 — 필드 표·라벨 대조·예측 검정·가설 레지스트리 H-2609-07~11·
   재현 기록·PATCH-RECHECK·다음 캡처). 판매자명은 합성(`판매자A`~`H`), 기기명·창 파일명·실캡처 경로는 옮기지 않았다.
+
+## PR-Y1b 관측 모드·등록 UX·업로드 (2026-09-22 저녁, 이 레포)
+
+- 배선: 엔진 `market_cb` → `market_observer`(봉투) → 큐 → `spool`(배치 파일) → 업로더 스레드 → `hub_client`(urllib).
+  스니퍼 스레드는 print + enqueue 만 한다(파일·네트워크 금지). `agent.setup_market` 이 전부를 조립하고,
+  테스트는 설정 경로·스풀 폴더·등록 함수·POST 함수를 주입한다(사용자 프로필·네트워크 무접촉).
+- **등록 UX**: `hub_token` 이 없으면 `--invite-code` 또는 콘솔 프롬프트 → `POST /api/market/register` →
+  `hub_device_id`·`hub_token` 을 `%APPDATA%\YukTracker\config.json` 에 저장(초대 코드는 저장하지 않는다).
+  실패(401 `bad_invite`·403 `registration_full`/`registration_closed`·429·인증서)는 **사유 한 줄 + 관측 계속**이고
+  자동 재등록은 하지 않는다. 빈 입력(EOF 포함)이면 업로드 없이 관측만 한다.
+- **`obs_id` 접두사 = `local_id`**(설치본 고유 8자리 hex, 설정에 1회 생성) — 허브 `device_id` 가 아니다. 재등록으로
+  기기 id 가 바뀌어도 스풀에 남아 있던 관측의 id 가 흔들리지 않는다. HUB-PROTOCOL §3-1 에 이 정의를 적었다.
+- **시각**: 엔진 `now_fn` 이 단조시계라 `agent_ts = time.time() - (monotonic() - observation.ts)` 로 되돌린다
+  (스풀에 묵었다 늦게 올라가도 "그때 본 목록"의 시각이 남는다).
+- 응답별 행동 한 곳(`hub_client.classify_upload`): 200 삭제 · 400 격리 · 401/403 정지(스풀 유지) · 429 `Retry-After`
+  대기 · 413 분할 · 5xx·네트워크 백오프(1s→300s) · 인증서 실패는 무한 재시도 대신 정지 + 안내.
+- **빌드 시 허브 주소 주입**: `tools/gen_build_config.py` 가 `%YUKTRACKER_HUB_URL%` → `src/yuktracker/_build_config.py`
+  (gitignore). 주소 우선순위 = `--hub-url` > 설정 > 환경변수 > 빌드 주입 > 없음(업로드 비활성).
+- CLI 추가: `--hub-url` · `--invite-code` · `--device-label`(기본 호스트명) · `--client-dir` · `--no-upload`.
+  모드 문구가 "관측"/"관측 + 수집 N분" 으로 바뀌었고 종료 헬스에 육의전·업로드 카운터가 붙는다.
+- 검증: 루트 **199 passed**(신규 62) · hub 82 passed · **종단 스모크 13/13**(로컬 허브 관리·공개 두 리스너:
+  공개 stats 403 → 잘못된 초대 코드 401 → 등록 → 업로드 200 → 같은 obs_id 중복 → 검색 `작은바람의속성석 7개
+  1,234,000원` → 미해석 행 null 저장 → 잘못된 토큰 401 정지·스풀 유지 → device_mismatch → 400 격리 →
+  재시작 뒤 남은 스풀 자동 업로드 → stats 관측 2·기기 1).
+- 남은 것: 실기기 G7 — exe 배포 → 초대 코드 등록 → 육의전 1회 열람 → 허브 `search` 반영 ≤10s · 음성 0건.
 
 ## 현재 상태
 
@@ -177,6 +205,6 @@ SEAssist PR #306(PR-Y2) **미머지 → 닫음 예정, 이 레포로 이식(PR-Y
 1. PR #5·#6 머지 · Pi 배포 — **완료(2026-09-22)**. SEAssist PR #306 은 **닫는다**(머지 안 함). 2. 허브 운영 확인: 첫 실업로드(PR-Y1b) 뒤
    `stats.devices` 에 기기가 보이고 `docker compose logs` 에 `market 관측 수신` 줄이 찍히는지(G7 2차).
 3. ~~PR-Y2' 이식~~ — **완료(2026-09-22, 위 절)**. SEAssist PR #306 은 닫는다(이식 원본 worktree 는 PR-Y1b 까지 보존).
-4. PR-Y1b(여기): `market_cb` → `load_item_table` 이름 해석 → 스풀 → 첫 실행 `--invite-code` 등록(§3-0) → `hub_url/hub_device_id/hub_token`
-   (`%APPDATA%\YukTracker\config.json`)로 HTTPS 업로드(HUB-PROTOCOL §3-1; 429 대기·401/403 정지·`device_id` 는 POST 시점). 5. 실기기: Step 0 잔여 캡처 2창(라벨 5열 `@45` 검정 · 용병 탭 열람 · 수량 ≥65,536·타 PC 세션) ·
+4. ~~PR-Y1b~~ — **완료(2026-09-22, 위 절)**. 남은 것은 실기기 G7: `set YUKTRACKER_HUB_URL=…` → `build.bat` → exe 전달 →
+   각 PC 에서 초대 코드로 등록 → 육의전 1회 열람 → 허브 `search` 반영 확인. 5. 실기기: Step 0 잔여 캡처 2창(라벨 5열 `@45` 검정 · 용병 탭 열람 · 수량 ≥65,536·타 PC 세션) ·
    `python tools\console_input_probe.py` 진단 → `_Console` 수정 PR. 6. PR-Y4 미루봇: `http://127.0.0.1:8800`, HUB-PROTOCOL §3-2/§3-3(`Lv.` 표시 보류).

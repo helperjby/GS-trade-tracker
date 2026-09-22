@@ -131,7 +131,7 @@ CREATE TABLE devices (                  -- 초대 코드로 자기등록한 관�
 // → 요청 (관측 1~100건, 관측당 행 0~64)
 {"v":1, "device_id":"DEV-1",
  "observations":[
-   {"obs_id":"DEV-1:1758500000123:0123456789ab",       // "{device}:{agent_ts_ms}:{sha1(body)[:12]}" — 관측기가 만든다
+   {"obs_id":"ab12cd34:1758500000123:0123456789ab",    // "{local_id}:{agent_ts_ms}:{sha1(body)[:12]}" — 관측기가 만든다
     "agent_ts":1758500000.123, "opcode":12831,         // 0x321f
     "page":null, "total_pages":12, "hdr4":0,           // page: 응답엔 페이지 번호가 없다(null 허용)
     "anomalies":[],                                     // 파서 anomaly 이름들 (있으면 그대로)
@@ -139,6 +139,7 @@ CREATE TABLE devices (                  -- 초대 코드로 자기등록한 관�
     "rows":[                                            // SEAssist packet_market.row_to_dict 키 + item_name
       {"listing_id":700001,"item_id":853,"item_name":"봉인의돌","quantity":10,"quantity_hi":0,
        "price":45000000,"price_hi":0,"seller":"판매자A","unknown40":"00000000","flag45":2,"flag46":0}]}]}
+// 관측기 구현: yuktracker/market_observer.py(봉투) · spool.py(스풀·업로더) · hub_client.py(요청·응답 해석)
 // ← 200
 {"ok":true,"accepted":1,"duplicates":0,"rows":1,"server_time":1758500001.5}
 ```
@@ -175,6 +176,10 @@ CREATE TABLE devices (                  -- 초대 코드로 자기등록한 관�
 **401·403 은 업로더를 멈추고**(스풀 유지) 상태 줄에 사유를 보인다 — 자동 재등록 금지, 사용자가 `--invite-code` 로 다시 등록한다;
 `device_mismatch` 는 응답의 `device_id` 와 설정을 대조한다. `device_id` 는 스풀 파일이 아니라 **POST 시점**에 채운다(재등록 뒤
 옛 스풀이 영구 mismatch 되지 않게). 같은 `obs_id` 가 두 번 가는 것은 정상(허브가 dedup).
+
+`obs_id` 의 접두사는 허브가 발급한 `device_id` 가 아니라 **설치본 고유 id(`local_id`, 8자리 hex)** 다 — 같은 이유다.
+재등록으로 `device_id` 가 바뀌어도 스풀에 남아 있던 관측의 id 가 흔들리지 않아야 dedup 이 성립한다(`app_config.local_id`,
+`%APPDATA%\YukTracker\config.json` 에 1회 생성). 그 값이 무엇이든 허브는 문자열로만 다룬다.
 
 허브 쪽 기록: 기기 토큰 업로드가 200 이면 관측과 **같은 트랜잭션**에서 `devices.last_seen_ts`·`upload_count` 를 쓴다(커밋 1회,
 저장 실패면 기기 기록도 없다). 인증은 됐지만 거부된 업로드(400·403 `device_mismatch`)도 `last_seen_ts` 는 남긴다 — 운영자가
