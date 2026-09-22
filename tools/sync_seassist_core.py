@@ -1,4 +1,4 @@
-"""SEAssist 패킷 코어 동기화 — `C:\\dev\\gersang/src/core` 의 허용 목록 모듈을 `src/yuktracker/seassist/` 로.
+"""SEAssist 패킷 코어 동기화 — SEAssist 레포 `src/core` 의 허용 목록 모듈을 `src/yuktracker/seassist/` 로.
 
 왜 벤더 사본인가
 ----------------
@@ -19,15 +19,17 @@
 
 사용
 ----
-    python tools/sync_seassist_core.py                      # 기본 소스 C:\\dev\\gersang
-    python tools/sync_seassist_core.py --source <레포 경로>  # 다른 체크아웃/worktree
-    python tools/sync_seassist_core.py --check              # 사본 == 소스 인지만 확인 (rc 1 = 드리프트)
+    python tools/sync_seassist_core.py --source <레포 경로>  # 체크아웃/worktree 를 직접 지정
+    set SEASSIST_REPO=<레포 경로> && python tools/sync_seassist_core.py
+    python tools/sync_seassist_core.py --check              # 사본 == 소스 인지만 확인
+                                                            # (rc 1 = 드리프트, rc 2 = 소스 없음/미지정)
 """
 from __future__ import annotations
 
 import argparse
 import hashlib
 import json
+import os
 import subprocess
 import sys
 from datetime import datetime, timezone
@@ -35,7 +37,8 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 DEST = ROOT / "src" / "yuktracker" / "seassist"
-DEFAULT_SOURCE = Path(r"C:\dev\gersang")
+#: SEAssist 체크아웃 위치는 기기마다 다르고, 이 레포는 공개다 — 경로를 소스에 박지 않는다.
+SOURCE_ENV = "SEASSIST_REPO"
 SOURCE_SUBDIR = Path("src") / "core"
 VENDOR_FILE = DEST / "VENDOR.json"
 
@@ -124,11 +127,11 @@ def sync(source: Path) -> int:
             dst.write_bytes(data)
             changed += 1
         files[name] = {"sha256": hashlib.sha256(data).hexdigest(), "bytes": len(data)}
+    # 출처는 커밋으로만 기록한다 — 로컬 절대 경로·브랜치명은 공개 레포에 남기지 않는다.
     vendor = {
-        "source": str(source),
+        "source": "SEAssist",
         "source_subdir": str(SOURCE_SUBDIR).replace("\\", "/"),
         "commit": _git(source, "rev-parse", "HEAD"),
-        "branch": _git(source, "branch", "--show-current"),
         "dirty": bool(_git(source, "status", "--porcelain", "--", str(SOURCE_SUBDIR))),
         "synced_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "owned": list(OWNED),
@@ -148,11 +151,15 @@ def main(argv: list[str] | None = None) -> int:
         except Exception:
             pass
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    ap.add_argument("--source", type=Path, default=DEFAULT_SOURCE,
-                    help=f"SEAssist 레포 루트 (기본 {DEFAULT_SOURCE})")
+    ap.add_argument("--source", type=Path, default=None,
+                    help=f"SEAssist 레포 루트 (생략 시 환경변수 {SOURCE_ENV})")
     ap.add_argument("--check", action="store_true", help="복사하지 않고 일치 여부만 검사")
     a = ap.parse_args(argv)
-    source = a.source.resolve()
+    raw = a.source or os.environ.get(SOURCE_ENV)
+    if not raw:
+        print(f"SEAssist 레포 위치가 없다 — --source <경로> 또는 환경변수 {SOURCE_ENV} 를 설정한다.")
+        return 2
+    source = Path(raw).resolve()
     if not (source / SOURCE_SUBDIR).is_dir():
         print(f"SEAssist 소스 없음: {source / SOURCE_SUBDIR}")
         return 2

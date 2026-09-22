@@ -25,6 +25,12 @@ item_names*.json
 Thumbs.db
 desktop.ini
 
-# 허브(hub/) 런타임 — 시크릿·DB 는 레포에 넣지 않는다
+# 허브(hub/) 런타임 — 시크릿·DB 는 레포에 넣지 않는다.
+# 상대 db_path·HUB_DATA_DIR 로 DB 가 hub/data/ 밖(레포 루트 등)에 생길 수 있어 넓게 막는다.
 hub/config.json
 hub/data/
+/data/
+.env
+*.db
+*.db-wal
+*.db-shm

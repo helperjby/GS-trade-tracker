@@ -10,7 +10,9 @@
 - **additive-only**: 필드는 더하기만 하고 이름·의미를 바꾸지 않는다. 읽는 쪽은 미지 키를 무시한다(tolerant reader).
   응답의 `"v": 1` 은 이 문서의 판.
 - 시각은 전부 Unix epoch 초(float). 서버 응답엔 항상 `server_time` 이 있어 클라이언트 시계 오프셋을 보정할 수 있다.
-- 판매자명 등 실데이터는 허브 DB(Pi 로컬)에만 있다. 문서·PR·테스트는 합성값(`판매자A`)만 쓴다.
+- 판매자명 등 실데이터는 허브 DB(Pi 로컬)에만 있다. 문서·PR·테스트는 합성값(`판매자A`, `DEV-1`)만 쓴다.
+  **`device_id`(= 기본값이 그 PC 의 hostname)·허브 주소·Pi 사용자명도 실데이터다** — `stats.devices` 응답이나
+  `market 관측 수신` 로그를 문서·PR 에 붙여넣을 때 기기명을 `DEV-1`/`<디바이스>` 로 바꾼다.
 
 ## 1. 데이터 모델 (`hub/db.py` SCHEMA — 배포 DB 무마이그레이션, `CREATE … IF NOT EXISTS` 만)
 
@@ -59,9 +61,9 @@ CREATE TABLE market_item_names (        -- 학습 표: 관측기가 보낸 id→
 
 ```jsonc
 // → 요청 (관측 1~100건, 관측당 행 0~64)
-{"v":1, "device_id":"DEV-A",
+{"v":1, "device_id":"DEV-1",
  "observations":[
-   {"obs_id":"DEV-A:1758500000123:0123456789ab",   // "{device}:{agent_ts_ms}:{sha1(body)[:12]}" — 관측기가 만든다
+   {"obs_id":"DEV-1:1758500000123:0123456789ab",       // "{device}:{agent_ts_ms}:{sha1(body)[:12]}" — 관측기가 만든다
     "agent_ts":1758500000.123, "opcode":12831,         // 0x321f
     "page":null, "total_pages":12, "hdr4":0,           // page: 응답엔 페이지 번호가 없다(null 허용)
     "anomalies":[],                                     // 파서 anomaly 이름들 (있으면 그대로)
@@ -75,7 +77,7 @@ CREATE TABLE market_item_names (        -- 학습 표: 관측기가 보낸 id→
 
 | 필드 | 형 | 규칙 |
 |---|---|---|
-| `device_id` | str 1~128 | 관측기 기기명(SEAssist `display_name` 과 같은 값). 요청 단위 |
+| `device_id` | str 1~101 | 관측기 기기명(SEAssist `display_name` 과 같은 값). 요청 단위. **상한이 `obs_id` 보다 27 작다** — `obs_id` 가 `{device}` 에 `:{13자리 ms}:{12자리 해시}` 를 붙이기 때문. 긴 이름은 관측기가 101자로 자른다 |
 | `obs_id` | str 1~128 | PK. 같은 값 재전송은 `duplicates` 로 세고 **아무것도 바꾸지 않는다** |
 | `agent_ts` | number | 관측기 벽시계(프레임 수신 시각). 서버는 `seen_ts = min(agent_ts, recv_ts)` 로 쓴다. 허용 범위 `[recv_ts − retention_market_days, recv_ts + max_agent_ts_ahead_sec(86400)]` — 밖이면 `400 agent_ts_out_of_range`(시계가 리셋된 기기의 관측이 200 을 받고 조회에 안 보이다 prune 에 사라지는 것을 막는다) |
 | `opcode` | int | 관측 프레임 opcode(현재 `0x321f`) |
@@ -109,7 +111,7 @@ CREATE TABLE market_item_names (        -- 학습 표: 관측기가 보낸 id→
  "listings":[
    {"listing_id":700001,"item_id":853,"item_name":"봉인의돌","quantity":10,"price":45000000,"seller":"판매자A",
     "category":"item","flag45":2,"flag46":0,"first_seen_ts":1758499000.0,"last_seen_ts":1758500000.1,
-    "seen_count":3,"last_device":"DEV-A"}, …]}
+    "seen_count":3,"last_device":"DEV-1"}, …]}
 ```
 
 | 인자 | 기본 | 규칙 |
@@ -143,7 +145,7 @@ CREATE TABLE market_item_names (        -- 학습 표: 관측기가 보낸 id→
 ```jsonc
 {"v":1,"server_time":…,"observations":412,"listings":1380,"items":97,"item_names":95,
  "fresh_listings":210,"fresh_sec":86400.0,"latest_recv_ts":1758500055.2,
- "devices":[{"device_id":"DEV-A","observations":300,"last_recv_ts":…},{"device_id":"DEV-B","observations":112,"last_recv_ts":…}]}
+ "devices":[{"device_id":"DEV-1","observations":300,"last_recv_ts":…},{"device_id":"DEV-2","observations":112,"last_recv_ts":…}]}
 ```
 
 ### 3-5. `GET /` — 무인증 상태 줄
@@ -181,3 +183,5 @@ CREATE TABLE market_item_names (        -- 학습 표: 관측기가 보낸 id→
 - 2026-09-22 v1 리뷰 반영(PR #6, additive): §3-3 복합 keyset 커서(`since_key`·`next_since_key`·행 `listing_key`), §3-1 i64 범위·
   문자열 상한·`agent_ts_out_of_range`·`500 storage_error`·payload 행은 미지 키만, §3-2 `item_id` 400, §1 이름 upsert 규칙,
   §6 secret 규칙·`db_path` 기준·`HUB_DB_PATH`·`max_agent_ts_ahead_sec`, DB `synchronous=NORMAL`.
+- 2026-09-22 v1 리뷰 반영(PR #9 리뷰): §3-1 `device_id` 상한 128 → **101**(파생 `obs_id` 가 상한 128 을 넘어 그 기기의
+  배치가 영구 격리되던 것 — `hub/server.py` 도 같이 조임), §1 기기명·허브 주소를 실데이터로 명시, 예시 기기명 `DEV-1`/`DEV-2` 로 통일.

@@ -3,8 +3,13 @@
 ## 한 줄
 
 거상 클라이언트의 s2c 패킷에서 육의전 목록을 관측해 공유 저장소로 보내는 **경량 관측기**(`src/yuktracker/`)와, 그것을
-모아 미루봇이 검색하는 **시세 허브**(`hub/`, Pi 독립 서버). 패킷 코어는 SEAssist 레포(`C:\dev\gersang`)의 벤더 사본을
-쓰되 **2026-09-22 부터 SEAssist 레포에는 변경을 내지 않는다** — 육의전 트랙의 코드·문서는 전부 여기.
+모아 미루봇이 검색하는 **시세 허브**(`hub/`, Pi 독립 서버). 패킷 코어는 SEAssist 레포(비공개, 위치는 환경변수
+`SEASSIST_REPO`)의 벤더 사본을 쓰되 **2026-09-22 부터 SEAssist 레포에는 변경을 내지 않는다** — 육의전 트랙의
+코드·문서는 전부 여기.
+
+> **이 레포는 공개다(2026-09-22~).** 실기기명·호스트명, Pi 사용자명·LAN/tailnet 주소, 로컬 절대 경로
+> (`C:\Users\…`·`C:\dev\…`·`NN. <폴더>`), 비공개 레포의 링크·브랜치·worktree 경로는 코드·문서·PR 본문·커밋
+> 메시지 어디에도 적지 않는다. 자리표시자(`<user>`·`<pi-lan-ip>`·`<디바이스>`)나 환경변수로 쓴다.
 
 ## 먼저 읽을 것
 
@@ -34,8 +39,9 @@
 - 관측기(`src/yuktracker/`)는 런타임 의존성 0(stdlib + ctypes). `tests/test_vendor.py` 의 import 경계가 막는다 — cv2·numpy·PIL·
   pywin32·requests 를 추가하지 않는다. **허브(`hub/`)는 별개 배포 단위**: `aiohttp` 하나 + sqlite3, `src/` 를 import 하지 않는다
   (Docker 빌드 컨텍스트 = `hub/`). 허브 스키마는 `CREATE … IF NOT EXISTS` 로 additive 하게만(배포 DB 무마이그레이션), API 는 additive-only.
-- 원시 캡처(`window_*.jsonl`)·판매자명 등 실데이터를 레포에 넣지 않는다. 테스트 픽스처는 합성으로(`판매자A`, `DEV-1`).
-  허브 시크릿·DB(`hub/config.json`, `hub/data/`)도 `.gitignore` — 예시 파일(`.example`)만 커밋.
+- 원시 캡처(`window_*.jsonl`)·판매자명 등 실데이터를 레포에 넣지 않는다. **실기기명·Pi 주소·사용자명도 실데이터로 본다**
+  (`device_id` 는 기본값이 그 PC 의 hostname 이다 — `ledger_paths._device_name`). 테스트 픽스처·문서 예시는 합성으로
+  (`판매자A`, `DEV-1`). 허브 시크릿·DB(`hub/config.json`, `hub/data/`, `.env`, `*.db`)도 `.gitignore` — 예시 파일(`.example`)만 커밋.
 - 게임에 입력을 보내는 코드는 이 프로젝트에 없다(읽기 전용). 이 경계를 넘는 기능은 여기 두지 않는다.
 - 클라 데이터 파일(`gersang.gcs` 등)은 **읽기 전용**으로만 연다(프로세스·메모리·네트워크 무접촉). 추출한
   아이템 표·캐시는 레포 밖(`%APPDATA%\YukTracker`, `--out` 은 `.gitignore`)에 두고 재배포하지 않는다.
@@ -48,6 +54,7 @@
 python -m pytest                                   # 관측기 테스트 (tests/)
 python -X utf8 -m pytest hub/tests -q              # 허브 테스트 (aiohttp 필요: pip install -r hub/requirements.txt)
 python tools\sync_seassist_core.py --check         # 벤더 사본 == 동결 시점 소스 ? (b54cb73 체크아웃 기준)
+                                                   # 소스 위치 = %SEASSIST_REPO% 또는 --source, 없으면 rc 2 로 건너뜀
 run_dev.bat [--capture N | --capture 0]
 build.bat
 python hub\server.py --config hub\config.json      # 허브 로컬 실행 (배포는 hub/README.md)
