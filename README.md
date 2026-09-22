@@ -26,8 +26,7 @@
 
 ```
 run_dev.bat                               # 관측기 소스 실행(관리자 승격) — 기본 5분 수집 창
-build.bat                                 # 테스트 → PyInstaller → dist\YukTracker.exe
-                                          # (1단계 벤더 드리프트 검사는 SEASSIST_REPO 가 있을 때만 — 없으면 건너뛴다)
+build.bat                                 # 출처 선언 검사 → 테스트 → PyInstaller → dist\YukTracker.exe
 python tools\dump_item_names.py --check   # 클라이언트의 아이템 id→이름 표 추출 확인
 ```
 
@@ -41,8 +40,8 @@ python -X utf8 -m pytest hub/tests -q     # 허브 테스트 (pip install -r hub
 ```
 
 - Python 3.11+. 관측기는 런타임 의존성 0, 허브는 `aiohttp` 하나.
-- `src/yuktracker/seassist/` 는 같은 작성자의 다른 프로젝트(SEAssist)에서 가져온 패킷 코어의 벤더 사본 — `VENDOR.json` 에
-  출처·해시가 있고 테스트가 이를 고정한다. 손으로 고치지 않는다.
+- `src/yuktracker/seassist/` 는 같은 작성자의 다른 프로젝트(SEAssist)에서 온 패킷 코어이고 **지금은 이 레포가 소유**한다 —
+  `VENDOR.json` 에 출처 커밋과 그 시점의 해시가 있고, 달라진 파일은 사유와 함께 선언한다(테스트가 선언을 검사).
 - 실데이터(캡처 파일·판매자명·추출한 아이템 표·허브 DB·시크릿)는 레포에 넣지 않는다. 테스트는 합성 데이터만 쓴다.
   실기기명·호스트명, Pi 주소·사용자명, 로컬 절대 경로도 같은 규칙 — 문서·PR 본문·커밋 메시지에 적지 않는다.
 

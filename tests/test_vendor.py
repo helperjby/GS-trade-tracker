@@ -29,20 +29,41 @@ def _imports(path: Path) -> set[str]:
 
 
 class VendorManifestTest(unittest.TestCase):
-    def test_manifest_matches_files(self) -> None:
-        vendor = json.loads((VENDOR_DIR / "VENDOR.json").read_text(encoding="utf-8"))
-        self.assertEqual(set(vendor["files"]), set(sync.MODULES))
-        for name, meta in vendor["files"].items():
-            # 줄바꿈 정규화(LF) 뒤 해시 — 체크아웃의 CRLF/LF 차이는 드리프트가 아니다.
-            data = sync.normalize((VENDOR_DIR / name).read_bytes())
-            self.assertEqual(hashlib.sha256(data).hexdigest(), meta["sha256"],
-                             f"{name} 이 손으로 바뀌었다 — tools/sync_seassist_core.py 로만 갱신")
-            self.assertEqual(len(data), meta["bytes"], name)
-        self.assertTrue(vendor.get("commit"), "출처 커밋이 비어 있다")
+    """`seassist/` 는 벤더 사본이 아니라 **이 레포 소유**다(2026-09-22 전량 소유 전환).
+    복사 경로가 없으므로 해시 고정 대신 *출처 기록*을 검사한다 — 출처와 달라진 파일은
+    반드시 `VENDOR.json` 의 `diverged` 가 사유와 함께 선언한다(조용한 변경 금지)."""
 
-    def test_owned_files_are_not_synced(self) -> None:
-        self.assertNotIn("config.py", sync.MODULES)
-        self.assertIn("config.py", sync.OWNED)
+    def setUp(self) -> None:
+        self.vendor = json.loads((VENDOR_DIR / "VENDOR.json").read_text(encoding="utf-8"))
+
+    def test_manifest_covers_every_file(self) -> None:
+        on_disk = {p.name for p in VENDOR_DIR.iterdir() if p.is_file()}
+        declared = set(self.vendor["origin"]["files"]) | set(self.vendor["repo_own"])
+        self.assertEqual(on_disk, declared,
+                         "새 파일은 VENDOR.json 의 origin.files(출처 있음) 또는 repo_own(이 레포 것)에 적는다")
+        self.assertEqual(set(sync.OWNED), declared)
+        # 동기화(복사) 대상은 없다 — 스크립트가 파일을 덮어쓰는 경로가 사라졌다.
+        self.assertEqual(sync.MODULES, ())
+        self.assertTrue(self.vendor["origin"].get("commit"), "출처 커밋이 비어 있다")
+
+    def test_origin_records_hash_and_size(self) -> None:
+        for name, meta in self.vendor["origin"]["files"].items():
+            self.assertRegex(meta["sha256"], r"^[0-9a-f]{64}$", name)
+            self.assertGreater(meta["bytes"], 0, name)
+
+    def test_diverged_declares_every_local_change(self) -> None:
+        actual = set(sync.diverged_now(self.vendor))
+        declared = {d["file"] for d in self.vendor["diverged"]}
+        self.assertEqual(actual, declared,
+                         "출처와 내용이 다른 파일은 diverged 에 사유와 함께 적는다 "
+                         "(tools/sync_seassist_core.py --check 와 같은 검사)")
+        for d in self.vendor["diverged"]:
+            self.assertIn(d["file"], self.vendor["origin"]["files"], d["file"])
+            self.assertTrue(str(d.get("why", "")).strip(), f"{d['file']}: 사유가 비어 있다")
+
+    def test_config_shim_is_repo_own(self) -> None:
+        self.assertIn("config.py", self.vendor["repo_own"])
+        self.assertNotIn("config.py", self.vendor["origin"]["files"])
 
 
 class ImportBoundaryTest(unittest.TestCase):
