@@ -2,7 +2,8 @@ services:
   yuktracker-hub:
     build: .
     restart: unless-stopped
-    ports: ["8800:8800"]
+    # 8800 = 관리 리스너(봇·제작자 직접 접속, Funnel 걸지 않음) · 8801 = 공개 리스너(`tailscale funnel --bg 8801` 대상)
+    ports: ["8800:8800", "8801:8801"]
     volumes:
       - "${HUB_DATA_DIR:-./data}:/data"
       - "./config.json:/app/config.json:ro"

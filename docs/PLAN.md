@@ -134,10 +134,11 @@ python scripts/mine_packet_discovery.py --all --lead-sec 30
   (복합 keyset 커서 → `next_since_ts`·`next_since_key`; PR #6 리뷰 반영 2026-09-22) · `GET /api/market/stats` · `GET /`(무인증 상태 줄).
 - 시각·신선도: `seen_ts = min(agent_ts, recv_ts)`; upsert 는 "더 나중에 본 관측이 상태를 쓴다"(역순 스풀 업로드는 first_seen 만 앞당김);
   "사라짐" 판정 없음, `max_age_sec`(기본 24h) 밖은 숨기고 `last_seen_ts` 를 준다. 보존 30일(`retention_market_days`), 학습 표는 유지.
-- **공개 업로드(2026-09-22 추가)**: 관측기는 Npcap 만 있는 일반 사용자 PC 에서 돌므로 VPN 전제를 버리고 Pi 의 **Tailscale Funnel** 로
-  8800 을 공개 + **초대 코드 자기등록**(`POST /api/market/register` → 기기별 토큰·허브 발급 `device_id`, `devices` 표). 관리 시크릿은
-  직접 접속 전용(`Tailscale-Funnel-Request` 헤더로 공개 판정, 조회 라우트 403 `not_public`, exe 금지), 속도제한 429, `hub/devices.py`
-  CLI(취소 즉시 반영). 정본 HUB-PROTOCOL §0·§3-0·§3-6, 절차 hub/README "공개 노출".
+- **공개 업로드(2026-09-22 추가)**: 관측기는 Npcap 만 있는 일반 사용자 PC 에서 돌므로 VPN 전제를 버리고, 공개 리스너 **8801** 을 Pi 의
+  **Tailscale Funnel** 로 공개(관리 리스너 8800 은 직접 접속 전용) + **초대 코드 자기등록**(`POST /api/market/register` → 기기별 토큰·허브
+  발급 `device_id`, `devices` 표). 관리 시크릿은 exe 금지·공개 요청 무시(공개 리스너 전부 + 8800 의 `Tailscale-Funnel-Request` 헤더 2차
+  방어, 조회 라우트 403 `not_public`), 속도제한 429, `hub/devices.py` CLI(취소 즉시 반영, `--stale`). 정본 HUB-PROTOCOL §0·§3-0·§3-6,
+  절차 hub/README "공개 노출".
 
 ### PR-Y1b — 이 프로젝트, 관측 모드 (PR-Y2'·Y3 뒤)
 - `market_cb(slot_idx, page, observation, *, pid)`(엔진이 이미 파싱한 `MarketPage`) → 행마다 `row_to_dict` + `item_name`
@@ -158,7 +159,7 @@ python scripts/mine_packet_discovery.py --all --lead-sec 30
 ### 배포·실기기 게이트(G7)
 1. 이 프로젝트 `build.bat` → 각 PC 에 `YukTracker.exe`(SEAssist 머지·배포 불필요).
 2. Pi: `hub/` 복사 → `config.json` 에 `invite_code` → `docker compose up -d --build`(별도 컨테이너, 8800) → `curl …:8800/api/market/stats`
-   → `sudo tailscale funnel --bg 8800` → 외부망 게이트(hub/README "공개 노출": `GET /` 200 · stats 403 `not_public` · register 200/401 · `devices.py list`).
+   → `sudo tailscale funnel --bg 8801`(공개 리스너) → 외부망 게이트(hub/README "공개 노출": `GET /` 200 · stats 403 `not_public` · register 200/401 · `devices.py list`).
 3. 사용자 1명이 육의전을 연다 → 관측기 상태 줄 → 허브 `search?q=<아이템>` 에 그 목록(≥1건 실발화).
    게이트: 승격·Npcap·캡처 시작 줄 / 육의전 열람 1회 = 관측 ≥1 / 허브 반영 ≤10s / 스풀 재시도 / 음성 0건.
 

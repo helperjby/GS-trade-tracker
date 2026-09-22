@@ -1,4 +1,4 @@
-"""hub DB — 정규화 한 정의 · prune 경계 · 스키마 재오픈 · 배치 롤백 · 기기 표."""
+"""hub DB — 정규화 한 정의 · prune 경계 · 스키마 재오픈 · 배치 롤백 · 기기 표(활성 정의·일괄 취소·같은 트랜잭션 기록)."""
 from __future__ import annotations
 
 import re
@@ -7,6 +7,8 @@ import sqlite3
 import pytest
 
 import db as db_mod
+
+DAY = 86400.0
 
 
 def _open(tmp_path):
@@ -131,24 +133,63 @@ def test_devices_create_lookup_record_revoke_note(tmp_path):
     assert d.get_device_by_token_hash("h1") == {"device_id": a, "label": "PC-A", "revoked_ts": None,
                                                  "upload_count": 0, "last_seen_ts": None}
     assert d.get_device_by_token_hash("nope") is None
-    d.record_device_upload(a, 150.0, True)
-    d.record_device_upload(a, 160.0, False)          # 저장 실패(500)는 last_seen 만
+    assert d.get_device("d-0000000000") is None
+    # 기기 토큰 업로드 — 관측과 같은 트랜잭션에서 last_seen/upload_count
+    d.insert_market_observations(a, [_obs("o1", 150.0, [_row()])], 150.0, seen_device=a)
+    d.touch_device(a, 160.0)                          # 거부된 업로드(400/403)는 last_seen 만
     dev = d.get_device_by_token_hash("h1")
     assert (dev["upload_count"], dev["last_seen_ts"]) == (1, 160.0)
-    assert d.count_active_devices() == 1
-    assert d.set_device_revoked(a, 200.0) is True and d.count_active_devices() == 0
+    assert d.count_active_devices(200.0, 1000.0, 1000.0) == 1
+    assert d.set_device_revoked(a, 200.0) is True and d.count_active_devices(200.0, 1000.0, 1000.0) == 0
     assert d.get_device_by_token_hash("h1")["revoked_ts"] == 200.0
     assert d.set_device_revoked("d-0000000000", 200.0) is False
     assert d.set_device_note(a, "메모") is True and d.set_device_note("d-0000000000", "x") is False
-    assert d.set_device_revoked(a, None) is True and d.count_active_devices() == 1
-    (entry,) = d.list_devices()
-    assert entry == {"device_id": a, "label": "PC-A", "created_ts": 100.0, "created_ip": "203.0.113.7",
-                     "last_seen_ts": 160.0, "upload_count": 1, "revoked_ts": None, "note": "메모"}
+    assert d.set_device_revoked(a, None) is True and d.count_active_devices(200.0, 1000.0, 1000.0) == 1
+    assert d.get_device(a) == {"device_id": a, "label": "PC-A", "created_ts": 100.0, "created_ip": "203.0.113.7",
+                               "last_seen_ts": 160.0, "upload_count": 1, "revoked_ts": None, "note": "메모"}
+    assert d.list_devices() == [d.get_device(a)]
     with pytest.raises(sqlite3.IntegrityError):     # token_hash UNIQUE — 재생성으로 못 푼다
         d.create_device("PC-B", "h1", 300.0, None)
-    assert d.count_active_devices() == 1             # 실패한 삽입은 롤백
     b = d.create_device("PC-B", "h2", 300.0, None)
     assert [x["device_id"] for x in d.list_devices()] == [a, b]   # created_ts 순
+    d.close()
+
+
+def test_insert_with_seen_device_rolls_back_device_record_too(tmp_path):
+    d = _open(tmp_path)
+    a = d.create_device("A", "h1", 1.0, None)
+    bad = [_obs("ok", 10.0, [_row()]), {"obs_id": "broken", "agent_ts": 10.0, "opcode": 1, "rows": [{"listing_id": "x"}]}]
+    with pytest.raises((KeyError, ValueError, TypeError)):
+        d.insert_market_observations(a, bad, 10.0, seen_device=a)
+    dev = d.get_device(a)
+    assert (dev["upload_count"], dev["last_seen_ts"]) == (0, None)    # 커밋 1회 — 실패하면 기기 기록도 없다
+    d.close()
+
+
+def test_active_definition_idle_window_and_unseen_grace(tmp_path):
+    d = _open(tmp_path)
+    now = 100 * DAY
+    idle, grace = 30 * DAY, 1 * DAY
+    seen_recent = d.create_device("a", "h1", now - 50 * DAY, None)
+    d.touch_device(seen_recent, now - 29 * DAY)
+    seen_old = d.create_device("b", "h2", now - 50 * DAY, None)
+    d.touch_device(seen_old, now - 31 * DAY)
+    unseen_new = d.create_device("c", "h3", now - 0.5 * DAY, None)
+    unseen_old = d.create_device("d", "h4", now - 2 * DAY, None)
+    revoked = d.create_device("e", "h5", now, None)
+    d.set_device_revoked(revoked, now)
+    assert d.count_active_devices(now, idle, grace) == 2                  # seen_recent + unseen_new
+    s = d.market_stats(now, 86400.0, idle, grace)
+    assert (s["devices_registered"], s["devices_active"], s["devices_revoked"]) == (4, 2, 1)
+    # 일괄 취소 — idle 넘게 안 올린(안 올렸으면 등록 뒤 idle 지난) 미취소 기기
+    assert d.revoke_stale_devices(now, idle, "stale") == 1                # seen_old 만(unseen_old 는 2일이라 남는다)
+    assert d.get_device(seen_old)["revoked_ts"] == now and d.get_device(seen_old)["note"] == "stale"
+    assert d.get_device(unseen_old)["revoked_ts"] is None
+    d.touch_device(seen_recent, now)                                      # 방금 올린 기기는 1일 기준에도 남는다
+    assert d.revoke_stale_devices(now, 1 * DAY, "stale") == 1             # 이제 unseen_old(2일) — unseen_new(0.5일)는 남는다
+    assert d.get_device(unseen_old)["revoked_ts"] == now and d.get_device(unseen_new)["revoked_ts"] is None
+    assert d.get_device(seen_recent)["revoked_ts"] is None
+    assert d.revoke_stale_devices(now, 1 * DAY, "stale") == 0             # 멱등
     d.close()
 
 
@@ -177,9 +218,9 @@ def test_stats_joins_label_and_counts(tmp_path):
     a = d.create_device("PC-A", "h1", 1.0, None)
     b = d.create_device("PC-B", "h2", 2.0, None)
     d.set_device_revoked(b, 3.0)
-    d.insert_market_observations(a, [_obs("o1", 10.0, [_row()])], 10.0)
+    d.insert_market_observations(a, [_obs("o1", 10.0, [_row()])], 10.0, seen_device=a)
     d.insert_market_observations("ADMIN", [_obs("o2", 10.0, [_row(listing_id=2)])], 10.0)
-    s = d.market_stats(20.0)
+    s = d.market_stats(20.0, 86400.0, 1000.0, 1000.0)
     assert [(x["device_id"], x["label"], x["observations"]) for x in s["devices"]] == [("ADMIN", None, 1), (a, "PC-A", 1)]
-    assert (s["devices_registered"], s["devices_revoked"]) == (1, 1)
+    assert (s["devices_registered"], s["devices_active"], s["devices_revoked"]) == (1, 1, 1)
     d.close()

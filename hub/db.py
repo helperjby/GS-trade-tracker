@@ -11,7 +11,8 @@
 - ``market_item_names`` — 관측기가 함께 보낸 아이템 id→이름 누적(이름을 못 푼 행을 검색 때 보충).
 - ``devices`` — 초대 코드로 자기등록한 관측기 기기: 허브가 발급한 ``device_id`` 와 업로드 토큰의 sha256.
   토큰 원문은 저장하지 않는다(등록 응답 1회만). 취소(``revoked_ts``)는 다음 요청부터 바로 먹는다 — 서버는
-  요청마다 이 표를 본다. prune 대상이 아니다.
+  요청마다 이 표를 본다. prune 대상이 아니다. "활성"(정원·stats)의 한 정의는 ``_ACTIVE_WHERE``: 미취소 +
+  최근 ``idle_sec`` 안에 업로드했거나, 한 번도 안 올렸으면 등록 뒤 ``unseen_grace_sec`` 안.
 
 writer: market 표는 서버 이벤트루프 하나만 쓴다. ``devices`` 는 ``devices.py``(관리 CLI, 별도 프로세스)가 드물게
 한 행 UPDATE 를 넣는다 — WAL + busy timeout(``Database(timeout=)``) 아래서 서버의 업로드 트랜잭션과 안전하게 교차하고,
@@ -70,6 +71,9 @@ ROW_NORMALIZED_KEYS = frozenset({"listing_id", "item_id", "item_name", "quantity
                                  "category", "flag45", "flag46"})
 #: device_id 생성 시도 상한 — 40비트 난수라 충돌은 사실상 없지만 무한 루프는 두지 않는다.
 DEVICE_ID_ATTEMPTS = 5
+#: "활성 기기"의 한 정의 — 정원 판정(server)과 stats 가 같은 조건을 쓴다. 파라미터 (now − idle_sec, now − unseen_grace_sec).
+_ACTIVE_WHERE = ("revoked_ts IS NULL AND ((last_seen_ts IS NOT NULL AND last_seen_ts >= ?)"
+                 " OR (last_seen_ts IS NULL AND created_ts >= ?))")
 
 
 def norm_item_name(name) -> str:
@@ -177,13 +181,16 @@ class Database:
 
     # ---- 수집 (POST /api/market/observations) ----
 
-    def insert_market_observations(self, device_id: str, observations: list, recv_ts: float) -> tuple:
+    def insert_market_observations(self, device_id: str, observations: list, recv_ts: float,
+                                   seen_device: str | None = None) -> tuple:
         """검증이 끝난 관측 목록을 **트랜잭션 1개**로 반영. 반환 (신규 관측 수, 중복 수, 반영 행 수).
 
         관측마다 ``INSERT OR IGNORE`` — ``obs_id`` 가 이미 있으면(스풀 재전송) 중복으로 세고 행 upsert 를
         건너뛴다(``seen_count`` 이중 가산 방지). 행 upsert 는 "더 나중에 본 관측이 상태를 쓴다":
         ``last_seen_ts`` 가 기존보다 같거나 크면 quantity/price/플래그/기기/이름을 갱신하고, 순서가 뒤바뀌어
         올라온 옛 관측은 first_seen_ts 만 앞당긴다(빈 이름은 채운다). NULL 이름은 있는 이름을 덮지 않는다.
+        ``seen_device`` 가 있으면(기기 토큰 업로드) 같은 트랜잭션에서 그 기기의 ``last_seen_ts``·``upload_count`` 도
+        쓴다 — 커밋 1회, 실패하면 기기 기록도 남지 않는다.
         """
         con = self._con
         accepted = duplicates = rows_applied = 0
@@ -220,6 +227,9 @@ class Database:
                     rows_applied += 1
                     if name:
                         con.execute(_NAME_UPSERT, (item_id, name, norm, seen_ts, seen_ts, device_id))
+            if seen_device is not None:
+                con.execute("UPDATE devices SET last_seen_ts = ?, upload_count = upload_count + 1 WHERE device_id = ?",
+                            (recv_ts, seen_device))
             con.commit()
         except Exception:
             con.rollback()
@@ -252,15 +262,20 @@ class Database:
             (token_hash,)).fetchone()
         return dict(r) if r is not None else None
 
-    def count_active_devices(self) -> int:
-        """취소되지 않은 기기 수 — 등록 정원(``max_devices``) 판정용."""
-        return int(self._con.execute("SELECT COUNT(*) FROM devices WHERE revoked_ts IS NULL").fetchone()[0])
+    def get_device(self, device_id: str) -> dict | None:
+        """관리용 — 토큰 해시는 싣지 않는다."""
+        r = self._con.execute(f"SELECT {_DEVICE_COLUMNS} FROM devices WHERE device_id = ?", (device_id,)).fetchone()
+        return dict(r) if r is not None else None
 
-    def record_device_upload(self, device_id: str, now: float, ok: bool) -> None:
-        """인증된 업로드 1회 기록 — ``last_seen_ts`` 는 항상, ``upload_count`` 는 저장에 성공했을 때만 +1."""
-        self._con.execute(
-            "UPDATE devices SET last_seen_ts = ?, upload_count = upload_count + ? WHERE device_id = ?",
-            (now, 1 if ok else 0, device_id))
+    def count_active_devices(self, now: float, idle_sec: float, unseen_grace_sec: float) -> int:
+        """활성 기기 수(``_ACTIVE_WHERE``) — 등록 정원(``max_devices``) 판정용. 재설치로 버려진 옛 행·고아 등록은
+        시간이 지나면 빠진다(취소하지 않아도)."""
+        return int(self._con.execute(f"SELECT COUNT(*) FROM devices WHERE {_ACTIVE_WHERE}",
+                                     (now - float(idle_sec), now - float(unseen_grace_sec))).fetchone()[0])
+
+    def touch_device(self, device_id: str, now: float) -> None:
+        """인증은 됐지만 거부된 업로드(400·403) — ``last_seen_ts`` 만(운영자가 잘못 설정된 exe 를 찾을 수 있게)."""
+        self._con.execute("UPDATE devices SET last_seen_ts = ? WHERE device_id = ?", (now, device_id))
         self._con.commit()
 
     def list_devices(self) -> list[dict]:
@@ -273,6 +288,16 @@ class Database:
         cur = self._con.execute("UPDATE devices SET revoked_ts = ? WHERE device_id = ?", (revoked_ts, device_id))
         self._con.commit()
         return cur.rowcount == 1
+
+    def revoke_stale_devices(self, now: float, idle_sec: float, note: str) -> int:
+        """``idle_sec`` 넘게 안 올린(한 번도 안 올렸으면 등록 뒤 그만큼 지난) 미취소 기기를 일괄 취소. 메모가 비어 있으면
+        ``note`` 를 남긴다. 반환 = 취소한 수."""
+        cur = self._con.execute(
+            "UPDATE devices SET revoked_ts = ?, note = CASE WHEN note = '' THEN ? ELSE note END "
+            "WHERE revoked_ts IS NULL AND COALESCE(last_seen_ts, created_ts) < ?",
+            (now, note, now - float(idle_sec)))
+        self._con.commit()
+        return cur.rowcount
 
     def set_device_note(self, device_id: str, note: str) -> bool:
         cur = self._con.execute("UPDATE devices SET note = ? WHERE device_id = ?", (note, device_id))
@@ -325,7 +350,8 @@ class Database:
             (float(since_ts), float(since_ts), str(since_key), int(limit))).fetchall()
         return [self._listing_dict(r) for r in rows]
 
-    def market_stats(self, now: float, fresh_sec: float = 86400.0) -> dict:
+    def market_stats(self, now: float, fresh_sec: float = 86400.0, device_idle_sec: float = 30 * 86400.0,
+                     unseen_grace_sec: float = 86400.0) -> dict:
         con = self._con
 
         def one(sql: str, *params):
@@ -349,6 +375,7 @@ class Database:
             "latest_recv_ts": one("SELECT MAX(recv_ts) FROM market_observations"),
             "devices": devices,
             "devices_registered": one("SELECT COUNT(*) FROM devices WHERE revoked_ts IS NULL"),
+            "devices_active": self.count_active_devices(now, device_idle_sec, unseen_grace_sec),
             "devices_revoked": one("SELECT COUNT(*) FROM devices WHERE revoked_ts IS NOT NULL"),
         }
 

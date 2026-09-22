@@ -5,19 +5,22 @@
 
 ## 0. 공통 규칙
 
-- 전송: JSON(UTF-8) over HTTP/1.1. 허브는 **Tailscale Funnel** 로 포트째 공개 인터넷에 나간다(`https://<pi-node>.<tailnet>.ts.net/`
-  → Pi 의 127.0.0.1:8800, 공유기 포트포워딩 없음) — 관측기가 **Npcap 만 있는 일반 사용자 PC** 에서 올려야 하므로 VPN 은 전제하지
-  않는다(2026-09-22 결정). Pi 안(봇 127.0.0.1)·LAN·tailnet 의 **직접 접속**은 평문 HTTP 그대로. 자격은 두 종류:
+- 전송: JSON(UTF-8) over HTTP/1.1. 허브는 리스너 둘을 연다 — **관리 리스너** `port`(8800): 전 라우트, Pi 안(봇 127.0.0.1)·LAN·
+  tailnet 의 직접 접속용(평문 HTTP, Funnel 을 걸지 않는다). **공개 리스너** `public_port`(8801): **Tailscale Funnel** 이 가리키는
+  포트(`https://<pi-node>.<tailnet>.ts.net/` → Pi 의 127.0.0.1:8801, 공유기 포트포워딩 없음) — 관측기가 **Npcap 만 있는 일반
+  사용자 PC** 에서 올려야 하므로 VPN 은 전제하지 않는다(2026-09-22 결정). 자격은 두 종류:
   - **관리 시크릿** `secret` — 조회(`search`·`listings`·`stats`)와 제작자 업로드. **Funnel 을 타지 않는다**: exe 에 넣지 않고,
     공개 요청에서는 어느 라우트에서도 인정하지 않는다(`admin_public` false).
   - **기기 토큰** — 초대 코드로 자기등록(§3-0)한 기기마다 1개. `POST /api/market/observations` 에만 통한다.
 
-  공개 요청 판정 = tailscaled 가 Funnel 요청에 붙이는 `Tailscale-Funnel-Request` 헤더(`proxy_header`)의 **존재**(값 무관).
-  tailscaled 는 클라이언트가 보낸 같은 이름의 헤더를 지운 뒤 붙이므로 공개 쪽에서 위조·제거가 안 되고, 직접 접속 클라이언트가
-  붙이면 스스로 더 제한될 뿐이다. 속도제한·로그의 클라이언트 IP 는 공개 요청이면 `X-Forwarded-For` **마지막** 항목(프록시가
-  붙인 원 IP), 직접 접속이면 소켓 peer — 컨테이너 안에서는 docker 브리지 IP 라 봇·Funnel 프록시가 같아 신호가 못 된다.
+  **공개 요청** 판정 = ① 공개 리스너로 온 요청은 헤더와 무관하게 전부, ② 관리 리스너에서는 tailscaled 가 Funnel 요청에 붙이는
+  `Tailscale-Funnel-Request` 헤더(`proxy_header`)의 **존재**(값 무관). ①이 1차 방어(헤더 이름 오타·프록시 교체와 무관), ②는 8800 에
+  Funnel 을 잘못 걸었을 때의 2차 방어 — tailscaled 는 클라이언트가 보낸 같은 이름의 헤더를 지운 뒤 붙이므로 공개 쪽에서 위조·제거가
+  안 되고, 직접 접속 클라이언트가 붙이면 스스로 더 제한될 뿐이다. 속도제한·로그의 클라이언트 IP 는 공개 요청이면 `X-Forwarded-For`
+  **마지막** 항목(프록시가 붙인 원 IP), 없으면 `public:?` 한 버킷(경고 1회), 직접 접속이면 소켓 peer — 컨테이너 안에서는 docker
+  브리지 IP 라 봇·Funnel 프록시가 같아 공개 요청의 키로 쓰지 않는다.
 
-  | 라우트 | 공개(Funnel) 요청 | 자격 |
+  | 라우트 | 공개 요청 | 자격 |
   |---|---|---|
   | `GET /` | 허용 | 없음 |
   | `POST /api/market/register` | 허용 | 초대 코드(본문) + IP 속도제한 |
@@ -25,9 +28,11 @@
   | `GET /api/market/search` `listings` `stats` | **`403 {"ok":false,"error":"not_public"}`**(자격 검사 전) | 관리 시크릿 `Authorization: Bearer <secret>` |
 
   자격 없음·불일치·범위 밖(기기 토큰으로 조회, 공개 요청의 관리 시크릿)은 전부 `401 {"error":"unauthorized"}`.
-- 속도제한(프로세스 메모리, 재기동이면 리셋): 등록 IP 당 `register_limit_per_hour`(10), 업로드 기기 당 `upload_limit_per_min`(120,
-  관리 시크릿은 무제한), 인증 실패 **공개 요청** IP 당 `auth_fail_limit_per_min`(30 — 직접 접속은 브리지 IP 를 봇과 공유하므로
-  세지 않는다). 초과는 `429 {"ok":false,"error":"rate_limited","retry_after":N}` + `Retry-After: N` — N 초 뒤 재시도(§3-1 관측기 규약).
+- 속도제한(프로세스 메모리, 재기동이면 리셋; 두 리스너가 버킷을 공유): 등록 IP 당 `register_limit_per_hour`(10), 업로드 기기 당
+  `upload_limit_per_min`(120 — 관리 시크릿은 무제한; 취소 검사보다 먼저라 취소된 클라의 폭주도 기기 단위로 429), 인증 실패 **공개
+  요청** IP 당 `auth_fail_limit_per_min`(30) — 토큰 검사 **뒤** 실패에만 센다(공유 NAT 뒤의 고장난 클라 하나가 같은 IP 의 정상
+  기기를 막지 않게; 직접 접속은 브리지 IP 를 봇과 공유하므로 세지 않는다). 초과는 `429 {"ok":false,"error":"rate_limited",
+  "retry_after":N}` + `Retry-After: N` — N 초 뒤 재시도(§3-1 관측기 규약).
 - **additive-only**: 필드는 더하기만 하고 이름·의미를 바꾸지 않는다. 읽는 쪽은 미지 키를 무시한다(tolerant reader).
   응답의 `"v": 1` 은 이 문서의 판.
 - 시각은 전부 Unix epoch 초(float). 서버 응답엔 항상 `server_time` 이 있어 클라이언트 시계 오프셋을 보정할 수 있다.
@@ -74,7 +79,9 @@ CREATE TABLE devices (                  -- 초대 코드로 자기등록한 관�
 - 이름 학습: 행에 `item_name` 이 있으면 `market_item_names` 에 upsert. 조회 때 행의 `item_name` 이 NULL 이면 이 표로
   보충한다(`COALESCE`) — 표가 없는 PC 의 관측도 다른 PC 가 한 번이라도 이름을 보냈으면 검색된다.
 - 기기 표: market 표는 서버 이벤트루프만 쓰지만 `devices` 는 관리 CLI `hub/devices.py`(별도 프로세스, §3-6)가 드물게 한 행 UPDATE 를
-  넣는다 — WAL + busy timeout. 취소된 기기·재등록으로 버려진 옛 행은 지우지 않는다(`stats` 에 남아 추적).
+  넣는다 — WAL + busy timeout. 취소된 기기·재등록으로 버려진 옛 행은 지우지 않는다(`stats` 에 남아 추적). **활성** 의 정의는 하나
+  (`_ACTIVE_WHERE`, 정원 §3-0 과 `stats.devices_active`): 미취소 + 최근 `device_idle_days`(30) 안 업로드, 한 번도 안 올린 기기는 등록
+  뒤 하루 — 버려진 행·고아 등록은 시간이 지나면 정원에서 빠진다(취소하지 않아도).
 
 ## 2. 정규화 한 정의
 
@@ -94,16 +101,17 @@ CREATE TABLE devices (                  -- 초대 코드로 자기등록한 관�
 {"ok":true,"v":1,"device_id":"d-3f9a1c7e2b","token":"<43자 urlsafe>","server_time":1758500000.5}
 ```
 
-검사 순서(고정): ① IP 속도제한 — 성공·실패 모두 센다(코드 비교 전에 무차별 대입 상한) → ② 등록 닫힘 → ③ 본문 → ④ 코드 →
-⑤ 정원 → ⑥ 발급.
+검사 순서(고정): ① IP 속도제한 — 성공·실패 모두 센다(코드 비교 전에 무차별 대입 상한) → ② 본문 크기(파싱 전) → ③ 등록 닫힘 →
+④ 본문 → ⑤ 코드(앞뒤 공백을 벗긴 뒤 상수 시간 비교) → ⑥ 정원 → ⑦ 발급.
 
 | 응답 | 조건 |
 |---|---|
 | `429 rate_limited` + `Retry-After` | IP 당 `register_limit_per_hour` 초과 |
+| `411 {"ok":false,"error":"length_required"}` / `413 … "too_large"` | `Content-Length` 없음 / 4KiB 초과 — 무인증 라우트라 큰 본문은 읽지 않는다 |
 | `403 {"ok":false,"error":"registration_closed"}` | 설정 `invite_code` 가 비어 있음 |
-| `400 {"ok":false,"error":"bad_request","field"?}` | 비 JSON·dict 아님 / `invite_code` 가 문자열 아님·빈 값 / `label` 이 문자열 아님·64자 초과·제어 문자 |
-| `401 {"ok":false,"error":"bad_invite"}` | 코드 불일치(상수 시간 비교) |
-| `403 {"ok":false,"error":"registration_full"}` | 활성(미취소) 기기 ≥ `max_devices` — 5xx 가 아닌 이유: 관측기가 조용히 재시도하지 않게 |
+| `400 {"ok":false,"error":"bad_request","field"?}` | 비 JSON·dict 아님 / `invite_code` 가 문자열 아님·공백뿐 / `label` 이 문자열 아님·64자 초과·제어 문자 |
+| `401 {"ok":false,"error":"bad_invite"}` | 코드 불일치 |
+| `403 {"ok":false,"error":"registration_full"}` | **활성** 기기(§1: 미취소 + `device_idle_days` 안 업로드, 미업로드는 등록 뒤 하루) ≥ `max_devices` — 5xx 가 아닌 이유: 관측기가 조용히 재시도하지 않게 |
 | `500 {"ok":false,"error":"storage_error","server_time"}` | DB 오류 |
 
 - `device_id` 는 허브가 발급한다. 관측기는 `device_id`·`token` 을 저장하고 이후 업로드의 `device_id` 에 **그 값**을 쓴다(§3-1) —
@@ -152,9 +160,9 @@ CREATE TABLE devices (                  -- 초대 코드로 자기등록한 관�
 | `400 … "error":"too_many"` | 관측 >100 또는 관측당 행 >64 (`max_observations_per_request`·`max_rows_per_observation`) |
 | `400 … "error":"agent_ts_out_of_range","index","field":"agent_ts"` | `agent_ts` 가 허용 범위 밖(관측기 시계 리셋·폭주) — 관측기는 그 배치를 격리하고 시계를 의심한다 |
 | `401 {"error":"unauthorized"}` | 토큰 없음·무효, 공개 요청의 관리 시크릿 |
+| `429 {"ok":false,"error":"rate_limited","retry_after":N}` + `Retry-After` | 기기 당 `upload_limit_per_min` 초과(관리 시크릿은 무제한) — 취소 검사보다 먼저 |
 | `403 {"ok":false,"error":"device_revoked"}` | 기기 토큰이 취소됨(§3-6) — 관측기는 업로드를 멈추고 사용자에게 알린다 |
 | `403 {"ok":false,"error":"device_mismatch","device_id":"<기대값>"}` | 기기 토큰인데 본문 `device_id` 가 토큰의 기기와 다름(400 검증 뒤) — 관측기 설정 불일치 |
-| `429 {"ok":false,"error":"rate_limited","retry_after":N}` + `Retry-After` | 기기 당 `upload_limit_per_min` 초과(관리 시크릿은 무제한) |
 | `413` | 본문 4MiB 초과(aiohttp) — 관측기는 배치를 나눈다 |
 | `500 {"ok":false,"error":"storage_error","server_time"}` | 검증 통과 뒤 DB 오류(디스크·잠금) — 관측기는 5xx 로 재시도 |
 
@@ -163,6 +171,10 @@ CREATE TABLE devices (                  -- 초대 코드로 자기등록한 관�
 **401·403 은 업로더를 멈추고**(스풀 유지) 상태 줄에 사유를 보인다 — 자동 재등록 금지, 사용자가 `--invite-code` 로 다시 등록한다;
 `device_mismatch` 는 응답의 `device_id` 와 설정을 대조한다. `device_id` 는 스풀 파일이 아니라 **POST 시점**에 채운다(재등록 뒤
 옛 스풀이 영구 mismatch 되지 않게). 같은 `obs_id` 가 두 번 가는 것은 정상(허브가 dedup).
+
+허브 쪽 기록: 기기 토큰 업로드가 200 이면 관측과 **같은 트랜잭션**에서 `devices.last_seen_ts`·`upload_count` 를 쓴다(커밋 1회,
+저장 실패면 기기 기록도 없다). 인증은 됐지만 거부된 업로드(400·403 `device_mismatch`)도 `last_seen_ts` 는 남긴다 — 운영자가
+잘못 설정된 exe 를 `devices.py list` 에서 찾을 수 있게(카운트는 성공만).
 
 ### 3-2. `GET /api/market/search?q=&item_id=&limit=&max_age_sec=` — 이름 검색 (미루봇 `!육의전 <아이템>`)
 
@@ -209,7 +221,7 @@ CREATE TABLE devices (                  -- 초대 코드로 자기등록한 관�
  "fresh_listings":210,"fresh_sec":86400.0,"latest_recv_ts":1758500055.2,
  "devices":[{"device_id":"d-3f9a1c7e2b","label":"DESKTOP-ABC","observations":300,"last_recv_ts":…},   // label: 등록 기기의 표시명,
             {"device_id":"DEV-B","label":null,"observations":112,"last_recv_ts":…}],                 //        관리 시크릿 업로드는 null
- "devices_registered":7,"devices_revoked":1}                                                          // devices 표 집계(활성 / 취소)
+ "devices_registered":7,"devices_active":5,"devices_revoked":1}   // devices 표 집계: 미취소 전체 / 활성(§1 정의 — 정원 기준) / 취소
 ```
 
 ### 3-5. `GET /` — 무인증 상태 줄
@@ -221,13 +233,15 @@ CREATE TABLE devices (                  -- 초대 코드로 자기등록한 관�
 ```bash
 docker compose exec yuktracker-hub python devices.py list                      # device_id label created last_seen uploads revoked note
 docker compose exec yuktracker-hub python devices.py revoke <device_id> --note "사유"
+docker compose exec yuktracker-hub python devices.py revoke --stale 30 [--note "…"]   # 30일 넘게 업로드 없는 기기 일괄 취소(메모 없으면 stale>30d)
 docker compose exec yuktracker-hub python devices.py unrevoke <device_id>
 docker compose exec yuktracker-hub python devices.py note <device_id> "메모"
 ```
 
 서버와 같은 SQLite 파일(`HUB_DB_PATH`)에 직접 쓴다 — 서버는 요청마다 토큰을 조회하므로 취소는 다음 업로드부터 `403 device_revoked`.
-HTTP 관리 라우트를 두지 않는 이유: 공개 표면을 늘리지 않고 셸에 시크릿이 필요 없다. 토큰 해시는 출력하지 않는다. 없는 DB 경로는
-만들지 않는다(exit 1).
+HTTP 관리 라우트를 두지 않는 이유: 공개 표면을 늘리지 않고 셸에 시크릿이 필요 없다. 이미 취소된 기기를 다시 취소해도 원래
+`revoked_ts` 는 보존(메모만 갱신), 활성 기기의 `unrevoke` 는 "이미 활성" 안내. 토큰 해시는 출력하지 않고, label·note 의 제어 문자는
+`?`, 전각 문자는 표시 폭 2 로 정렬한다. 없는 DB 경로는 만들지 않는다(exit 1).
 
 ## 4. 시각·신선도
 
@@ -253,10 +267,11 @@ HTTP 관리 라우트를 두지 않는 이유: 공개 표면을 늘리지 않고
 `search_limit_default`(20) `search_limit_max`(100) `listings_limit_default`(500) `listings_limit_max`(2000)
 `max_observations_per_request`(100) `max_rows_per_observation`(64) `max_agent_ts_ahead_sec`(86400).
 
-공개·등록(2026-09-22): `invite_code`(비어 있으면 등록 닫힘; 있으면 **8자 이상**, 예시값 `CHANGE-ME-INVITE`·`secret` 과 같은 값은 기동
-거부 — 초대 코드는 커뮤니티에 공유하는 반공개 값) `max_devices`(500, 활성 기준) `admin_public`(false) `proxy_header`
-(`Tailscale-Funnel-Request`; Cloudflare Tunnel 로 바꾸면 `CF-Connecting-IP`) `register_limit_per_hour`(10) `upload_limit_per_min`(120)
-`auth_fail_limit_per_min`(30). 설정은 기동 때 읽는다 — 초대 코드 교체는 `config.json` 수정 뒤 `docker compose restart`.
+공개·등록(2026-09-22): `public_port`(8801 — 공개 리스너, `port` 와 달라야 기동) `invite_code`(앞뒤 공백을 벗긴 뒤 비어 있으면 등록
+닫힘; 있으면 **8자 이상**, 예시값 `CHANGE-ME-INVITE`·`secret` 과 같은 값은 기동 거부 — 초대 코드는 커뮤니티에 공유하는 반공개 값)
+`max_devices`(500, §1 활성 기준) `device_idle_days`(30) `admin_public`(false) `proxy_header`(`Tailscale-Funnel-Request`; Cloudflare
+Tunnel 로 바꾸면 `CF-Connecting-IP`) `register_limit_per_hour`(10) `upload_limit_per_min`(120) `auth_fail_limit_per_min`(30). 설정은
+기동 때 읽는다 — 초대 코드 교체는 `config.json` 수정 뒤 `docker compose restart`.
 
 관측기 쪽 키(PR-Y1b, `%APPDATA%\YukTracker\config.json`): `hub_url`(공개 Funnel 주소; exe 내장 기본값) · `hub_device_id` · `hub_token`
 (§3-0 응답 저장). 초대 코드는 `--invite-code` 인자/첫 실행 프롬프트로만 받고 저장하지 않는다. 구 `hub_secret` 키는 폐기 — 관리
@@ -271,4 +286,7 @@ HTTP 관리 라우트를 두지 않는 이유: 공개 표면을 늘리지 않고
 - 2026-09-22 v1 공개 업로드(additive, 사용자 결정: 관측기는 Npcap 만 있는 일반 사용자 PC 에서 돈다 → VPN 전제 폐기): §0 전송 전제
   개정 — Tailscale Funnel 공개 + 자격 2종(관리 시크릿은 직접 접속 전용·exe 금지, 기기 토큰) + `Tailscale-Funnel-Request` 공개 판정 +
   속도제한 429; §1 `devices`; §3-0 register; §3-1 `device_id` 규칙·401/403/429·관측기 규약; §3-4 `label`·`devices_registered/revoked`;
-  §3-6 `devices.py`; §6 새 설정 키·관측기 키(`hub_secret` 폐기).
+  §3-6 `devices.py`; §6 새 설정 키·관측기 키(`hub_secret` 폐기). `/code-review 10 high` 13건 반영: 공개 리스너 `public_port` 분리
+  (헤더 부재 = 직접 접속이라는 fail-open 제거, 헤더는 2차 방어), 인증 실패 집계는 토큰 검사 뒤(공유 NAT), XFF 없는 공개 요청은
+  `public:?`, 정원 = 활성 정의(`device_idle_days` + 미업로드 하루)·`revoke --stale`, 기기 기록은 관측과 같은 트랜잭션 + 거부도 last_seen,
+  등록 본문 4KiB(411/413), 429 가 취소 검사보다 먼저, 초대 코드 strip, CLI 중복 취소 보존·전각 폭, README 게이트는 더미 Bearer.

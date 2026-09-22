@@ -9,8 +9,9 @@
 - 라우팅: `GET /`(무인증 상태 줄) · `POST /api/market/register`(초대 코드 → 기기 토큰, 무 Bearer) · `POST /api/market/observations`
   (기기 토큰; 직접 접속이면 관리 시크릿도) · `GET /api/market/search` · `GET /api/market/listings` · `GET /api/market/stats`(관리 시크릿,
   **직접 접속 전용** — Funnel 경유는 403 `not_public`). 규칙은 HUB-PROTOCOL §0.
-- 공개: Pi 의 **Tailscale Funnel** 로 포트 8800 을 통째로 `https://<pi-node>.<tailnet>.ts.net/` 에 낸다(아래 "공개 노출"). 일반 사용자
-  PC 에는 Npcap + 관측기 exe 만 있고 VPN 이 없기 때문. 관리 시크릿은 exe 에 넣지 않고 공개 요청에서는 어디서도 받지 않는다.
+- 공개: 리스너 둘 — 관리 **8800**(봇·제작자 직접 접속, Funnel 금지) / 공개 **8801**(Pi 의 **Tailscale Funnel** 이
+  `https://<pi-node>.<tailnet>.ts.net/` 로 낸다, 아래 "공개 노출"). 일반 사용자 PC 에는 Npcap + 관측기 exe 만 있고 VPN 이 없기 때문.
+  공개 리스너로 온 요청은 헤더와 무관하게 전부 공개 취급(관리 시크릿 무시·조회 403). 관리 시크릿은 exe 에 넣지 않는다.
 - 보존: 관측·목록 30일(`retention_market_days`), 일 1회 자동 프루닝. 학습 표(아이템 id→이름)는 유지.
 - SEAssist 대시보드(Pi:8799)와 무관 — 별도 컨테이너, 포트 **8800**(2026-09-22 결정: SEAssist 레포엔 더 이상 머지하지 않는다).
 
@@ -82,17 +83,17 @@ Pi 쪽에서만 한다 — 사용자 PC 는 그대로. 전제: Tailscale ≥1.38
 대역폭 제한이 있다(수치 미공개 — JSON 배치엔 충분).
 
 ```bash
-sudo tailscale funnel --bg 8800                  # https://<pi-node>.<tailnet>.ts.net/ → 127.0.0.1:8800, 재부팅 뒤에도 유지(--bg)
-tailscale funnel status                          # 설치판 구문은 `tailscale funnel --help` 로 확인
+sudo tailscale funnel --bg 8801                  # https://<pi-node>.<tailnet>.ts.net/ → 127.0.0.1:8801(공개 리스너), 재부팅 뒤에도 유지(--bg)
+tailscale funnel status                          # 설치판 구문은 `tailscale funnel --help` 로 확인. 8800 에는 걸지 않는다
 # 끄기: sudo tailscale funnel --https=443 off   (또는 sudo tailscale funnel reset)
 ```
 
-외부망(폰 LTE) 게이트 — 아래가 전부 맞아야 공개 상태가 설계대로다:
+외부망(폰 LTE) 게이트 — 아래가 전부 맞아야 공개 상태가 설계대로다(진짜 시크릿은 공개망에 보내지 않는다 — 더미로 충분):
 
 ```bash
 H=https://<pi-node>.<tailnet>.ts.net
 curl -s $H/                                                                   # 200 상태 줄 (첫 요청은 인증서 발급으로 수 초)
-curl -s -H "Authorization: Bearer <시크릿>" $H/api/market/stats                # 403 {"error":"not_public"} — 시크릿이 맞아도
+curl -s -H "Authorization: Bearer x" $H/api/market/stats                      # 403 {"ok":false,"error":"not_public"} — 공개 리스너는 자격을 보지도 않는다
 curl -s -X POST $H/api/market/register -H "Content-Type: application/json" \
   -d '{"v":1,"invite_code":"<invite_code>","label":"GATE"}'                   # 200 device_id·token
 curl -s -X POST $H/api/market/register -H "Content-Type: application/json" \
@@ -102,19 +103,20 @@ docker compose exec yuktracker-hub python devices.py list                     # 
 
 운영 메모:
 - 취소는 **soft**(같은 초대 코드로 재등록 가능) — 고장·방치 클라를 멈추는 용도. 남용은 `invite_code` 교체 → `docker compose restart`
-  (기존 토큰은 유지, 신규 등록만 막힘). `max_devices`(500) 는 활성 기기 기준.
-- 관리 시크릿은 Funnel 을 타지 않는다(`admin_public` false) — 봇은 127.0.0.1, 제작자는 tailnet/LAN 직접. Funnel URL 에 시크릿을
-  붙이면 403 이 정상이다.
-- 속도제한: 등록 IP 10/h, 업로드 기기 120/min, 인증 실패 공개 IP 30/min(429 + `Retry-After`). 컨테이너 안에서는 직접 접속의 소켓
-  IP 가 전부 docker 브리지라 직접 접속은 인증 실패를 세지 않는다.
+  (기존 토큰은 유지, 신규 등록만 막힘). `max_devices`(500) 는 **활성** 기기 기준 = 미취소 + `device_idle_days`(30) 안 업로드(한 번도
+  안 올린 기기는 등록 뒤 하루) — 재설치로 버려진 행은 저절로 빠진다. 정리는 `devices.py revoke --stale 30`.
+- 관리 시크릿은 Funnel 을 타지 않는다(`admin_public` false) — 봇은 127.0.0.1:8800, 제작자는 tailnet/LAN 의 8800 직접. 공개 리스너는
+  자격을 보지 않고 403 을 주며, 8800 에 실수로 Funnel 을 걸어도 `Tailscale-Funnel-Request` 헤더로 한 번 더 막는다(2차 방어).
+- 속도제한: 등록 IP 10/h, 업로드 기기 120/min(취소된 기기의 폭주도), 인증 실패 공개 IP 30/min — 토큰 검사 뒤 실패에만(공유 NAT 의
+  다른 정상 기기는 안 막힘). 429 + `Retry-After`. 직접 접속은 소켓 IP 가 전부 docker 브리지라 인증 실패를 세지 않는다.
 - 공개 URL 은 관측기 exe 에 내장된다(PR-Y1b) — 문서·레포엔 자리표시자만. Cloudflare Tunnel 로 바꾸면 `proxy_header` 를
   `CF-Connecting-IP` 로.
 
 ## 구조
 
 ```
-server.py   aiohttp 앱 — 공개/직접 구분 · Bearer(관리 시크릿/기기 토큰) 미들웨어 · RateLimiter · 업로드 전건 검증 · register · 5 라우트 · 일 1회 retention
-db.py       SQLite — market_observations / market_listings / market_item_names / devices · 정규화 한 정의 · upsert · prune
-devices.py  관리 CLI — 기기 list / revoke / unrevoke / note (서버와 같은 DB 파일, 시크릿 불필요)
+server.py   aiohttp — 리스너 둘(관리 8800 / 공개 8801, DB·속도제한 공유) · 공개/직접 구분 · Bearer(관리 시크릿/기기 토큰) 미들웨어 · RateLimiter · 업로드 전건 검증 · register · 5 라우트 · 일 1회 retention
+db.py       SQLite — market_observations / market_listings / market_item_names / devices(활성 정의 하나) · 정규화 한 정의 · upsert · prune
+devices.py  관리 CLI — 기기 list / revoke [--stale N] / unrevoke / note (서버와 같은 DB 파일, 시크릿 불필요)
 tests/      pytest — 인증·공개/직접 · 등록·기기 토큰·취소 · 속도제한 · 검증(전건 거부) · dedup · upsert · 이름 학습 · 정규화 · 신선도 · 증분 목록 · 통계 · prune · CLI
 ```

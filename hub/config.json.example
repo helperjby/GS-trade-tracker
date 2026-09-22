@@ -1,9 +1,11 @@
 {
   "host": "0.0.0.0",
   "port": 8800,
+  "public_port": 8801,
   "secret": "CHANGE-ME",
   "invite_code": "CHANGE-ME-INVITE",
   "max_devices": 500,
+  "device_idle_days": 30,
   "admin_public": false,
   "proxy_header": "Tailscale-Funnel-Request",
   "register_limit_per_hour": 10,

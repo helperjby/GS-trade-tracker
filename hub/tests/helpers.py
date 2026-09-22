@@ -36,8 +36,9 @@ def make_cfg(tmp_path, **over) -> dict:
     return cfg
 
 
-async def start_client(cfg, database=None):
-    app = server_mod.make_app(cfg, database)
+async def start_client(cfg, database=None, *, public_only=False):
+    """``public_only=True`` 면 공개 리스너 앱(모든 요청을 공개로 취급 — Funnel 이 가리키는 쪽)."""
+    app = server_mod.make_app(cfg, database, public_only=public_only)
     client = TestClient(TestServer(app))
     await client.start_server()
     return app, client

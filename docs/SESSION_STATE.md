@@ -19,12 +19,19 @@ SEAssist PR #306(PR-Y2) **미머지 → 닫음 예정, 이 레포로 이식(PR-Y
   `secret` 동일 거부)·`max_devices`·`admin_public`·`proxy_header`·limit 3개; `hub/db.py` — `devices` 표(additive)·메서드·stats
   `label`/`devices_registered`/`devices_revoked`·busy timeout; `hub/devices.py` — list/revoke/unrevoke/note CLI(서버와 같은 DB, 취소 즉시
   반영, 없는 DB 는 만들지 않음). Plan 에이전트 검토 반영: XFF **마지막** 항목, `registration_full` 은 5xx 아닌 403(exe 가 조용히 재시도하지
-  않게), `device_id` 는 exe 가 POST 시점에 채움, 취소는 soft. hub 테스트 **67 passed**(신규 39), 로컬 스모크 17단계 통과(127.0.0.1:8801).
+  않게), `device_id` 는 exe 가 POST 시점에 채움, 취소는 soft. 1차 커밋 1131ac2: hub 테스트 67 passed, 로컬 스모크 17단계 통과.
+- **`/code-review 10 high` 13건 전부 반영**(2차 커밋): ① 헤더 부재 = 직접 접속이라는 fail-open → **공개 리스너 `public_port` 8801 분리**
+  (`serve()` 가 관리 8800 + 공개 8801 을 한 프로세스에서, DB·limiter 공유; 공개 리스너는 헤더 무관 전부 공개, 8800 의 헤더 검사는 2차
+  방어; compose `8801:8801`, Funnel 은 8801), ② 인증 실패 집계는 토큰 검사 **뒤**(공유 NAT 의 정상 기기 안 막힘), ③ XFF 없는 공개
+  요청은 `public:?` 버킷 + 경고 1회, ④ 정원 = 활성 정의(`device_idle_days` 30 + 미업로드 하루, `_ACTIVE_WHERE` 하나) + `devices.py
+  revoke --stale N`, ⑤ 거부(400/403)도 last_seen, ⑥ 기기 기록은 관측과 같은 트랜잭션(커밋 1회, 실패 시 무기록), ⑦ 등록 본문
+  4KiB(411/413, 파싱 전), ⑧ 429 가 취소 검사보다 먼저, ⑨ 초대 코드 strip(config·요청), ⑩ CLI 중복 취소는 시각 보존·"이미 활성",
+  ⑪ 전각 폭 정렬, ⑫ stats 가 `count_active_devices` 재사용(`devices_active` 추가), ⑬ README 게이트 더미 Bearer·본문 모양·`hub_secret` 문장.
 - 문서: HUB-PROTOCOL §0 전송 전제 개정·§1 devices·§3-0·§3-1·§3-4·§3-6·§6·§7, hub/README "공개 노출" 절(Funnel 절차·외부망 게이트·운영 메모,
   `sed` 순서 INVITE 먼저), PLAN §PR-Y3 공개 항목·§PR-Y1b(관측기 키 `hub_url`·`hub_device_id`·`hub_token`, 첫 실행 등록, 429/401/403 규약)·G7.
-- 남은 것: `/code-review 10 high` 반영 → 머지 → Pi: hub/ 재복사 → `config.json` 에 `invite_code` 추가 → `docker compose up -d --build` →
-  `sudo tailscale funnel --bg 8800`(관리 콘솔 HTTPS·`funnel` 노드 속성) → 폰 LTE 게이트(`GET /` 200 · stats 403 · register 200/401) →
-  `devices.py list`. 그 뒤 PR-Y2' → PR-Y1b(등록 UX 포함).
+- 남은 것: PR #9 → #10 머지 → Pi: hub/ 재복사 → `config.json` 에 `invite_code`(+`public_port` 8801 기본) 추가 → `docker compose up -d
+  --build`(포트 8800·8801) → `sudo tailscale funnel --bg 8801`(관리 콘솔 HTTPS·`funnel` 노드 속성) → 폰 LTE 게이트(`GET /` 200 · stats 403
+  (더미 Bearer) · register 200/401) → `devices.py list`. 그 뒤 PR-Y2' → PR-Y1b(등록 UX 포함).
 
 ## 현재 상태
 
@@ -108,7 +115,8 @@ SEAssist PR #306(PR-Y2) **미머지 → 닫음 예정, 이 레포로 이식(PR-Y
 - **허브 배포(2026-09-22 11:24, Pi `<user>@<pi-lan-ip>`)**: `hub/` 만 tar 로 `~/yuktracker-hub` 에 복사, 컨테이너 `yuktracker-hub-yuktracker-hub-1`
   (restart unless-stopped, `0.0.0.0:8800`, 기동 로그 `db_path=/data/hub.db`), DB `~/yuktracker-hub/data/hub.db`(compose 기본 `./data` → `/data`,
   Dockerfile `HUB_DB_PATH`). 시크릿은 Pi 가 생성(32자 `token_urlsafe`, `~/yuktracker-hub/config.json` chmod 600) — 레포·문서·채팅에 적지 않는다,
-  관측기 `hub_secret`(PR-Y1b)·미루봇(PR-Y4)이 이 값을 공유. 확인: 컨테이너 안·LAN `<pi-lan-ip>:8800`·tailnet `<pi-tailnet-ip>:8800` 에서 `GET /` 200,
+  미루봇(PR-Y4)이 이 값을 쓴다(09-22 오전 계획의 "관측기 `hub_secret` 공유"는 같은 날 오후 폐기 — 관측기는 기기 토큰, 위 "허브 공개 업로드" 절).
+  확인: 컨테이너 안·LAN `<pi-lan-ip>:8800`·tailnet `<pi-tailnet-ip>:8800` 에서 `GET /` 200,
   `stats` 인증 200(전부 0·devices []), 무인증 401. **`/mnt/dashdata` 는 이 Pi 에 없다**(루트가 SSD `/dev/sda2` 로 이전, 대시보드도 `~/dashboard/data`)
   → hub/README 의 데이터 폴더 예시를 `./data` 기본으로 정정. 갱신 절차 = hub/ 재복사 → `docker compose up -d --build`(DB 는 볼륨이라 유지).
   PR #5 머지 뒤 #6 base 는 GitHub 이 자동으로 `main` 으로 바꿨다(브랜치 자동 삭제).
