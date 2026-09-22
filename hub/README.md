@@ -14,7 +14,8 @@
 ## 로컬 개발 (Windows)
 
 ```powershell
-copy config.json.example config.json        # secret 수정 필수. db_path 는 OneDrive 밖 권장(WAL 과 동기화 충돌)
+copy config.json.example config.json        # secret 필수(16자 이상, CHANGE-ME 면 기동 거부). 상대 db_path 는 이 폴더(config 위치) 기준 —
+                                            # 레포가 OneDrive 안이면 db_path 를 OneDrive 밖 절대 경로로(WAL 과 동기화 충돌)
 pip install -r requirements.txt
 python server.py --config config.json
 python -X utf8 -m pytest tests -q            # repo 루트에서는: python -X utf8 -m pytest hub/tests -q
@@ -44,7 +45,7 @@ tar -C <repo루트> -czf - --exclude=hub/data --exclude=hub/config.json hub \
 
 # 2) 파이에서 1회 설정
 cd ~/yuktracker-hub
-cp config.json.example config.json      # secret 설정, db_path 는 "/data/hub.db"
+cp config.json.example config.json      # secret 설정(16자 이상). db_path 는 손대지 않아도 된다 — 컨테이너는 HUB_DB_PATH=/data/hub.db
 echo 'HUB_DATA_DIR=/mnt/dashdata/yuktracker-hub' > .env
 
 # 3) 기동/업데이트 (재복사 후 동일 명령)
@@ -56,7 +57,9 @@ curl -s http://127.0.0.1:8800/
 curl -s -H "Authorization: Bearer <시크릿>" http://127.0.0.1:8800/api/market/stats
 ```
 
-- 컨테이너 안 `db_path` 는 반드시 `/data/hub.db` — compose 가 `/data` 를 볼륨에 매핑한다.
+- DB 위치는 Dockerfile 의 `ENV HUB_DB_PATH=/data/hub.db` 가 config 의 `db_path` 보다 우선한다 — compose 가 `/data` 를 볼륨에
+  매핑하므로 운영자가 config 를 안 고쳐도 `compose up --build` 에 데이터가 사라지지 않는다. 기동 로그 첫 줄에 `db_path=` 가 찍힌다.
+- 증분 폴링 소비자(미루봇)는 `next_since_ts` 와 `next_since_key` 를 둘 다 저장해 다음 호출에 넣는다(HUB-PROTOCOL §3-3).
 - 접속 주소: tailnet `http://100.123.248.88:8800`(관측기 PC) / LAN `http://192.168.0.14:8800`(집 Wi-Fi).
   미루봇(같은 Pi)은 `http://127.0.0.1:8800`. **포트포워딩 금지** — 평문 HTTP + 공유 시크릿 전제.
 - 시크릿: `config.json` 의 `secret` 하나를 관측기(`hub_secret`, PR-Y1b)·봇이 공유. 레포엔 `.example` 만 커밋.

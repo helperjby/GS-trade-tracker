@@ -130,8 +130,8 @@ python scripts/mine_packet_discovery.py --all --lead-sec 30
   price, seller, category, flag45, flag46, first_seen_ts, last_seen_ts, seen_count, last_device, last_obs_id)` · 학습 표
   `market_item_names(item_id PK, item_name, item_name_norm, first/last_seen_ts, last_device)`. `item_id` 원값은 항상 저장.
 - 라우트: `POST /api/market/observations`(배치 ≤100, 관측당 행 ≤64, `obs_id` dedup → 중복은 무변경) · `GET /api/market/search?q=&item_id=&
-  limit=&max_age_sec=`(정규화 `instr` 부분일치, `price ASC`, `total_matches`) · `GET /api/market/listings?since_ts=&limit=`(엄격 초과·
-  `next_since_ts`) · `GET /api/market/stats` · `GET /`(무인증 상태 줄).
+  limit=&max_age_sec=`(정규화 `instr` 부분일치, `price ASC`, `total_matches`) · `GET /api/market/listings?since_ts=&since_key=&limit=`
+  (복합 keyset 커서 → `next_since_ts`·`next_since_key`; PR #6 리뷰 반영 2026-09-22) · `GET /api/market/stats` · `GET /`(무인증 상태 줄).
 - 시각·신선도: `seen_ts = min(agent_ts, recv_ts)`; upsert 는 "더 나중에 본 관측이 상태를 쓴다"(역순 스풀 업로드는 first_seen 만 앞당김);
   "사라짐" 판정 없음, `max_age_sec`(기본 24h) 밖은 숨기고 `last_seen_ts` 를 준다. 보존 30일(`retention_market_days`), 학습 표는 유지.
 

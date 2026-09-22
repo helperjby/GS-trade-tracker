@@ -2,9 +2,16 @@
 from __future__ import annotations
 
 import asyncio
+import json
+import sqlite3
 import time
+import warnings
 
-from helpers import AUTH, body, get, make_cfg, obs, post, row, start_client
+import pytest
+from aiohttp import web
+
+import db as db_mod
+from helpers import AUTH, app_db, body, get, make_cfg, obs, post, row, start_client
 
 
 def _run(coro):
@@ -54,6 +61,14 @@ def test_post_rejects_malformed_and_writes_nothing(tmp_path):
                 (row(item_name=123), "rows[0].item_name"),
                 (row(flag45="2"), "rows[0].flag45"),
                 ("행이 dict 가 아님", "rows[0]"),
+                # i64 밖 — 검증에서 잡아야 sqlite OverflowError → 500(관측기가 그 배치를 영원히 재시도)이 안 난다
+                (row(price=2**63), "rows[0].price"),
+                (row(item_id=-(2**63) - 1), "rows[0].item_id"),
+                (row(flag45=2**63), "rows[0].flag45"),
+                # 문자열 상한 — seller 는 PK 일부, item_name 은 학습 표·정규화 키로 복사된다
+                (row(seller="판" * 129), "rows[0].seller"),
+                (row(item_name="이" * 129), "rows[0].item_name"),
+                (row(category="c" * 33), "rows[0].category"),
             ]
             for r, field in bad_rows:
                 st, data = await post(client, body(obs(obs_id="good"), obs(obs_id="bad", rows=[r])))
@@ -61,7 +76,17 @@ def test_post_rejects_malformed_and_writes_nothing(tmp_path):
                 assert (data["index"], data["field"]) == (1, field), (field, data)
             st, data = await post(client, body(obs(agent_ts="1000")))
             assert (st, data["index"], data["field"]) == (400, 0, "agent_ts")
+            # 시계가 리셋·폭주한 기기 — 200 을 주면 어떤 조회에도 안 보이고 prune 에 사라진다 → 400 으로 격리시킨다
+            now = time.time()
+            st, data = await post(client, body(obs(obs_id="good"), obs(obs_id="clock", agent_ts=0.0)))
+            assert (st, data["error"], data["index"], data["field"]) == (400, "agent_ts_out_of_range", 1, "agent_ts")
+            st, data = await post(client, body(obs(agent_ts=now - 31 * 86400)))
+            assert (st, data["error"]) == (400, "agent_ts_out_of_range")
+            st, data = await post(client, body(obs(agent_ts=now + 2 * 86400)))
+            assert (st, data["error"], data["field"]) == (400, "agent_ts_out_of_range", "agent_ts")
             st, data = await post(client, body(obs(opcode=None)))
+            assert (st, data["field"]) == (400, "opcode")
+            st, data = await post(client, body(obs(opcode=2**63)))
             assert (st, data["field"]) == (400, "opcode")
             st, data = await post(client, body(obs(page="1")))
             assert (st, data["field"]) == (400, "page")
@@ -172,6 +197,13 @@ def test_search_normalization_and_params(tmp_path):
             assert st == 400
             st, data = await get(client, "/api/market/search", {"item_id": "9001"})
             assert data["count"] == 1 and data["listings"][0]["item_name"] == "Test Sword" and data["q_norm"] == ""
+            # item_id 는 있으면 정확해야 한다 — 음수를 0 으로 깎거나 쓰레기를 버리고 q 만으로 답하면 틀린 결과가 조용히 나간다
+            for bad in ({"item_id": "-5"}, {"item_id": "abc"}, {"item_id": "abc", "q": "봉인"},
+                        {"item_id": str(2**63)}, {"item_id": "1.5", "q": "봉인"}):
+                st, data = await get(client, "/api/market/search", bad)
+                assert (st, data["error"], data["field"]) == (400, "bad_request", "item_id"), bad
+            st, data = await get(client, "/api/market/search", {"item_id": "9001", "q": "없는아이템"})
+            assert (st, data["count"], data["item_id"]) == (200, 0, 9001)   # AND 필터
             # limit 클램프: max 100, 최소 1, 쓰레기는 기본 20
             st, data = await get(client, "/api/market/search", {"q": "의", "limit": "200"})
             assert data["limit"] == 100
@@ -210,25 +242,85 @@ def test_search_freshness_ordering_and_clock_clamp(tmp_path):
     _run(scn())
 
 
-def test_listings_incremental(tmp_path):
+def test_listings_keyset_cursor_delivers_every_row_at_the_same_ts(tmp_path):
     async def scn():
         app, client = await start_client(make_cfg(tmp_path, listings_limit_max=2))
         try:
             now = time.time()
-            for i in range(4):
-                await post(client, body(obs(obs_id=f"l{i}", agent_ts=now - 100 + i * 10,
-                                            rows=[row(listing_id=40 + i, seller=f"판매자{i}")])))
-            st, data = await get(client, "/api/market/listings", {"since_ts": "0", "limit": "10"})
-            assert (data["limit"], data["count"]) == (2, 2)  # limit 클램프(max 2)
-            assert [l["listing_id"] for l in data["listings"]] == [40, 41]
-            since = data["next_since_ts"]
-            st, data = await get(client, "/api/market/listings", {"since_ts": repr(since)})
-            assert [l["listing_id"] for l in data["listings"]] == [42, 43]  # 엄격 초과 — 41 은 다시 안 온다
-            since = data["next_since_ts"]
-            st, data = await get(client, "/api/market/listings", {"since_ts": repr(since)})
-            assert data["count"] == 0 and data["next_since_ts"] == since
+            # 한 페이지 = 행 5개, 전부 같은 seen_ts — ts 만 엄격 초과하던 커서는 3·4·5번째 행을 영원히 놓쳤다.
+            await post(client, body(obs(obs_id="same", agent_ts=now - 100,
+                                        rows=[row(listing_id=50 + i, seller=f"판매자{i}") for i in range(5)])))
+            await post(client, body(obs(obs_id="later", agent_ts=now - 50, rows=[row(listing_id=60)])))
+            got, params, calls = [], {"since_ts": "0", "limit": "10"}, 0
+            while True:
+                st, data = await get(client, "/api/market/listings", params)
+                calls += 1
+                assert st == 200 and data["limit"] == 2          # limit 클램프(max 2)
+                if not data["count"]:
+                    assert (data["next_since_ts"], data["next_since_key"]) == (float(params["since_ts"]), params["since_key"])
+                    break
+                assert all(l["listing_key"] for l in data["listings"])
+                got += [l["listing_id"] for l in data["listings"]]
+                params = {"since_ts": repr(data["next_since_ts"]), "since_key": data["next_since_key"]}
+            assert (got, calls) == ([50, 51, 52, 53, 54, 60], 4)
+            # since_ts 만 주는 옛 소비자 — 같은 ts 의 행이 다시 온다(at-least-once), 유실은 없다
+            st, first = await get(client, "/api/market/listings", {"since_ts": "0"})
+            st, again = await get(client, "/api/market/listings", {"since_ts": repr(first["next_since_ts"])})
+            assert [l["listing_id"] for l in again["listings"]] == [50, 51]
         finally:
             await client.close()
+    _run(scn())
+
+
+def test_item_name_latest_wins_and_null_never_overwrites(tmp_path):
+    async def scn():
+        app, client = await start_client(make_cfg(tmp_path))
+        try:
+            now = time.time()
+            await post(client, body(obs(obs_id="m2", agent_ts=now - 200, rows=[row(item_name="봉인의돌")])))
+            await post(client, body(obs(obs_id="m1", agent_ts=now - 300, rows=[row(item_name="옛이름")])))  # 늦게 온 옛 관측
+            st, data = await get(client, "/api/market/search", {"item_id": "853"})
+            assert data["listings"][0]["item_name"] == "봉인의돌"
+            await post(client, body(obs(obs_id="m3", agent_ts=now - 100, rows=[row(item_name=None, quantity=3)])))  # 표 없는 PC
+            st, data = await get(client, "/api/market/search", {"item_id": "853"})
+            (lst,) = data["listings"]
+            assert (lst["item_name"], lst["quantity"]) == ("봉인의돌", 3)
+            await post(client, body(obs(obs_id="m4", agent_ts=now - 50, rows=[row(item_name="새이름")])))
+            st, data = await get(client, "/api/market/search", {"q": "새이름"})
+            assert data["count"] == 1
+            st, data = await get(client, "/api/market/search", {"q": "옛이름"})
+            assert data["total_matches"] == 0
+        finally:
+            await client.close()
+    _run(scn())
+
+
+def test_injected_database_is_not_closed_by_app(tmp_path):
+    async def scn():
+        ext = db_mod.Database(":memory:")
+        app, client = await start_client(make_cfg(tmp_path), database=ext)
+        await post(client, body(obs(obs_id="x1")))
+        await client.close()          # 앱 cleanup — 주입한 DB 의 소유권은 호출자, 닫히지 않아야 한다
+        assert ext.market_stats(time.time())["observations"] == 1
+        app2, client2 = await start_client(make_cfg(tmp_path), database=ext)   # 같은 DB 를 다른 앱이 재사용
+        try:
+            st, s = await get(client2, "/api/market/stats")
+            assert s["observations"] == 1
+        finally:
+            await client2.close()
+        ext.close()
+    _run(scn())
+
+
+def test_no_app_key_warning_and_owned_db_closed_on_cleanup(tmp_path):
+    async def scn():
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", web.NotAppKeyWarning)
+            app, client = await start_client(make_cfg(tmp_path))
+            await post(client, body(obs(obs_id="w1")))
+            await client.close()
+        with pytest.raises(sqlite3.ProgrammingError):
+            app_db(app).market_stats(0.0)      # 앱이 만든 DB 는 cleanup_ctx 가 닫는다
     _run(scn())
 
 
@@ -256,9 +348,17 @@ def test_unknown_keys_tolerated_and_payload_kept(tmp_path):
             o = obs(obs_id="u1", extra_top="ignored", rows=[row(listing_id=5, future_field={"x": 1})])
             st, data = await post(client, {**body(o), "unknown": True})
             assert st == 200 and data["accepted"] == 1
-            raw = app["db"]._con.execute(
-                "SELECT payload_json FROM market_observations WHERE obs_id='u1'").fetchone()[0]
-            assert '"extra_top"' in raw and '"future_field"' in raw
+            con = app_db(app)._con
+            stored = json.loads(con.execute(
+                "SELECT payload_json FROM market_observations WHERE obs_id='u1'").fetchone()[0])
+            assert stored["extra_top"] == "ignored" and stored["item_table"]["rows"] == 4001
+            # 행 본문(seller·price…)은 market_listings 에만 — payload 에는 행의 미지 키만 남는다
+            assert stored["rows"] == [{"quantity_hi": 0, "price_hi": 0, "unknown40": "00000000", "future_field": {"x": 1}}]
+            plain = {k: v for k, v in row(listing_id=6).items() if k in db_mod.ROW_NORMALIZED_KEYS}
+            await post(client, body(obs(obs_id="u2", rows=[plain])))
+            stored2 = json.loads(con.execute(
+                "SELECT payload_json FROM market_observations WHERE obs_id='u2'").fetchone()[0])
+            assert "rows" not in stored2 and stored2["obs_id"] == "u2"
         finally:
             await client.close()
     _run(scn())

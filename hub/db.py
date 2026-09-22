@@ -5,11 +5,18 @@
 
 세 표:
 - ``market_observations`` — 관측기가 올린 페이지(프레임) 1개 = 1행. ``obs_id`` PK 가 재전송 dedup.
+  ``payload_json`` 은 봉투 원문이되 **행은 정규화된 키를 뺀 미지 키만** 남긴다(``payload_for_storage``) —
+  행 본문은 ``market_listings`` 에 있으니 두 번 쓰지 않는다(SD 카드 쓰기·30일 저장량 절반).
 - ``market_listings`` — 등록(판매 건) 1개의 **최신 상태**. 같은 등록을 여러 번 보면 upsert.
 - ``market_item_names`` — 관측기가 함께 보낸 아이템 id→이름 누적(이름을 못 푼 행을 검색 때 보충).
 
 시각 규칙: ``seen_ts = min(agent_ts, recv_ts)`` — 스풀에 묵었다가 늦게 올라온 관측은 관측 시각을,
 관측기 시계가 서버보다 앞서면 서버 시각을 쓴다. 신선도 판정은 전부 ``seen_ts`` 계열(``last_seen_ts``).
+``agent_ts`` 의 허용 범위(보존 기간 이전·하루 넘게 미래는 400)는 서버 검증 몫(server.validate_upload).
+
+PRAGMA: ``journal_mode=WAL`` + ``synchronous=NORMAL`` — WAL 에서 문서화된 안전 설정(정전 때 마지막 트랜잭션
+몇 개만 위험)이고 업로드는 at-least-once 재전송이라 잃어도 다시 온다. FULL 이면 POST 커밋마다 SD 카드
+fsync 가 이벤트루프를 세워 봇의 search 가 밀린다.
 """
 from __future__ import annotations
 
@@ -36,13 +43,16 @@ CREATE TABLE IF NOT EXISTS market_listings (
   last_device TEXT NOT NULL, last_obs_id TEXT NOT NULL);
 CREATE INDEX IF NOT EXISTS idx_market_listings_norm ON market_listings(item_name_norm);
 CREATE INDEX IF NOT EXISTS idx_market_listings_item ON market_listings(item_id);
-CREATE INDEX IF NOT EXISTS idx_market_listings_seen ON market_listings(last_seen_ts);
+CREATE INDEX IF NOT EXISTS idx_market_listings_seen_key ON market_listings(last_seen_ts, listing_key);
 CREATE TABLE IF NOT EXISTS market_item_names (
   item_id INTEGER PRIMARY KEY, item_name TEXT NOT NULL, item_name_norm TEXT NOT NULL,
   first_seen_ts REAL NOT NULL, last_seen_ts REAL NOT NULL, last_device TEXT NOT NULL);
 """
 
 DEFAULT_CATEGORY = "item"
+#: 행에서 ``market_listings`` 로 정규화되는 키 — payload_json 에는 이 밖의(미지) 키만 남긴다.
+ROW_NORMALIZED_KEYS = frozenset({"listing_id", "item_id", "item_name", "quantity", "price", "seller",
+                                 "category", "flag45", "flag46"})
 
 
 def norm_item_name(name) -> str:
@@ -67,13 +77,25 @@ def _clean_name(value) -> str | None:
     return None
 
 
+def payload_for_storage(obs: dict) -> dict:
+    """``payload_json`` 에 남길 봉투 — 행은 정규화된 키(``ROW_NORMALIZED_KEYS``)를 빼고 미지 키만, 전부 비면
+    ``rows`` 자체를 뺀다. tolerant reader 약속(미지 키 보존)은 지키면서 행 본문을 두 번 쓰지 않는다."""
+    out = {k: v for k, v in obs.items() if k != "rows"}
+    extras = [{k: v for k, v in row.items() if k not in ROW_NORMALIZED_KEYS} for row in obs.get("rows") or []]
+    if any(extras):
+        out["rows"] = extras
+    return out
+
+
 _LISTING_SELECT = """
-SELECT l.listing_id, l.item_id, COALESCE(l.item_name, n.item_name) AS item_name,
+SELECT l.listing_key, l.listing_id, l.item_id, COALESCE(l.item_name, n.item_name) AS item_name,
        l.quantity, l.price, l.seller, l.category, l.flag45, l.flag46,
        l.first_seen_ts, l.last_seen_ts, l.seen_count, l.last_device, l.last_obs_id
   FROM market_listings l LEFT JOIN market_item_names n ON n.item_id = l.item_id
 """
 
+#: DO UPDATE 안에서 무수식 열은 기존 행, ``excluded.`` 는 새 관측. 이름도 "더 나중에 본 관측이 쓴다" —
+#: 새 이름이 NULL 이면 덮지 않고, 기존이 NULL 이면 채우고, 둘 다 있으면 seen_ts 가 같거나 큰 쪽이 이긴다.
 _LISTING_UPSERT = """
 INSERT INTO market_listings
   (listing_key, listing_id, item_id, item_name, item_name_norm, quantity, price,
@@ -88,8 +110,12 @@ ON CONFLICT(listing_key) DO UPDATE SET
   flag46      = CASE WHEN excluded.last_seen_ts >= last_seen_ts THEN excluded.flag46      ELSE flag46      END,
   last_device = CASE WHEN excluded.last_seen_ts >= last_seen_ts THEN excluded.last_device ELSE last_device END,
   last_obs_id = CASE WHEN excluded.last_seen_ts >= last_seen_ts THEN excluded.last_obs_id ELSE last_obs_id END,
-  item_name      = COALESCE(excluded.item_name, item_name),
-  item_name_norm = COALESCE(excluded.item_name_norm, item_name_norm),
+  item_name      = CASE WHEN excluded.item_name IS NOT NULL
+                             AND (item_name IS NULL OR excluded.last_seen_ts >= last_seen_ts)
+                        THEN excluded.item_name ELSE item_name END,
+  item_name_norm = CASE WHEN excluded.item_name_norm IS NOT NULL
+                             AND (item_name_norm IS NULL OR excluded.last_seen_ts >= last_seen_ts)
+                        THEN excluded.item_name_norm ELSE item_name_norm END,
   first_seen_ts  = MIN(first_seen_ts, excluded.first_seen_ts),
   last_seen_ts   = MAX(last_seen_ts, excluded.last_seen_ts),
   seen_count     = seen_count + 1
@@ -116,6 +142,7 @@ class Database:
         self._con = sqlite3.connect(path)
         self._con.row_factory = sqlite3.Row
         self._con.execute("PRAGMA journal_mode=WAL")
+        self._con.execute("PRAGMA synchronous=NORMAL")
         self._con.executescript(SCHEMA)
         self._con.commit()
 
@@ -129,8 +156,8 @@ class Database:
 
         관측마다 ``INSERT OR IGNORE`` — ``obs_id`` 가 이미 있으면(스풀 재전송) 중복으로 세고 행 upsert 를
         건너뛴다(``seen_count`` 이중 가산 방지). 행 upsert 는 "더 나중에 본 관측이 상태를 쓴다":
-        ``last_seen_ts`` 가 기존보다 같거나 크면 quantity/price/플래그/기기를 갱신하고, 순서가 뒤바뀌어
-        올라온 옛 관측은 first_seen_ts 만 앞당긴다. 이름은 NULL 이 아닌 값을 우선 보존한다.
+        ``last_seen_ts`` 가 기존보다 같거나 크면 quantity/price/플래그/기기/이름을 갱신하고, 순서가 뒤바뀌어
+        올라온 옛 관측은 first_seen_ts 만 앞당긴다(빈 이름은 채운다). NULL 이름은 있는 이름을 덮지 않는다.
         """
         con = self._con
         accepted = duplicates = rows_applied = 0
@@ -146,7 +173,7 @@ class Database:
                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                     (obs["obs_id"], device_id, recv_ts, agent_ts, seen_ts, int(obs["opcode"]),
                      obs.get("page"), obs.get("total_pages"), len(rows),
-                     json.dumps(obs, ensure_ascii=False)))
+                     json.dumps(payload_for_storage(obs), ensure_ascii=False)))
                 if cur.rowcount != 1:
                     duplicates += 1
                     continue
@@ -177,9 +204,9 @@ class Database:
 
     @staticmethod
     def _listing_dict(r) -> dict:
-        return {"listing_id": r["listing_id"], "item_id": r["item_id"], "item_name": r["item_name"],
-                "quantity": r["quantity"], "price": r["price"], "seller": r["seller"],
-                "category": r["category"], "flag45": r["flag45"], "flag46": r["flag46"],
+        return {"listing_key": r["listing_key"], "listing_id": r["listing_id"], "item_id": r["item_id"],
+                "item_name": r["item_name"], "quantity": r["quantity"], "price": r["price"],
+                "seller": r["seller"], "category": r["category"], "flag45": r["flag45"], "flag46": r["flag46"],
                 "first_seen_ts": r["first_seen_ts"], "last_seen_ts": r["last_seen_ts"],
                 "seen_count": r["seen_count"], "last_device": r["last_device"]}
 
@@ -208,11 +235,15 @@ class Database:
             params + [float(min_seen_ts), int(limit)]).fetchall()
         return [self._listing_dict(r) for r in rows], int(total)
 
-    def list_market_since(self, since_ts: float, limit: int) -> list:
-        """``last_seen_ts > since_ts`` 인 행을 오래된 순으로 — 소비자의 증분 폴링용(엄격 초과라 이어 읽기 안전)."""
+    def list_market_since(self, since_ts: float, since_key: str, limit: int) -> list:
+        """복합 keyset 커서 ``(last_seen_ts, listing_key) > (since_ts, since_key)`` 인 행을 오래된 순으로 —
+        소비자의 증분 폴링용. ``last_seen_ts`` 하나만 엄격 초과로 보면 같은 시각의 행(한 페이지의 행은 전부
+        같은 ``seen_ts``)이 limit 를 넘길 때 나머지가 영구 누락된다. ``since_key`` 가 빈 문자열이면 ``since_ts``
+        와 같은 시각의 행을 전부 포함한다(옛 소비자 = at-least-once)."""
         rows = self._con.execute(
-            _LISTING_SELECT + " WHERE l.last_seen_ts > ? ORDER BY l.last_seen_ts ASC, l.listing_key LIMIT ?",
-            (float(since_ts), int(limit))).fetchall()
+            _LISTING_SELECT + " WHERE l.last_seen_ts > ? OR (l.last_seen_ts = ? AND l.listing_key > ?)"
+            " ORDER BY l.last_seen_ts ASC, l.listing_key ASC LIMIT ?",
+            (float(since_ts), float(since_ts), str(since_key), int(limit))).fetchall()
         return [self._listing_dict(r) for r in rows]
 
     def market_stats(self, now: float, fresh_sec: float = 86400.0) -> dict:

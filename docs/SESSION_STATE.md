@@ -1,7 +1,7 @@
 # Session State
 
 Updated: 2026-09-22 새벽 (Asia/Seoul) — **방향 전환(사용자 결정 2026-09-22): SEAssist 레포에는 더 이상 머지하지 않는다.**
-**PR-Y3 허브 = 이 레포 PR #6**(https://github.com/helperjby/GS-trade-tracker/pull/6, 브랜치 `claude/hub-market-api-20260922`, PR #5 위 스택, 리뷰·머지 대기) ·
+**PR-Y3 허브 = 이 레포 PR #6**(https://github.com/helperjby/GS-trade-tracker/pull/6, 브랜치 `claude/hub-market-api-20260922`, PR #5 위 스택, `/code-review 6 high` 14건 전부 반영 2026-09-22, 머지 대기) ·
 **PR-Y2b = 이 레포 PR #5**(https://github.com/helperjby/GS-trade-tracker/pull/5, `/code-review 5 high` 15건 전부 반영 c042521 2026-09-22, 머지 대기) ·
 SEAssist PR #306(PR-Y2) **미머지 → 닫음 예정, 이 레포로 이식(PR-Y2')** · Step 1 = SEAssist #304·#305(머지, 동결 시점 참조)
 
@@ -68,16 +68,27 @@ SEAssist PR #306(PR-Y2) **미머지 → 닫음 예정, 이 레포로 이식(PR-Y
   `requirements.txt`·`config.json.example`·`Dockerfile`·`docker-compose.yml`·`README.md`) + `hub/tests/`(14건, 합성 데이터) + **`docs/HUB-PROTOCOL.md`**
   (계약 정본) + CI `Run hub tests` 단계 + `.gitignore`(`hub/config.json`·`hub/data/`). 계약: `POST /api/market/observations`(배치 ≤100·행 ≤64,
   **전건 검증 후 트랜잭션 1개**, `obs_id` dedup — 중복은 무변경) · `GET /api/market/search?q=&item_id=&limit=&max_age_sec=`(정규화 한 정의 =
-  공백 제거 + casefold, `instr` 부분일치, `price ASC`, `total_matches`) · `GET /api/market/listings?since_ts=&limit=`(엄격 초과·`next_since_ts`) ·
+  공백 제거 + casefold, `instr` 부분일치, `price ASC`, `total_matches`) · `GET /api/market/listings?since_ts=&since_key=&limit=`(복합 keyset 커서 → `next_since_ts`·`next_since_key`, 리뷰 반영) ·
   `GET /api/market/stats` · `GET /`(무인증). 시각 `seen_ts = min(agent_ts, recv_ts)`, upsert 는 "더 나중에 본 관측이 상태를 쓴다",
   `listing_key = listing_id:item_id:seller`, 학습 표 `market_item_names`(이름 null 행 보충), 보존 30일. **검증**: hub 14 passed · 루트 73 passed ·
   실서버 스모크(127.0.0.1:8800 — POST 2관측/3행 → 재POST 중복 2 → search 수량 8·seen_count 2 → listings 2 → stats → 무인증 401 →
   잘못된 행 400 `rows[0].listing_id` → 상태 불변). Docker 이미지 빌드는 이 PC 의 Docker 데몬이 꺼져 있어 **미검증**(Dockerfile 은 SEAssist
   dashboard 의 것과 같은 꼴 — Pi 에서 `docker compose up -d --build` 로 확인). PR 링크는 생성 뒤 이 줄에 기록한다.
+- **PR #6 리뷰 반영(2026-09-22, `/code-review 6 high` 14건 전부, #5 리뷰 반영 c042521 위로 rebase)**: 모든 int 를 i64 범위로 검증(2⁶³ 가격이
+  sqlite OverflowError → 500 → 관측기 영구 재시도 루프였다) + 저장 오류는 JSON `500 storage_error` · `/listings` 복합 keyset 커서
+  `(last_seen_ts, listing_key)` + `since_key`/`next_since_key`/행 `listing_key`(같은 seen_ts 행이 limit 넘으면 영구 누락되던 결함, 인덱스 교체) ·
+  상대 `db_path` 는 config 폴더 기준(레포 루트 실행이 `<repo>/data/hub.db` 에 실데이터를 만들던 것) + `HUB_DB_PATH` 환경변수·Dockerfile
+  `ENV HUB_DB_PATH=/data/hub.db`(컨테이너 임시 FS 에 쓰다 `up --build` 에 소멸하던 것) · `agent_ts` 범위 밖(보존기간 이전·`max_agent_ts_ahead_sec`
+  초과 미래)은 `400 agent_ts_out_of_range` · 이름 upsert 도 최신 우선(늦게 온 옛 이름이 덮지 않음, NULL 은 덮지 않음) · 주입 DB 는 앱이 닫지
+  않음 · `item_id` 쿼리 음수·비정수·i64 초과 → `400 field item_id` · secret 16자 이상·`CHANGE-ME` 거부 · payload_json 행은 미지 키만 ·
+  seller/item_name ≤128·category ≤32 · `synchronous=NORMAL` · `web.AppKey` + `cleanup_ctx` · `_q_num` 하나로. HUB-PROTOCOL §1·§3-1·§3-2·§3-3·§4·§6·§7,
+  hub/README, PLAN 갱신. **검증**: hub 28 passed(`-W error::NotAppKeyWarning`) · 루트 92 passed · 실서버 스모크 16/16(127.0.0.1:8801,
+  scratchpad config: CHANGE-ME 기동 거부 → DB 가 config 폴더 옆 → POST 2/3 → 재POST 중복 2 → search 3 → keyset 커서 limit=1 로 3행+빈 호출 →
+  stats → 401 → 잘못된 행·2⁶³·agent_ts 0·item_id abc 전부 400 → stats 불변).
 
 ## 다음 행동
 
-1. **이 레포 PR #5 머지**(리뷰 15건 반영 완료) → 2. **허브 PR 머지**(#5 머지 후 base 가 `main` 으로 바뀌었는지 확인, 아니면 `gh pr edit --base main`) →
+1. **이 레포 PR #5 머지**(리뷰 15건 반영 완료) → 2. **허브 PR #6 머지**(리뷰 14건 반영 완료; #5 머지 후 base 가 `main` 으로 바뀌었는지 확인, 아니면 `gh pr edit 6 --base main`) →
    Pi 배포(`hub/README.md`: tar+ssh → `~/yuktracker-hub` → `config.json`(secret, `/data/hub.db`) → `docker compose up -d --build` →
    `curl …:8800/api/market/stats`). SEAssist PR #306 은 **닫는다**(머지 안 함).
 3. **PR-Y2' 이식(이 레포)**: #306 worktree 의 프레이머 확장·`packet_market.py`·엔진 `market_cb`/헬스·테스트·`docs/PACKET-MARKET.md`(마스킹)·

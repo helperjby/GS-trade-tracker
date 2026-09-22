@@ -54,6 +54,55 @@ def test_reopen_is_idempotent_and_keeps_rows(tmp_path):
     d2.close()
 
 
+def test_pragmas_wal_and_synchronous_normal(tmp_path):
+    d = _open(tmp_path)
+    assert d._con.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
+    assert d._con.execute("PRAGMA synchronous").fetchone()[0] == 1   # NORMAL — POST 마다 SD fsync 로 루프를 세우지 않는다
+    d.close()
+
+
+def test_list_since_keyset_cursor(tmp_path):
+    d = _open(tmp_path)
+    d.insert_market_observations("A", [_obs("o", 100.0, [_row(listing_id=i, seller=f"s{i}") for i in range(5)])], 100.0)
+    page = d.list_market_since(0.0, "", 2)
+    assert [r["listing_id"] for r in page] == [0, 1]
+    page = d.list_market_since(page[-1]["last_seen_ts"], page[-1]["listing_key"], 2)
+    assert [r["listing_id"] for r in page] == [2, 3]
+    page = d.list_market_since(page[-1]["last_seen_ts"], page[-1]["listing_key"], 2)
+    assert [r["listing_id"] for r in page] == [4]
+    assert d.list_market_since(100.0, page[-1]["listing_key"], 2) == []
+    assert [r["listing_id"] for r in d.list_market_since(100.0, "", 10)] == [0, 1, 2, 3, 4]   # 키 없으면 같은 ts 전부
+    assert d.list_market_since(100.0000001, "", 10) == []
+    d.close()
+
+
+def test_item_name_latest_wins_null_never_overwrites(tmp_path):
+    d = _open(tmp_path)
+    d.insert_market_observations("A", [_obs("t200", 200.0, [_row(item_name="봉인의돌")])], 200.0)
+    d.insert_market_observations("A", [_obs("t100", 100.0, [_row(item_name="[M]봉인의돌")])], 200.0)  # 늦게 온 옛 관측
+    d.insert_market_observations("A", [_obs("t300", 300.0, [_row(item_name=None)])], 300.0)          # 이름 못 푼 PC
+    (r,) = d._con.execute("SELECT item_name, item_name_norm, quantity FROM market_listings").fetchall()
+    assert tuple(r) == ("봉인의돌", "봉인의돌", 1)
+    d.insert_market_observations("A", [_obs("t400", 400.0, [_row(item_name="봉인의돌(상)")])], 400.0)
+    (r,) = d._con.execute("SELECT item_name FROM market_listings").fetchall()
+    assert r[0] == "봉인의돌(상)"
+    (n,) = d._con.execute("SELECT item_name FROM market_item_names").fetchall()
+    assert n[0] == "봉인의돌(상)"
+    d.close()
+
+
+def test_payload_for_storage_strips_normalized_row_keys():
+    obs = {"obs_id": "x", "agent_ts": 1.0, "hdr4": 0, "anomalies": ["a"],
+           "rows": [{"listing_id": 1, "item_id": 2, "quantity": 3, "price": 4, "seller": "s", "item_name": "n",
+                     "flag45": 2, "flag46": 0, "unknown40": "00", "quantity_hi": 0}, {"listing_id": 9, "seller": "t"}]}
+    out = db_mod.payload_for_storage(obs)
+    assert out["anomalies"] == ["a"] and out["hdr4"] == 0 and out["obs_id"] == "x"
+    assert out["rows"] == [{"unknown40": "00", "quantity_hi": 0}, {}]
+    assert "rows" not in db_mod.payload_for_storage({"obs_id": "y", "rows": [{"listing_id": 1}]})
+    assert "rows" not in db_mod.payload_for_storage({"obs_id": "z"})
+    assert obs["rows"][0]["seller"] == "s"   # 원본은 그대로
+
+
 def test_insert_rolls_back_whole_batch_on_error(tmp_path):
     d = _open(tmp_path)
     bad = [_obs("ok", 10.0, [_row()]),

@@ -31,11 +31,16 @@ def make_cfg(tmp_path, **over) -> dict:
     return cfg
 
 
-async def start_client(cfg):
-    app = server_mod.make_app(cfg)
+async def start_client(cfg, database=None):
+    app = server_mod.make_app(cfg, database)
     client = TestClient(TestServer(app))
     await client.start_server()
     return app, client
+
+
+def app_db(app):
+    """앱이 쓰는 Database — 문자열 키가 아니라 ``web.AppKey`` 라 헬퍼로 감춘다."""
+    return app[server_mod.DB_KEY]
 
 
 def row(**over) -> dict:
