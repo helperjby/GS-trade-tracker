@@ -132,7 +132,7 @@ _PARTY_HDR3_SLICE = slice(10, 13)
 #: 조철(제련) 팝업 신호. 발생 2창 전건 포착 / 음성 35,787프레임 0건, 화면 감지보다
 #: 0.44~0.69s 선행 (PACKET-FINDINGS §4, FOLLOWUP F-203-1, 2026-07-31 확정). 마커
 #: `0x03f0`(sub=14)와 같은 버스트로 오며 이 프레임 하나로 즉시 발화한다 — 패치 전 3건과
-#: 09-15 F1_JBY 는 조철이 마커보다 0.1~0.5ms 먼저, 09-17 두 건은 마커가 먼저라
+#: 09-15 DEV-1 는 조철이 마커보다 0.1~0.5ms 먼저, 09-17 두 건은 마커가 먼저라
 #: **순서를 조건으로 쓰지 않는다**.
 #: ⚠️ "조철이 풀렸다"는 패킷으로 알 수 없다(신호 이후 창 끝까지 비-베이스라인 s2c 0건,
 #: 2026-09-17 수동 제출 표본에서도 제출 응답 0건).
@@ -229,7 +229,7 @@ _SCAN_MAX_WAIT_SEC = 0.5
 #: 작은 버퍼 전수 스캔은 어차피 값싸고, CPU 문제는 버퍼가 커진 뒤에만 생긴다.
 _SCAN_ALWAYS_BELOW = 4096
 #: 전투 ENTER 앵커 — 미락 상태에서 "완성된 ENTER + 바로 뒤 유효 프레임" 이면 k 와 무관하게
-#: 락한다. 성긴 스트림(F1_JBY 단독 사냥 ≈0.87 세그먼트/s)은 k=8 을 채우는 데 중앙값 13s·
+#: 락한다. 성긴 스트림(DEV-1 단독 사냥 ≈0.87 세그먼트/s)은 k=8 을 채우는 데 중앙값 13s·
 #: 최대 30s 가 걸려, 시작 직후 첫 ENTER 가 백로그에서 9~22s 늦게 재생됐다
 #: (2026-09-18, docs/PACKET-COLDSTART-2026-09-18.md). 이 헤더 6바이트(magic + opcode u32 +
 #: subtype)는 3기기 72창 5.2MB 에서 진짜 ENTER 246건에만 나왔다(다른 위치 0건).
@@ -676,7 +676,7 @@ def _chain_start(buf: bytes, start: int, target: int) -> int:
     ENTER 앵커가 경계를 증명하면, 그 앞에 쌓인 프레임도 같은 체인 위에 있는 한 경계다.
     앵커 자리에서 락하고 앞을 버리면 같은 순간에 k-락이 잡혔을 때보다 프레임을 덜 보게 되어
     오프라인 재생과 어긋난다(필수 코퍼스 검사 `counts == arrival_order` 가 실제로 잡았다:
-    HIC0TCR 07-31 18:49 창 92 → 86).
+    DEV-2 07-31 18:49 창 92 → 86).
 
     `start` 는 호출자가 아는 확정 거부 상한이다 — 그 앞 offset 의 체인은 REJECT 로 끊겼다.
     끊긴 곳이 `target` 앞이면 `target` 에 닿지 못하고, 뒤라면 그 REJECT 는 ENTER 에서 k 프레임
@@ -718,7 +718,7 @@ def find_boundary(buf: bytes, start: int = 0, k: int = DEFAULT_LOCK_K, *,
 
     ``popup_anchor=True`` 는 라이브 기본 디코더(`FlowDecoder()`)와 같은 조철 쌍 앵커를
     오프셋 0 에 허용한다 — 오프라인 재생(`mine.walk_frames`)이 k 프레임에 못 미치는 조철
-    창에서 라이브와 어긋나지 않게 한다(F1_JBY 09-15: 라이브 5프레임·조철 1 vs 오프라인 0).
+    창에서 라이브와 어긋나지 않게 한다(DEV-1 09-15: 라이브 5프레임·조철 1 vs 오프라인 0).
     캡차 앵커는 라이브에서도 opt-in(`observe_wordinput`)이라 여기에 넣지 않는다.
 
     ``enter_anchor=True`` 는 라이브의 ENTER 앵커(`_enter_anchor`)를 같은 규칙으로 허용한다.
@@ -753,7 +753,7 @@ def _popup_prefix_anchor(buf: bytes, k: int, *, wordinput: bool) -> bool:
     in that prefix vetoes the anchor — the generic scan has just rejected this very chain,
     and locking on it would fire and desync at once.
 
-    Jochul (always on): F1_JBY 2026-09-15 01:06 — the session's resume action drew a jochul
+    Jochul (always on): DEV-1 2026-09-15 01:06 — the session's resume action drew a jochul
     0.3s after the flow attached, five frames in total, so the eight-frame lock never formed
     and the popup passed unseen. The marker may sit on either side (before the patch and in
     that capture the jochul came first; in both 2026-09-17 captures the marker came first).

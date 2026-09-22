@@ -145,7 +145,7 @@ def _ledger_base() -> Path | None:
 
     패킷 전용 뿌리(``settings.packet_data_dir``)의 디바이스별 폴더다 — 비어 있으면
     종전처럼 wordinput_review 검토 폴더로 폴백한다(``packet_dir`` 이 결정). ⚠️ 이것이
-    **자동 합류를 보장하지는 않는다** — 운영 4대 중 1대는 OneDrive 미연동이라
+    **자동 합류를 보장하지는 않는다** — OneDrive 에 붙어 있지 않은 PC 도 있어
     그 PC 의 창은 로컬에만 남는다(``onedrive_available`` 로 구분해 사용자에게
     알린다). 경로는 ``ledger_paths``(stdlib) 가 결정한다 — 종전엔 ``wordinput_runner`` 를
     지연 import 했는데, 그러면 cv2·genai 가 딸려 와 GUI 없는 육의전 관측기가 같은 폴더를

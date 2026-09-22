@@ -58,7 +58,11 @@
   "diverged": [
     {
       "file": "gersang_protocol.py",
-      "why": "PR-Y2' 육의전 프레이머 확장 — MARKET_OPCODES·is_market·market_row_count·MarketObservation, StreamFramer(observe_market=) 전량 대기(≤9+48×64B)·take_market·market_dropped/rejected, FlowDecoder 패스스루와 market_ts. 상류에는 없는 기능이다(SEAssist PR 미머지)."
+      "why": "PR-Y2' 육의전 프레이머 확장 — MARKET_OPCODES·is_market·market_row_count·MarketObservation, StreamFramer(observe_market=) 전량 대기(≤9+48×64B)·take_market·market_dropped/rejected, FlowDecoder 패스스루와 market_ts. 상류에는 없는 기능이다(SEAssist PR 미머지). 더해서 공개 레포 규칙에 따라 주석의 실기기명 5건을 합성 이름(DEV-1·DEV-2)으로 바꿨다."
+    },
+    {
+      "file": "packet_discovery_ledger.py",
+      "why": "공개 레포 규칙 — 주석의 운영 대수 서술을 일반 서술로 바꿨다(코드 경로 무변경)."
     },
     {
       "file": "packet_state_source.py",
