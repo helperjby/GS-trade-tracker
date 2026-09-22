@@ -3,25 +3,24 @@
 SEAssist 심(`seassist.config.app_dir`)은 `%APPDATA%\\SEAssist` 의 설정을 **읽기만** 한다. 관측기가
 직접 쓰는 파일(추출한 아이템 표 캐시, PR-Y1b 의 업로드 스풀)은 그 폴더를 더럽히지 않고 여기에 둔다.
 OneDrive 가 아니라 기기 로컬이다 — 캐시는 그 PC 의 클라 빌드에 묶이고, 스풀은 업로드 뒤 지운다.
+
+경로 계산은 **순수**다(폴더를 만들지 않는다) — 실제로 쓰는 쪽(`ItemTable.write_json`)이 만든다. 도움말
+문자열·`--help`·테스트 subprocess 가 사용자 프로필에 폴더를 남기지 않는다. `%APPDATA%` 폴백 규칙은
+심의 `appdata_base()` 하나를 같이 쓴다.
 """
 from __future__ import annotations
 
-import os
 from pathlib import Path
+
+from .seassist.config import appdata_base
 
 APP_DIR_NAME = "YukTracker"
 ITEM_TABLE_CACHE_NAME = "item_names.json"
 
 
 def app_dir() -> Path:
-    """`%APPDATA%\\YukTracker` — 없으면 만든다(실패해도 경로는 돌려준다)."""
-    base = os.environ.get("APPDATA") or os.path.expanduser("~")
-    p = Path(base) / APP_DIR_NAME
-    try:
-        p.mkdir(parents=True, exist_ok=True)
-    except Exception:
-        pass
-    return p
+    """`%APPDATA%\\YukTracker` — 경로만(만들지 않는다)."""
+    return appdata_base() / APP_DIR_NAME
 
 
 def item_table_cache_path() -> Path:

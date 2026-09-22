@@ -1,7 +1,7 @@
 # Session State
 
-Updated: 2026-09-21 밤 (Asia/Seoul) — **PR-Y2 = SEAssist PR #306**(https://github.com/helperjby/gersang-auto-eating/pull/306, 브랜치 `claude/market-y2-20260921`, 커밋 6개, 리뷰·머지 대기) ·
-**PR-Y2b 아이템 표 추출기 = 이 레포 PR #5**(https://github.com/helperjby/GS-trade-tracker/pull/5, 리뷰·머지 대기) · Step 1 = SEAssist #304·#305(머지)
+Updated: 2026-09-22 (Asia/Seoul) — **PR-Y2 = SEAssist PR #306**(https://github.com/helperjby/gersang-auto-eating/pull/306, 브랜치 `claude/market-y2-20260921`, 커밋 6개, 리뷰·머지 대기) ·
+**PR-Y2b 아이템 표 추출기 = 이 레포 PR #5**(https://github.com/helperjby/GS-trade-tracker/pull/5, `/code-review 5 high` 15건 전부 반영 2026-09-22, 머지 대기) · Step 1 = SEAssist #304·#305(머지)
 
 ## 현재 상태
 
@@ -54,11 +54,19 @@ Updated: 2026-09-21 밤 (Asia/Seoul) — **PR-Y2 = SEAssist PR #306**(https://gi
   `paths.py`, `game_processes.process_image_path`, `tools/dump_item_names.py`(`--check` 실기기: 4,001행·앵커 8/8·0.22s, 실행 중 클라 폴더 자동 탐색),
   합성 아카이브 테스트, `zlib` 허용, `.gitignore item_names*.json`, README·AGENTS·PLAN 갱신. UI 열 대응(사용자 스크린샷): 물품명·판매개수·판매자·단가
   ↔ `@4`·`@8`·`@24`·`@16`; 레벨 = 용병 탭 전용(추후); 기간(장기/단기) ↔ `@45` 후보(H-2609-11).
+- **PR #5 리뷰 반영(2026-09-22, `/code-review 5 high` 15건 전부)**: 캐시 유효성 = 같은 경로 (크기, mtime) / 다른 사본 전체 sha256
+  (앞 1MiB `head_sha256` 제거, `CACHE_VERSION` 2 — 크기 같은 패치를 영원히 놓치던 결함) · `refresh` 여도 캐시 폴백 유지 · id 는 ASCII 숫자만
+  (`²` 행 하나가 표 전체를 잃게 하던 `isdigit`→`int`) · 크기 상한은 읽기 전 stat + 읽는 동안 변경 감지(캐시 오염 방지) · `write_json` mkstemp ·
+  `ItemTable.raw` int 키 정규화 한 번 · 고정 폴더(`--client-dir`/env)에 gcs 없으면 다른 클라로 안 넘어감 + `%VAR%`/`~` 확장 ·
+  `LoadResult(origin/gcs_path/error)` 로 도구가 hit/miss·종료 코드를 정확히(gcs 있는데 표 없음 = rc 1, `--check` 는 캐시 폴백도 실패) ·
+  `--ids-from` 은 `아이템=N` 만 + UTF-8→cp949 · `paths.app_dir` 순수(`--help` 가 폴더 안 만듦, 심 `appdata_base` 공용) ·
+  `process_image_path` 32767 재시도 · 시각 `Z` 한 형식 · 문서 수치 정정(8.4MB·1,247 스트림·추출 0.12s). 실기기: `--check --refresh`
+  4,001행·앵커 8/8·0.16s, 사본 Gersang2 는 sha 로 캐시 hit, `--client-dir C:\AKInteractive`(gcs 없음) → 경고 + rc 2.
 
 ## 다음 행동
 
 1. **SEAssist PR #306 리뷰·머지** — 머지 직전 9창을 `15. Gersang auto eating\packet\<디바이스>\packet_discovery\` 에 복사하고 두 검사
-   재실행(PACKET-MARKET 부록). 2. **이 레포 PR #5 리뷰·머지** — SEAssist 와 독립.
+   재실행(PACKET-MARKET 부록). 2. **이 레포 PR #5 머지**(리뷰 15건 반영 완료 2026-09-22) — SEAssist 와 독립; 머지 뒤 PR #6 base → `main`.
 3. SEAssist PR-Y2 머지 뒤 여기 동기화: `tools/sync_seassist_core.py` `MODULES += "packet_market.py"` **먼저** → `--source <머지된 main>` →
    VENDOR.json → 스모크 테스트(`packet_market` import + `FlowDecoder(observe_market=True)`).
 4. Step 0 잔여 캡처 2창: ① 아이템 탭에서 라벨 5열(`아이템, 수량, 판매자, 단가, 기간` — 예 `정기의구슬(風), 10, <판매자>, 45,000,000, 장기`)

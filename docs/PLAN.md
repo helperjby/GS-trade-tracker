@@ -95,8 +95,9 @@ python scripts/mine_packet_discovery.py --all --lead-sec 30
   `tools/dump_item_names.py --check/--out/--ids/--ids-from/--search`.
 - **해석 주체 = 관측기(업로드 때)**: 관측기 PC 에 클라가 있으니 설치된 빌드의 표로 행마다 `item_id` + `item_name`
   (미해석 null + 카운터 `market_unknown_item`)을 보낸다 — 패치 자동 추종. 캐시 `%APPDATA%\YukTracker\item_names.json`,
-  유효성 `(크기, mtime)` → 앞 1MiB sha256 → 재스캔. 탐색: `--client-dir` → `%YUKTRACKER_CLIENT_DIR%` → 실행 중 `gersang.exe`
-  경로 → `C:\AKInteractive\Gersang*`.
+  유효성 = 크기 일치 + 같은 경로면 mtime 일치 / 다른 사본이면 전체 sha256 일치(실측 4ms), 아니면 재스캔(0.12s) — 크기가 같은
+  패치도 mtime 으로 잡는다(PR #5 리뷰 반영 2026-09-22). 탐색: `--client-dir` 또는 `%YUKTRACKER_CLIENT_DIR%` 가 있으면 **그 폴더만**
+  (gcs 없으면 미발견 — 다른 클라로 넘어가지 않음), 없으면 실행 중 `gersang.exe` 경로 → `C:\AKInteractive\Gersang*`.
 - **정규화 한 정의**: 표시명 = strip → 선두 `[M]` 한 번 제거(게임 UI 와 같음; `[천권]`·`<삼족오>` 는 유지); 검색 키 =
   공백 전부 제거 + casefold — 대시보드 `item_name_norm`·봇 `_squash` 와 같아야 한다. 같은 이름의 여러 id 는 합집합.
 - 인게임 `물품 목록` 창 열 ↔ 필드(스크린샷, 레포 밖): 물품명 ← `@4`+표 · 판매개수 ← `@8` · 판매자 ← `@24` · 단가 ← `@16`;

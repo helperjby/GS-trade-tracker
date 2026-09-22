@@ -15,18 +15,23 @@
 어긋난다). 스트림 오프셋·순번은 패치마다 바뀐다. 그래서 **zlib 시그니처를 순차 스캔**해 스트림을
 하나씩 inflate 하고, 선두 512B 에 마커(`육의전 검색 기능 리스트` cp949 또는 `#Item Code<TAB>Name<TAB>Name
 Code`)가 있는 것만 전량 inflate 해 표로 읽는다 — 행 수가 `MIN_ROWS` 미만이면 미끼로 보고 계속 간다.
-소비한 만큼 건너뛰므로 스트림 본문 안은 검색하지 않고(가짜 시그니처에 덜 흔들린다), 실측 1,247 스트림
-64.8MB 를 0.5s 안에 훑는다. 메모리는 64KiB 단위 drain 이라 파일 크기와 무관하다. 순차 패스가 실패하면
-시그니처 위치마다 독립으로 선두만 보는 2차 패스를 돈다(가짜 스트림이 진짜를 삼킨 병적 경우).
+소비한 만큼 건너뛰므로 스트림 본문 안은 검색하지 않는다(가짜 시그니처에 덜 흔들린다). 실측(2026-09-22,
+클라 사본 3벌 내용 동일): 아카이브 8,399,234B · 스트림 1,247개 · 표 4,001행, 추출 0.12s · 전체 sha256 4ms.
+**아카이브 전체를 메모리에 읽는다**(파일 크기만큼, 상한 `MAX_GCS_BYTES` 는 읽기 전에 stat 으로 본다) —
+inflate 출력만 64KiB 단위 drain 이라 스트림 크기와 무관하다. 순차 패스가 실패하면 시그니처 위치마다
+독립으로 선두만 보는 2차 패스를 돈다(가짜 스트림이 진짜를 삼킨 병적 경우).
 
 경계
 ----
-- stdlib(zlib·json·hashlib) 만 — 관측기 import 경계(`tests/test_vendor.py`). `struct` 도 안 쓴다.
+- stdlib(zlib·json·hashlib·tempfile) 만 — 관측기 import 경계(`tests/test_vendor.py`). `struct` 도 안 쓴다.
 - **읽기 전용**: 파일을 열어 읽을 뿐 게임 프로세스·메모리·네트워크에 닿지 않는다. 게임이 떠 있어도 파일
   잠금이 없다(실측). 추출한 표(JSON)는 레포 밖(`%APPDATA%\\YukTracker\\item_names.json`)에만 둔다.
-- 패치 드리프트: 캐시 유효성은 `(크기, mtime)` → 불일치면 앞 1MiB sha256(클라 3벌의 mtime 차이 흡수)
-  → 그래도 다르면 재스캔. 마커가 사라지면 `ItemTableNotFound` — 관측기는 이름 없이(id 만) 올리고
-  카운터로 드러낸다(PR-Y1b).
+- 패치 드리프트: 캐시 유효성 = 크기 일치 + **같은 경로면 mtime 일치, 다른 경로(클라 사본 3벌)면 전체 sha256
+  일치** — 그 외는 재스캔(0.12s). 크기가 같은 패치도 mtime 이 바뀌므로 잡는다. 마커가 사라지면
+  `ItemTableNotFound` — 관측기는 이름 없이(id 만) 올리고 카운터로 드러낸다(PR-Y1b).
+- 클라 폴더: `--client-dir` 또는 `%YUKTRACKER_CLIENT_DIR%` 로 **고정**하면 그 폴더만 본다(gcs 가 없으면
+  다른 클라로 조용히 넘어가지 않고 미발견). 고정이 없을 때만 실행 중 `gersang.exe` 의 폴더 →
+  `C:\\AKInteractive\\Gersang*`. 시각은 전부 UTC `YYYY-MM-DDTHH:MM:SSZ` 한 형식(`archive_ts`·`extracted_at`).
 
 정규화 — 한 정의
 -----------------
@@ -39,6 +44,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import tempfile
 import zlib
 from dataclasses import asdict, dataclass, field, fields, replace
 from datetime import datetime, timezone
@@ -51,7 +57,8 @@ from .seassist.logger import get_logger
 
 #: 파싱·정규화 규칙이 바뀌면 올린다 → 캐시 무효.
 EXTRACTOR_VERSION = 1
-CACHE_VERSION = 1
+#: 캐시 JSON 스키마 — 2: `head_sha256` 제거(전체 `gcs_sha256` 로 대체), `extracted_at` 도 `Z` 형식.
+CACHE_VERSION = 2
 GCS_NAME = "gersang.gcs"
 #: 아카이브 파일 헤더 8B(`gersang.gcs`·`system.gcs` 공통, 실측).
 GCS_MAGIC = bytes.fromhex("17bc586401000010")
@@ -61,22 +68,21 @@ DEFAULT_CLIENT_GLOBS: tuple[str, ...] = (r"C:\AKInteractive\Gersang*",)
 ZLIB_SIGS: tuple[bytes, ...] = (b"\x78\x01", b"\x78\x5e", b"\x78\x9c", b"\x78\xda")
 #: 표 식별에 보는 inflate 선두 바이트.
 HEAD_BYTES = 512
-#: 스트림 끝을 찾을 때 버리는 단위 = 메모리 상한.
+#: 스트림 끝을 찾을 때 버리는 단위 = inflate 출력 메모리 상한.
 DRAIN_CHUNK = 1 << 16
 #: 표 하나의 inflate 상한(현재 101KB).
 MAX_TABLE_BYTES = 8 << 20
-#: 아카이브 파일 상한(현재 8.4MB) — 넘으면 거부.
+#: 아카이브 파일 상한(현재 8.4MB) — 넘으면 읽지 않고 거부.
 MAX_GCS_BYTES = 256 << 20
 #: 마커만으로는 부족하다 — 구조 검증(현재 4,001행).
 MIN_ROWS = 1000
-#: 캐시 동일성 보조 키 — 앞 1MiB sha256.
-HEAD_SHA_BYTES = 1 << 20
 _M_PREFIX = "[M]"
 _FILETIME_EPOCH_DELTA = 116444736000000000  # 1601-01-01 → 1970-01-01, 100ns 단위
+_ISO_Z = "%Y-%m-%dT%H:%M:%SZ"
 
 
 class ItemTableNotFound(RuntimeError):
-    """아카이브에서 육의전 검색 리스트 표를 찾지 못했다(마커·행 수 검증 실패)."""
+    """아카이브에서 육의전 검색 리스트 표를 찾지 못했다(마커·행 수 검증 실패·크기 상한)."""
 
 
 @dataclass(frozen=True)
@@ -113,7 +119,6 @@ class TableSource:
     gcs_path: str
     gcs_size: int
     gcs_mtime_ns: int
-    head_sha256: str
     gcs_sha256: str
     archive_ts: Optional[str]
     stream_offset: int
@@ -146,19 +151,25 @@ def norm_name(name: str) -> str:
 
 @dataclass(frozen=True)
 class ItemTable:
-    """id → 원본 이름(`raw`) + 출처. 표시명·검색 인덱스는 생성 시 한 번 만든다."""
+    """id → 원본 이름(`raw`) + 출처. 표시명·검색 인덱스는 생성 시 한 번 만든다.
+
+    `raw` 는 생성 때 한 번 `dict[int, str]` 로 정규화한다 — JSON 의 str 키·임의 Mapping 을 넣어도
+    `lookup`·`lookup_raw`·`to_json_dict` 가 같은 키를 본다.
+    """
     raw: Mapping[int, str]
     source: TableSource
     _display: dict[int, str] = field(init=False, repr=False, compare=False, default_factory=dict)
     _norm: dict[str, list[int]] = field(init=False, repr=False, compare=False, default_factory=dict)
 
     def __post_init__(self) -> None:
-        display = {int(i): display_name(n) for i, n in self.raw.items()}
+        raw = {int(i): str(n) for i, n in self.raw.items()}
+        display = {i: display_name(n) for i, n in raw.items()}
         norm: dict[str, list[int]] = {}
         for i, n in display.items():
             norm.setdefault(norm_name(n), []).append(i)
         for ids in norm.values():
             ids.sort()
+        object.__setattr__(self, "raw", raw)
         object.__setattr__(self, "_display", display)
         object.__setattr__(self, "_norm", norm)
 
@@ -200,17 +211,25 @@ class ItemTable:
         missing = known - set(src)
         if missing:
             raise ValueError(f"cache source missing {sorted(missing)}")
-        items = {int(k): str(v) for k, v in dict(d["items"]).items()}
-        return cls(items, TableSource(**src))
+        return cls(dict(d["items"]), TableSource(**src))
 
     def write_json(self, path: Path) -> None:
-        """tmp 에 쓰고 `os.replace` — 관측기 두 개가 같은 PC 에서 겹쳐도 반쪽 파일이 남지 않는다."""
+        """고유 이름의 tmp(`mkstemp`, 같은 폴더)에 쓰고 `os.replace` — 관측기 두 개가 같은 PC 에서 겹쳐도
+        서로의 tmp 를 건드리지 않고 반쪽 파일이 남지 않는다. 실패하면 tmp 를 지우고 던진다.
+        폴더는 여기서 만든다(`paths.app_dir` 은 순수)."""
         path = Path(path)
         path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = path.with_name(path.name + ".tmp")
-        tmp.write_text(json.dumps(self.to_json_dict(), ensure_ascii=False, indent=1) + "\n",
-                       encoding="utf-8")
-        os.replace(tmp, path)
+        fd, tmp_name = tempfile.mkstemp(dir=path.parent, prefix=path.name + ".", suffix=".tmp")
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                f.write(json.dumps(self.to_json_dict(), ensure_ascii=False, indent=1) + "\n")
+            os.replace(tmp_name, path)
+        except BaseException:
+            try:
+                os.unlink(tmp_name)
+            except OSError:
+                pass
+            raise
 
     @classmethod
     def read_json(cls, path: Path) -> "ItemTable":
@@ -220,15 +239,19 @@ class ItemTable:
 # ─────────────────────────── 아카이브 스캔 ───────────────────────────
 
 
+def _utc_iso(dt: datetime) -> str:
+    return dt.astimezone(timezone.utc).strftime(_ISO_Z)
+
+
 def archive_timestamp(data: bytes) -> Optional[str]:
-    """파일 헤더 @32 의 FILETIME(아카이브 빌드 시각) → UTC ISO. magic 불일치·범위 밖이면 None."""
+    """파일 헤더 @32 의 FILETIME(아카이브 빌드 시각) → UTC ISO(`Z`). magic 불일치·범위 밖이면 None."""
     if len(data) < 40 or data[:8] != GCS_MAGIC:
         return None
     ft = int.from_bytes(data[32:40], "little")
     unix = (ft - _FILETIME_EPOCH_DELTA) / 10_000_000
     if not (946_684_800 <= unix <= 4_102_444_800):   # 2000-01-01 ~ 2100-01-01
         return None
-    return datetime.fromtimestamp(unix, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    return _utc_iso(datetime.fromtimestamp(unix, tz=timezone.utc))
 
 
 class _SignatureCursor:
@@ -249,11 +272,11 @@ class _SignatureCursor:
         return best
 
 
-def iter_zlib_streams(data: bytes, *, start: int = 0) -> Iterator[ZlibStream]:
+def iter_zlib_streams(data: bytes) -> Iterator[ZlibStream]:
     """순차 스캔 — 시그니처에서 inflate 를 시도해 성공하면 (offset, 소비 바이트, 선두 512B) 를 내고
     소비한 만큼 건너뛴다. 실패(가짜 시그니처·절단)면 1바이트 전진. 커서는 단조 증가."""
     sigs = _SignatureCursor(data)
-    cursor = max(0, int(start))
+    cursor = 0
     n = len(data)
     while cursor < n:
         off = sigs.next_at_or_after(cursor)
@@ -320,7 +343,10 @@ def _decode(raw: bytes) -> tuple[str, int]:
 
 
 def parse_item_rows(text: str) -> tuple[dict[int, str], ParseStats]:
-    """`;`/`#` 주석·빈 줄 skip, 탭 분리 `id<TAB>이름[<TAB>…]`. 첫 id 우선(중복은 센다), 이름은 원본 보존."""
+    """`;`/`#` 주석·빈 줄 skip, 탭 분리 `id<TAB>이름[<TAB>…]`. 첫 id 우선(중복은 센다), 이름은 원본 보존.
+
+    id 는 **ASCII 숫자만**(`str.isdigit()` 은 `²`·`①` 같은 cp949 문자에도 참이라 `int()` 가 던진다 —
+    그런 행 하나가 표 전체를 잃게 하지 않고 skipped 로 센다)."""
     rows: dict[int, str] = {}
     skipped = dups = 0
     for line in text.splitlines():
@@ -328,10 +354,11 @@ def parse_item_rows(text: str) -> tuple[dict[int, str], ParseStats]:
         if not s or s[0] in ";#":
             continue
         parts = line.split("\t")
-        if len(parts) < 2 or not parts[0].strip().isdigit() or not parts[1].strip():
+        key = parts[0].strip()
+        if len(parts) < 2 or not (key.isascii() and key.isdigit()) or not parts[1].strip():
             skipped += 1
             continue
-        item_id = int(parts[0].strip())
+        item_id = int(key)
         if item_id in rows:
             dups += 1
             continue
@@ -386,18 +413,25 @@ def extract_item_table_bytes(data: bytes, *, spec: TableSpec = AUCTION_SPEC
 
 
 def extract_item_table(gcs_path: Path, *, spec: TableSpec = AUCTION_SPEC) -> ItemTable:
-    """파일 → `ItemTable`(출처 스탬프 포함). 읽기 전용."""
+    """파일 → `ItemTable`(출처 스탬프 포함). 읽기 전용.
+
+    크기 상한은 읽기 **전에** stat 으로 보고, 읽은 뒤 다시 stat 해 읽는 동안 파일이 바뀌었으면(패치 중)
+    던진다 — 새 (크기, mtime) 에 옛 표가 찍히는 캐시 오염을 막는다. 스탬프는 읽기 전 stat 값."""
     gcs_path = Path(gcs_path)
-    data = gcs_path.read_bytes()
-    rows, stats, offset = extract_item_table_bytes(data, spec=spec)
     st = gcs_path.stat()
+    if st.st_size > MAX_GCS_BYTES:
+        raise ItemTableNotFound(f"아카이브가 상한({MAX_GCS_BYTES}B)을 넘는다: {st.st_size}B")
+    data = gcs_path.read_bytes()
+    after = gcs_path.stat()
+    if len(data) != st.st_size or (after.st_size, after.st_mtime_ns) != (st.st_size, st.st_mtime_ns):
+        raise RuntimeError(f"{gcs_path} 가 읽는 동안 바뀌었다(패치 중?) — 다음 시작에 다시 읽는다")
+    rows, stats, offset = extract_item_table_bytes(data, spec=spec)
     source = TableSource(
         gcs_path=str(gcs_path), gcs_size=st.st_size, gcs_mtime_ns=st.st_mtime_ns,
-        head_sha256=hashlib.sha256(data[:HEAD_SHA_BYTES]).hexdigest(),
         gcs_sha256=hashlib.sha256(data).hexdigest(), archive_ts=archive_timestamp(data),
         stream_offset=offset, rows=stats.rows, skipped=stats.skipped,
         duplicate_ids=stats.duplicate_ids, decode_errors=stats.decode_errors,
-        extracted_at=datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        extracted_at=_utc_iso(datetime.now(timezone.utc)),
         extractor_version=EXTRACTOR_VERSION,
     )
     return ItemTable(rows, source)
@@ -406,20 +440,41 @@ def extract_item_table(gcs_path: Path, *, spec: TableSpec = AUCTION_SPEC) -> Ite
 # ─────────────────────────── 클라 폴더 탐색 ───────────────────────────
 
 
+def _expand(p: str | Path) -> Path:
+    """`%VAR%`·`$VAR`·`~` 확장 — `ledger_paths` 가 사용자 경로에 하는 것과 같은 처리."""
+    return Path(os.path.expandvars(str(p))).expanduser()
+
+
+def _has_gcs(d: Path) -> bool:
+    try:
+        return (d / GCS_NAME).is_file()
+    except Exception:
+        return False
+
+
+def pinned_client_dir(explicit: Optional[str | Path] = None, *,
+                      env: Optional[Mapping[str, str]] = None) -> Optional[Path]:
+    """사용자가 고정한 클라 폴더 — `--client-dir`(명시)가 있으면 그것, 없으면 `%YUKTRACKER_CLIENT_DIR%`,
+    둘 다 없으면 None. 있으면 탐색은 그 폴더만 본다."""
+    if explicit:
+        return _expand(explicit)
+    env = os.environ if env is None else env
+    v = str(env.get(ENV_CLIENT_DIR, "") or "").strip()
+    return _expand(v) if v else None
+
+
 def discover_client_dirs(explicit: Optional[str | Path] = None, *,
                          env: Optional[Mapping[str, str]] = None,
                          pids: Callable[[], Iterable[int]] = game_pids,
                          image_path: Callable[[int], Optional[str]] = process_image_path,
                          glob_roots: Iterable[str] = DEFAULT_CLIENT_GLOBS) -> list[Path]:
-    """`gersang.gcs` 가 있는 클라 폴더 후보 — 명시 → env → 실행 중 gersang.exe 의 폴더 → glob 순,
-    중복 제거. 어느 단계도 던지지 않는다."""
-    env = os.environ if env is None else env
+    """`gersang.gcs` 가 있는 클라 폴더 후보. 고정 폴더(`pinned_client_dir`)가 있으면 **그것만** — gcs 가
+    없으면 빈 목록(다른 클라의 표를 조용히 캐시에 쓰지 않는다). 고정이 없으면 실행 중 gersang.exe 의 폴더 →
+    glob 순, 중복 제거. 어느 단계도 던지지 않는다."""
+    pinned = pinned_client_dir(explicit, env=env)
+    if pinned is not None:
+        return [pinned] if _has_gcs(pinned) else []
     cands: list[Path] = []
-    if explicit:
-        cands.append(Path(explicit))
-    v = str(env.get(ENV_CLIENT_DIR, "") or "").strip()
-    if v:
-        cands.append(Path(v))
     try:
         for pid in pids():
             try:
@@ -441,13 +496,13 @@ def discover_client_dirs(explicit: Optional[str | Path] = None, *,
     for c in cands:
         try:
             key = os.path.normcase(str(c.resolve()))
-            if key in seen:
-                continue
-            seen.add(key)
-            if (c / GCS_NAME).is_file():
-                out.append(c)
         except Exception:
             continue
+        if key in seen:
+            continue
+        seen.add(key)
+        if _has_gcs(c):
+            out.append(c)
     return out
 
 
@@ -457,6 +512,19 @@ def find_gcs(client_dir: Optional[str | Path] = None, **kw) -> Optional[Path]:
 
 
 # ─────────────────────────── 캐시 · 로드 ───────────────────────────
+
+
+@dataclass(frozen=True)
+class LoadResult:
+    """`load_item_table_result` 의 결과 — 표가 어디서 왔는지(도구의 hit/miss 표시·게이트 종료 코드용).
+
+    origin: ``cache``(gcs 와 일치하는 캐시) · ``extracted``(재스캔) · ``cache-fallback``(gcs 미발견·추출 실패라
+    묵은 캐시) · ``none``(표 없음). ``gcs_path`` 가 None 이면 클라 폴더를 못 찾은 것, 아니면 그 파일을 봤다.
+    ``error`` 는 미발견·추출 실패 사유 한 줄(없으면 None)."""
+    table: Optional[ItemTable]
+    origin: str
+    gcs_path: Optional[Path]
+    error: Optional[str] = None
 
 
 def _read_cache(path: Path) -> Optional[ItemTable]:
@@ -469,62 +537,98 @@ def _read_cache(path: Path) -> Optional[ItemTable]:
     return table
 
 
+def _same_path(a: str | Path, b: str | Path) -> bool:
+    return os.path.normcase(os.path.abspath(str(a))) == os.path.normcase(os.path.abspath(str(b)))
+
+
+def _sha256_file(path: Path) -> str:
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(DRAIN_CHUNK * 16), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
 def _cache_matches(cached: ItemTable, gcs: Path) -> bool:
-    """(크기, mtime) 일치 → 그대로. 크기만 같으면 앞 1MiB sha 로 재확인(다른 사본·복사된 mtime)."""
+    """크기가 다르면 아니다. 같은 경로면 mtime 까지 같아야 한다(같은 크기 패치도 mtime 은 바뀐다 — 재스캔
+    0.12s). 다른 경로(클라 사본 3벌·복사된 mtime)면 전체 sha256 이 같을 때만 같은 표다(실측 4ms)."""
     try:
         st = gcs.stat()
         src = cached.source
         if st.st_size != src.gcs_size:
             return False
-        if (st.st_mtime_ns == src.gcs_mtime_ns
-                and os.path.normcase(str(Path(src.gcs_path))) == os.path.normcase(str(gcs))):
-            return True
-        with open(gcs, "rb") as f:
-            head = f.read(HEAD_SHA_BYTES)
-        return hashlib.sha256(head).hexdigest() == src.head_sha256
+        if _same_path(src.gcs_path, gcs):
+            return st.st_mtime_ns == src.gcs_mtime_ns
+        return _sha256_file(gcs) == src.gcs_sha256
     except Exception:
         return False
 
 
-def load_item_table(*, client_dir: Optional[str | Path] = None, gcs_path: Optional[str | Path] = None,
-                    cache_path: Optional[str | Path] = None, refresh: bool = False,
-                    use_cache: bool = True,
-                    extractor: Callable[[Path], ItemTable] = extract_item_table,
-                    finder: Callable[..., Optional[Path]] = find_gcs) -> Optional[ItemTable]:
-    """표 1개 — 캐시가 맞으면 캐시, 아니면 추출 후 캐시 갱신. **절대 던지지 않는다.**
+def _missing_reason(explicit_gcs: Optional[Path], client_dir: Optional[str | Path]) -> str:
+    if explicit_gcs is not None:
+        return f"{explicit_gcs} 없음"
+    pinned = pinned_client_dir(client_dir)
+    if pinned is not None:
+        return f"지정 클라 폴더 {pinned} 에 {GCS_NAME} 없음(--client-dir / %{ENV_CLIENT_DIR}%)"
+    return (f"클라 폴더({GCS_NAME}) 미발견 — 실행 중 gersang.exe·{', '.join(DEFAULT_CLIENT_GLOBS)} 에 없음"
+            f"(--client-dir / %{ENV_CLIENT_DIR}% 로 지정)")
 
-    None 은 "클라 폴더도 캐시도 없다" 일 때만. gcs 가 없어도 캐시가 있으면 캐시(경고 1줄), 추출에
-    실패하면 캐시(있으면), 캐시 쓰기에 실패해도 표는 돌려준다.
+
+def load_item_table_result(*, client_dir: Optional[str | Path] = None, gcs_path: Optional[str | Path] = None,
+                           cache_path: Optional[str | Path] = None, refresh: bool = False,
+                           use_cache: bool = True,
+                           extractor: Callable[[Path], ItemTable] = extract_item_table,
+                           finder: Callable[..., Optional[Path]] = find_gcs) -> LoadResult:
+    """표 1개 + 출처. **절대 던지지 않는다.**
+
+    - 캐시가 gcs 와 일치하면(`_cache_matches`) 캐시 — `refresh=True` 는 이 단축만 건너뛴다.
+    - 아니면 추출 후 캐시 갱신(`use_cache`). 캐시 쓰기에 실패해도 표는 돌려준다.
+    - gcs 미발견·추출 실패면 캐시가 있으면 그것(origin ``cache-fallback``, 경고 1줄), 없으면 table None.
+      `refresh` 여도 폴백은 산다 — 재스캔 요청이 표를 통째로 잃게 하지 않는다.
     """
     log = get_logger()
     cache = Path(cache_path) if cache_path else item_table_cache_path()
-    gcs = Path(gcs_path) if gcs_path else finder(client_dir)
-    cached = _read_cache(cache) if (use_cache and not refresh) else None
-    if gcs is None or not Path(gcs).is_file():
+    cached = _read_cache(cache) if use_cache else None
+    if gcs_path:
+        gcs: Optional[Path] = Path(gcs_path)
+    else:
+        try:
+            gcs = finder(client_dir)
+        except Exception:
+            gcs = None
+    if gcs is None or not gcs.is_file():
+        where = _missing_reason(gcs if gcs_path else None, client_dir)
         if cached is not None:
-            log.warning("[아이템표] 클라 폴더(%s) 미발견 — 캐시 사용 %s (%d건)", GCS_NAME, cache, len(cached))
-            return cached
-        log.warning("[아이템표] 클라 폴더(%s) 미발견 — 아이템명 없이 진행(--client-dir / %s)", GCS_NAME, ENV_CLIENT_DIR)
-        return None
-    if cached is not None and _cache_matches(cached, gcs):
-        return cached
+            log.warning("[아이템표] %s — 캐시 사용 %s (%d건)", where, cache, len(cached))
+            return LoadResult(cached, "cache-fallback", None, where)
+        log.warning("[아이템표] %s — 아이템명 없이 진행", where)
+        return LoadResult(None, "none", None, where)
+    if cached is not None and not refresh and _cache_matches(cached, gcs):
+        return LoadResult(cached, "cache", gcs, None)
     try:
         table = extractor(gcs)
     except Exception as e:
-        log.warning("[아이템표] 추출 실패 %s: %s", gcs, e)
-        return cached
+        msg = f"추출 실패 {gcs}: {e}"
+        log.warning("[아이템표] %s%s", msg, " — 캐시 사용" if cached is not None else "")
+        return LoadResult(cached, "cache-fallback" if cached is not None else "none", gcs, msg)
     if use_cache:
         try:
             table.write_json(cache)
         except Exception as e:
             log.warning("[아이템표] 캐시 쓰기 실패 %s: %s", cache, e)
-    return table
+    return LoadResult(table, "extracted", gcs, None)
+
+
+def load_item_table(**kw) -> Optional[ItemTable]:
+    """`load_item_table_result(**kw).table` — 표만 필요한 호출자용(관측기 PR-Y1b). None 은 클라 폴더도
+    캐시도 없거나, 추출에 실패했는데 캐시도 없을 때."""
+    return load_item_table_result(**kw).table
 
 
 __all__ = [
     "AUCTION_SPEC", "CACHE_VERSION", "DEFAULT_CLIENT_GLOBS", "ENV_CLIENT_DIR", "EXTRACTOR_VERSION",
-    "GCS_MAGIC", "GCS_NAME", "HEAD_BYTES", "MIN_ROWS", "ItemTable", "ItemTableNotFound", "ParseStats",
-    "TableSource", "TableSpec", "ZlibStream", "archive_timestamp", "discover_client_dirs", "display_name",
-    "extract_item_table", "extract_item_table_bytes", "find_gcs", "iter_zlib_streams", "load_item_table",
-    "norm_name", "parse_item_rows",
+    "GCS_MAGIC", "GCS_NAME", "HEAD_BYTES", "MIN_ROWS", "ItemTable", "ItemTableNotFound", "LoadResult",
+    "ParseStats", "TableSource", "TableSpec", "ZlibStream", "archive_timestamp", "discover_client_dirs",
+    "display_name", "extract_item_table", "extract_item_table_bytes", "find_gcs", "iter_zlib_streams",
+    "load_item_table", "load_item_table_result", "norm_name", "parse_item_rows", "pinned_client_dir",
 ]

@@ -55,6 +55,8 @@ class ImportBoundaryTest(unittest.TestCase):
         "socket", "subprocess", "sys", "threading", "time", "traceback", "types", "typing",
         # zlib — item_names.py 가 클라 gersang.gcs 의 스트림을 inflate 한다(내장 확장, PyInstaller 기본 포함).
         "zlib",
+        # tempfile — item_names.py 캐시 쓰기의 고유 이름 tmp(mkstemp) — 관측기 두 개가 겹쳐도 안전.
+        "tempfile",
     }
 
     def test_static_imports(self) -> None:

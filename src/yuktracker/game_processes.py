@@ -21,6 +21,9 @@ _INVALID_HANDLE_VALUE = wintypes.HANDLE(-1).value
 _MAX_PATH = 260
 _PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
 _IMAGE_PATH_BUF = 1024
+#: 긴 경로(LongPathsEnabled·깊은 사용자 폴더) 재시도 크기 — Win32 UNICODE_STRING 상한.
+_IMAGE_PATH_BUF_MAX = 32767
+_ERROR_INSUFFICIENT_BUFFER = 122
 
 
 class _PROCESSENTRY32W(ctypes.Structure):
@@ -77,6 +80,9 @@ def process_image_path(pid: int) -> str | None:
     `ERROR_PARTIAL_COPY` 로 실패하지만, `PROCESS_QUERY_LIMITED_INFORMATION` 핸들의 이미지 이름 조회는
     비트 수·승격과 무관하게 된다(실측 2026-09-21: 비승격 64bit 파이썬 → 32bit Gersang.exe 3개, 안티치트
     가동 중). 클라 폴더(`gersang.gcs`)를 찾는 데 쓴다(`item_names.discover_client_dirs`).
+
+    버퍼는 1024 wchar 로 시작해 `ERROR_INSUFFICIENT_BUFFER` 면 32767 로 한 번 더 — 긴 경로에 설치된 클라를
+    조용히 놓치지 않는다. 그 외 실패는 None.
     """
     if sys.platform != "win32" or int(pid) <= 0:
         return None
@@ -93,11 +99,14 @@ def process_image_path(pid: int) -> str | None:
         if not handle:
             return None
         try:
-            buf = ctypes.create_unicode_buffer(_IMAGE_PATH_BUF)
-            size = wintypes.DWORD(_IMAGE_PATH_BUF)
-            if not k32.QueryFullProcessImageNameW(handle, 0, buf, ctypes.byref(size)):
-                return None
-            return buf.value or None
+            for capacity in (_IMAGE_PATH_BUF, _IMAGE_PATH_BUF_MAX):
+                buf = ctypes.create_unicode_buffer(capacity)
+                size = wintypes.DWORD(capacity)
+                if k32.QueryFullProcessImageNameW(handle, 0, buf, ctypes.byref(size)):
+                    return buf.value or None
+                if ctypes.get_last_error() != _ERROR_INSUFFICIENT_BUFFER:
+                    return None
+            return None
         finally:
             k32.CloseHandle(handle)
     except Exception:

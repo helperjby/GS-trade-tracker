@@ -75,9 +75,10 @@ python tools\dump_item_names.py --search 봉인 · --ids 853,3506 · --ids-from 
 - 프로토콜 판정·육의전 파서는 SEAssist 레포에 코퍼스 테스트와 함께 들어간 뒤(PR-Y2, `packet_market.py`) 동기화로 가져온다.
 - **아이템 id → 이름 표**(2026-09-21 결정): 육의전 응답에는 아이템 **id** 만 있고 이름이 없다(SEAssist H-2609-08/10).
   이름은 클라 리소스 `gersang.gcs` 안의 `육의전 검색 기능 리스트`(4,001행)에서 뽑는다 — `src/yuktracker/item_names.py`
-  (stdlib `zlib`, **읽기 전용**, 스트림 오프셋이 아니라 내용 마커로 찾고 파일 크기·mtime 이 바뀌면 자동 재스캔 —
-  패치 추종). 클라 폴더는 실행 중 `gersang.exe` 의 경로 → `C:\AKInteractive\Gersang*` 순으로 찾고
-  `--client-dir` / `%YUKTRACKER_CLIENT_DIR%` 로 지정할 수 있다. 캐시는 `%APPDATA%\YukTracker\item_names.json`
+  (stdlib `zlib`, **읽기 전용**, 스트림 오프셋이 아니라 내용 마커로 찾는다 — 패치 추종: 캐시는 같은 경로면 크기·mtime,
+  다른 사본이면 크기·전체 sha256 이 같을 때만 쓰고 아니면 재스캔 0.12s). 클라 폴더는 `--client-dir` / `%YUKTRACKER_CLIENT_DIR%`
+  로 **고정**하면 그 폴더만 보고(gcs 가 없으면 다른 클라로 넘어가지 않는다), 없으면 실행 중 `gersang.exe` 의 경로 →
+  `C:\AKInteractive\Gersang*` 순으로 찾는다. 캐시는 `%APPDATA%\YukTracker\item_names.json`
   (기기 로컬), `--out` 덤프는 레포 밖에 둔다(`.gitignore`) — 표를 재배포하지 않는다. 표시명은 선두 `[M]` 만 지우고
   (게임 UI 와 같음), 검색 키는 공백 제거 + casefold(대시보드·봇과 한 정의). 관측기는 PR-Y1b 에서 행마다
   `item_id` + `item_name`(미해석은 null + 카운터)을 함께 올린다.

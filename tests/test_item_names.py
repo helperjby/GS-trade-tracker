@@ -162,8 +162,42 @@ class ExtractTest(unittest.TestCase):
                              (str(g), len(data), VALID_BASE + 1000, IN.EXTRACTOR_VERSION))
             self.assertEqual(s.archive_ts, "2026-09-21T02:04:11Z")
             self.assertEqual(len(s.gcs_sha256), 64)
-            self.assertTrue(s.extracted_at.startswith("20"))
+            self.assertRegex(s.extracted_at, r"^20\d\d-\d\d-\d\dT\d\d:\d\d:\d\dZ$", "archive_ts 와 같은 Z 형식")
             self.assertEqual(table.lookup(853), "봉인의돌")
+
+    def test_ids_are_ascii_digits_only(self) -> None:
+        # str.isdigit() 은 '²'·'①' 에도 참이라 int() 가 던진다 — 그런 행은 skipped 로 세고, 전각 숫자·부호도 받지 않는다.
+        rows, stats = IN.parse_item_rows("²\t제곱\t1\n①\t동그라미\t2\n８５３\t전각\t3\n853\t진짜\t4\n+5\t부호\t5\n")
+        self.assertEqual(rows, {853: "진짜"})
+        self.assertEqual((stats.rows, stats.skipped, stats.duplicate_ids), (1, 4, 0))
+        data = gcs_bytes([table_text(["²\t제곱\t1"] + BASE_ROWS).encode("cp949")])
+        rows2, stats2, _ = IN.extract_item_table_bytes(data)
+        self.assertEqual(rows2[853], "[M]봉인의돌", "장식 행 하나가 표 전체를 잃게 하지 않는다")
+        self.assertEqual(stats2.skipped, SKIPPED_BASE + 1)
+
+    def test_oversize_file_is_rejected_before_reading(self) -> None:
+        with tempfile.TemporaryDirectory() as d:
+            g = Path(d) / IN.GCS_NAME
+            g.write_bytes(gcs_bytes([TABLE]))
+            with mock.patch.object(IN, "MAX_GCS_BYTES", 100), \
+                    mock.patch.object(Path, "read_bytes", side_effect=AssertionError("must not read")):
+                with self.assertRaisesRegex(IN.ItemTableNotFound, "상한"):
+                    IN.extract_item_table(g)
+
+    def test_file_changed_during_read_raises_instead_of_stamping_new_stat_on_old_table(self) -> None:
+        with tempfile.TemporaryDirectory() as d:
+            g = Path(d) / IN.GCS_NAME
+            g.write_bytes(gcs_bytes([TABLE]))
+            real = Path.read_bytes
+
+            def sneaky(self_path):
+                data = real(self_path)
+                os.utime(self_path, ns=(1_000_000_000_000_000_000, 1_000_000_000_000_000_000))   # 패처가 끼어든다
+                return data
+
+            with mock.patch.object(Path, "read_bytes", sneaky):
+                with self.assertRaisesRegex(RuntimeError, "읽는 동안 바뀌었다"):
+                    IN.extract_item_table(g)
 
 
 class NormalizeTest(unittest.TestCase):
@@ -183,7 +217,7 @@ class NormalizeTest(unittest.TestCase):
 
 
 def _source(**kw) -> IN.TableSource:
-    base = dict(gcs_path="x", gcs_size=1, gcs_mtime_ns=1, head_sha256="h", gcs_sha256="g", archive_ts=None,
+    base = dict(gcs_path="x", gcs_size=1, gcs_mtime_ns=1, gcs_sha256="g", archive_ts=None,
                 stream_offset=0, rows=0, skipped=0, duplicate_ids=0, decode_errors=0, extracted_at="t",
                 extractor_version=IN.EXTRACTOR_VERSION)
     base.update(kw)
@@ -224,6 +258,14 @@ class SearchTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             IN.ItemTable.from_json_dict({"version": 99, "source": {}, "items": {}})
 
+    def test_str_keys_are_normalized_once(self) -> None:
+        t = IN.ItemTable({"853": "[M]봉인의돌", 12: "떡국"}, _source())   # JSON 의 str 키 + int 키 혼합
+        self.assertEqual(t.lookup(853), "봉인의돌")
+        self.assertEqual(t.lookup_raw(853), "[M]봉인의돌")
+        self.assertEqual(t.lookup_raw("853"), "[M]봉인의돌")
+        self.assertEqual(list(t.to_json_dict()["items"]), ["12", "853"])
+        self.assertEqual(dict(t.raw), {12: "떡국", 853: "[M]봉인의돌"})
+
 
 class CacheTest(unittest.TestCase):
     def setUp(self) -> None:
@@ -244,7 +286,7 @@ class CacheTest(unittest.TestCase):
         self.assertIsNotNone(t)
         self.assertEqual(len(t), VALID_BASE + 1000)
         self.assertTrue(self.cache.is_file())
-        self.assertFalse(self.cache.with_name(self.cache.name + ".tmp").exists())
+        self.assertEqual(list(self.cache.parent.glob("*.tmp")), [], "고유 이름 tmp 가 남지 않는다")
 
     def test_second_load_uses_cache(self) -> None:
         self._load()
@@ -261,7 +303,8 @@ class CacheTest(unittest.TestCase):
         spy.assert_called_once()
         self.assertEqual(t.source.gcs_size, self.gcs.stat().st_size)
 
-    def test_same_content_other_mtime_or_copy_uses_head_sha(self) -> None:
+    def test_same_content_other_path_and_mtime_uses_full_sha(self) -> None:
+        # 클라 사본 3벌(Gersang·Gersang2·Gersang3) — 내용이 같으면 mtime 이 달라도 한 캐시.
         self._load()
         copy = self.dir / "copy" / IN.GCS_NAME
         copy.parent.mkdir()
@@ -270,6 +313,45 @@ class CacheTest(unittest.TestCase):
         boom = mock.Mock(side_effect=AssertionError("must not rescan"))
         t = self._load(gcs_path=copy, extractor=boom)
         self.assertEqual(len(t), VALID_BASE + 1000)
+        boom.assert_not_called()
+
+    def test_other_path_same_size_different_content_rescans(self) -> None:
+        patched = TABLE.replace("봉인의서".encode("cp949"), "봉인의석".encode("cp949"), 1)
+        a, b = gcs_bytes([DECOY, TABLE]), gcs_bytes([DECOY, patched])
+        size = max(len(a), len(b)) + 16
+        self.gcs.write_bytes(a.ljust(size, b"\x00"))
+        self._load()
+        other = self.dir / "other" / IN.GCS_NAME
+        other.parent.mkdir()
+        other.write_bytes(b.ljust(size, b"\x00"))
+        spy = mock.Mock(wraps=IN.extract_item_table)
+        t = self._load(gcs_path=other, extractor=spy)
+        spy.assert_called_once()
+        self.assertEqual(t.lookup(3506), "봉인의석")
+
+    def test_same_path_new_mtime_rescans_even_when_size_is_unchanged(self) -> None:
+        # 크기가 같은 패치 — 예전 '앞 1MiB sha' 지름길은 이것을 영원히 놓쳤다.
+        patched = TABLE.replace("봉인의서".encode("cp949"), "봉인의석".encode("cp949"), 1)
+        a, b = gcs_bytes([DECOY, TABLE]), gcs_bytes([DECOY, patched])
+        size = max(len(a), len(b)) + 16
+        self.gcs.write_bytes(a.ljust(size, b"\x00"))
+        self.assertEqual(self._load().lookup(3506), "봉인의서")
+        self.gcs.write_bytes(b.ljust(size, b"\x00"))
+        os.utime(self.gcs, ns=(2_000_000_000_000_000_000, 2_000_000_000_000_000_000))
+        self.assertEqual(self.gcs.stat().st_size, size)
+        spy = mock.Mock(wraps=IN.extract_item_table)
+        t = self._load(extractor=spy)
+        spy.assert_called_once()
+        self.assertEqual(t.lookup(3506), "봉인의석")
+
+    def test_same_path_touched_file_rescans_once_and_restamps(self) -> None:
+        self._load()
+        os.utime(self.gcs, ns=(2_000_000_000_000_000_000, 2_000_000_000_000_000_000))
+        spy = mock.Mock(wraps=IN.extract_item_table)
+        self._load(extractor=spy)
+        spy.assert_called_once()
+        boom = mock.Mock(side_effect=AssertionError("must not rescan"))
+        self._load(extractor=boom)   # 새 mtime 이 캐시에 찍혔다
         boom.assert_not_called()
 
     def test_corrupt_or_old_version_cache_rescans(self) -> None:
@@ -290,6 +372,37 @@ class CacheTest(unittest.TestCase):
         spy = mock.Mock(wraps=IN.extract_item_table)
         self._load(refresh=True, extractor=spy)
         spy.assert_called_once()
+
+    def test_refresh_keeps_cache_fallbacks(self) -> None:
+        self._load()
+        t = self._load(gcs_path=self.dir / "nope.gcs", refresh=True)
+        self.assertIsNotNone(t, "gcs 가 없어도 refresh 가 캐시 폴백을 끄지 않는다")
+        self.gcs.write_bytes(gcs_bytes([UNRELATED]))    # 표 없음 → 추출 실패
+        t = self._load(refresh=True)
+        self.assertEqual(t.lookup(853), "봉인의돌", "추출 실패면 refresh 여도 캐시")
+
+    def test_load_result_reports_origin_and_reason(self) -> None:
+        def res(**kw) -> IN.LoadResult:
+            kw.setdefault("gcs_path", self.gcs)
+            kw.setdefault("cache_path", self.cache)
+            return IN.load_item_table_result(**kw)
+        r = res(gcs_path=self.dir / "nope.gcs")
+        self.assertEqual((r.table, r.origin, r.gcs_path), (None, "none", None))
+        self.assertIn("nope.gcs", r.error)
+        r = res()
+        self.assertEqual((r.origin, r.gcs_path, r.error), ("extracted", self.gcs, None))
+        self.assertEqual(res().origin, "cache")
+        r = res(gcs_path=self.dir / "nope.gcs")
+        self.assertEqual((r.origin, r.gcs_path), ("cache-fallback", None))
+        self.assertIsNotNone(r.table)
+        self.gcs.write_bytes(gcs_bytes([UNRELATED]))
+        r = res()
+        self.assertEqual((r.origin, r.gcs_path), ("cache-fallback", self.gcs))
+        self.assertIn("표 없음", r.error)
+        r = res(use_cache=False)
+        self.assertEqual((r.table, r.origin, r.gcs_path), (None, "none", self.gcs))
+        self.assertIn("표 없음", r.error)
+        self.assertIsNone(IN.load_item_table(gcs_path=self.gcs, cache_path=self.cache, use_cache=False))
 
     def test_cache_write_failure_still_returns_table(self) -> None:
         blocked = self.dir / "blocked"
@@ -330,22 +443,51 @@ class DiscoveryTest(unittest.TestCase):
         (self.root / "C").mkdir()
         (self.root / "ClientX").mkdir()
 
-    def test_order_explicit_env_process_glob_with_dedupe(self) -> None:
-        image = {1: str(self.root / "B" / "Gersang.exe"), 2: None}
+    def test_pinned_explicit_dir_is_the_only_candidate(self) -> None:
+        image = {1: str(self.root / "B" / "Gersang.exe")}
         got = IN.discover_client_dirs(
-            self.root / "A", env={IN.ENV_CLIENT_DIR: str(self.root / "B")}, pids=lambda: [1, 2],
+            self.root / "A", env={IN.ENV_CLIENT_DIR: str(self.root / "B")}, pids=lambda: [1],
             image_path=image.get, glob_roots=(str(self.root / "Client*"),))
-        self.assertEqual(got, [self.root / "A", self.root / "B", self.root / "Client1"])
+        self.assertEqual(got, [self.root / "A"])
 
-    def test_missing_gcs_is_filtered_and_failures_ignored(self) -> None:
-        def boom(_pid):
-            raise OSError("access denied")
-        got = IN.discover_client_dirs(self.root / "C", env={}, pids=lambda: [7],
-                                      image_path=boom, glob_roots=(str(self.root / "Client*"),))
-        self.assertEqual(got, [self.root / "Client1"])
+    def test_pinned_env_dir_when_no_explicit(self) -> None:
+        got = IN.discover_client_dirs(None, env={IN.ENV_CLIENT_DIR: str(self.root / "B")}, pids=lambda: [],
+                                      glob_roots=(str(self.root / "Client*"),))
+        self.assertEqual(got, [self.root / "B"])
+
+    def test_pinned_dir_without_gcs_is_empty_not_another_client(self) -> None:
+        # 고정 폴더에 gcs 가 없으면 실행 중 클라·glob 으로 넘어가지 않는다 — 다른 클라의 표를 캐시에 쓰지 않는다.
+        image = {1: str(self.root / "B" / "Gersang.exe")}
+        got = IN.discover_client_dirs(self.root / "C", env={}, pids=lambda: [1], image_path=image.get,
+                                      glob_roots=(str(self.root / "Client*"),))
+        self.assertEqual(got, [])
+        got = IN.discover_client_dirs(None, env={IN.ENV_CLIENT_DIR: str(self.root / "ClientX")}, pids=lambda: [1],
+                                      image_path=image.get, glob_roots=(str(self.root / "Client*"),))
+        self.assertEqual(got, [])
+        self.assertEqual(IN.pinned_client_dir(self.root / "C", env={IN.ENV_CLIENT_DIR: "x"}), self.root / "C")
+        self.assertIsNone(IN.pinned_client_dir(None, env={}))
+
+    def test_unpinned_process_then_glob_dedupe_and_failures_ignored(self) -> None:
+        def image(pid):
+            if pid == 7:
+                raise OSError("access denied")
+            return {1: str(self.root / "B" / "Gersang.exe"), 2: None,
+                    3: str(self.root / "Client1" / "gersang.exe")}.get(pid)
+        got = IN.discover_client_dirs(None, env={}, pids=lambda: [1, 2, 3, 7], image_path=image,
+                                      glob_roots=(str(self.root / "Client*"),))
+        self.assertEqual(got, [self.root / "B", self.root / "Client1"], "ClientX(gcs 없음) 제외·Client1 중복 제거")
         got = IN.discover_client_dirs(None, env={}, pids=mock.Mock(side_effect=RuntimeError),
                                       image_path=lambda p: None, glob_roots=(str(self.root / "Nope*"),))
         self.assertEqual(got, [])
+
+    def test_pinned_dir_expands_env_vars_and_home(self) -> None:
+        with mock.patch.dict(os.environ, {"YT_TEST_ROOT": str(self.root), "HOME": str(self.root),
+                                          "USERPROFILE": str(self.root)}):
+            got = IN.discover_client_dirs(None, env={IN.ENV_CLIENT_DIR: "${YT_TEST_ROOT}/A"}, pids=lambda: [],
+                                          glob_roots=())
+            self.assertEqual(got, [self.root / "A"])
+            got = IN.discover_client_dirs("~/B", env={}, pids=lambda: [], glob_roots=())
+            self.assertEqual(got, [self.root / "B"])
 
     def test_find_gcs(self) -> None:
         self.assertEqual(IN.find_gcs(self.root / "A", env={}, pids=lambda: [], glob_roots=()),
@@ -362,10 +504,10 @@ class DumpToolTest(unittest.TestCase):
         self.gcs.write_bytes(gcs_bytes([DECOY, TABLE]))
         self.cache = self.dir / "cache.json"
 
-    def _run(self, *args: str, gcs: Path | None = None) -> tuple[int, str, str]:
+    def _run(self, *args: str, gcs: Path | None = None, env: dict[str, str] | None = None) -> tuple[int, str, str]:
         cmd = [sys.executable, "-X", "utf8", str(TOOL), "--gcs", str(gcs or self.gcs), "--cache", str(self.cache), *args]
         p = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace",
-                           timeout=120, cwd=str(ROOT))
+                           timeout=120, cwd=str(ROOT), env={**os.environ, **env} if env else None)
         return p.returncode, p.stdout, p.stderr
 
     def test_check_ok_then_cache_hit(self) -> None:
@@ -394,8 +536,9 @@ class DumpToolTest(unittest.TestCase):
         d = json.loads(out_path.read_text(encoding="utf-8"))
         self.assertEqual(len(d["items"]), VALID_BASE + 1000)
         probe = self.dir / "probe.txt"
-        probe.write_text("row0  등록=3769258 아이템=853    수량=50 가격=150,000,000 판매자='테○A'\n"
-                         "row1  등록=3769257 아이템=424242 수량=1  가격=5 판매자='x'\n", encoding="utf-8")
+        # 리다이렉트된 Windows 콘솔 출력처럼 cp949 — 등록번호·수량·가격은 id 로 뽑히지 않아야 한다.
+        probe.write_bytes(("row0  등록=3769258 아이템=853    수량=50 가격=150,000,000 판매자='테○A'\n"
+                           "row1  등록=3769257 아이템=424242 수량=1  가격=5 판매자='x'\n").encode("cp949"))
         rc, out, _ = self._run("--ids-from", str(probe), "--no-cache")
         self.assertEqual(rc, 1)
         self.assertIn("853\t봉인의돌", out)
@@ -410,17 +553,54 @@ class DumpToolTest(unittest.TestCase):
     def test_no_client_is_rc2(self) -> None:
         rc, out, err = self._run("--check", "--no-cache", gcs=self.dir / "absent.gcs")
         self.assertEqual(rc, 2)
-        self.assertIn(IN.GCS_NAME, err)
+        self.assertIn("absent.gcs 없음", err)
 
-    def test_ids_from_text_prefers_item_tokens(self) -> None:
+    def test_gcs_without_table_is_rc1_with_reason(self) -> None:
+        g = self.dir / "notable.gcs"
+        g.write_bytes(gcs_bytes([UNRELATED]))
+        rc, out, err = self._run("--check", "--no-cache", gcs=g)
+        self.assertEqual(rc, 1, "gcs 는 있는데 표가 없다 — '클라 없음'(2) 이 아니다")
+        self.assertIn("표 없음", err)
+        self.assertIn("스트림 1개", err)
+
+    def test_check_gate_fails_on_stale_cache_fallback(self) -> None:
+        rc, _, _ = self._run("--check")
+        self.assertEqual(rc, 0)
+        self.gcs.write_bytes(gcs_bytes([UNRELATED]))          # 패치로 표가 사라진 척
+        rc, out, err = self._run("--check")
+        self.assertEqual(rc, 1)
+        self.assertIn("캐시 폴백", out)
+        self.assertIn("추출 실패", err)
+        rc, out, err = self._run("--check", gcs=self.dir / "absent.gcs")
+        self.assertEqual(rc, 2, "클라 없음 + 캐시 폴백도 게이트 실패")
+        self.assertIn("앵커 8/8 일치", out)
+        rc, out, _ = self._run("--search", "봉인", gcs=self.dir / "absent.gcs")
+        self.assertEqual(rc, 0, "게이트가 아닌 조회는 폴백으로 계속")
+        self.assertIn("853\t봉인의돌", out)
+
+    def test_help_and_no_cache_do_not_create_appdata_dir(self) -> None:
+        appdata = self.dir / "appdata"
+        appdata.mkdir()
+        env = {"APPDATA": str(appdata), "COLUMNS": "200"}
+        rc, out, _ = self._run("--help", env=env)
+        self.assertEqual(rc, 0)
+        self.assertIn("%APPDATA%\\YukTracker\\item_names.json", out)
+        rc, out, err = self._run("--search", "봉인", "--no-cache", env=env)
+        self.assertEqual(rc, 0, out + err)
+        self.assertEqual(list(appdata.iterdir()), [], "--help·--no-cache 는 사용자 프로필에 폴더를 만들지 않는다")
+
+    def test_ids_from_text_only_item_tokens_and_decode_order(self) -> None:
         sys.path.insert(0, str(ROOT / "tools"))
         try:
             import dump_item_names as tool
         finally:
             sys.path.remove(str(ROOT / "tools"))
         self.assertEqual(tool.ids_from_text("아이템=853 아이템=3506 아이템=853"), [853, 3506])
-        self.assertEqual(tool.ids_from_text("853, 3506 and 12.5"), [853, 3506])
+        self.assertEqual(tool.ids_from_text("853, 3506 and 12.5"), [], "맨 정수는 안 뽑는다 — 등록번호·수량·가격과 섞인다")
         self.assertEqual(tool.ids_from_text(""), [])
+        self.assertEqual(tool.decode_text("가격=150,000,000 판매자='테○A'".encode("cp949")), "가격=150,000,000 판매자='테○A'")
+        self.assertEqual(tool.decode_text("﻿아이템=1".encode("utf-8")), "아이템=1")
+        self.assertEqual(tool.decode_text(b"\xff\xfe\xfd"), "���")
 
 
 if __name__ == "__main__":
