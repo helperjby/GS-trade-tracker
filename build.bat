@@ -15,6 +15,9 @@ python -m pytest tests -q
 if errorlevel 1 goto :err
 
 echo === [3/4] Building single-file console executable (UAC admin manifest) ===
+rem 허브 기본 주소 주입 — %YUKTRACKER_HUB_URL% 이 있을 때만 _build_config.py 를 만든다(gitignore).
+python tools\gen_build_config.py
+if errorlevel 1 goto :err
 if exist "dist" rd /s /q "dist"
 if exist "build_temp" rd /s /q "build_temp"
 del /f /q "*.spec" 2>nul
