@@ -19,17 +19,30 @@
 
 ## 현재 상태
 
-- 관측기: 수집 모드(원시 패킷 창 파일 기록) · 아이템 표 추출 · **육의전 응답 파서**(`0x321f`)까지. 허브 업로드는 진행 중.
+- 관측기: 육의전 목록 관측 → 아이템 이름 해석 → 로컬 스풀 → **허브 업로드**까지 동작한다(첫 실행에 초대 코드로 등록).
+  발굴용 수집 모드(`--capture`)와 아이템 표 추출 도구도 그대로 있다.
 - 허브: API·저장 계층·테스트·Docker 배포 완료.
 
 ## 실행
 
 ```
-run_dev.bat                               # 관측기 소스 실행(관리자 승격) — 기본 5분 수집 창
+run_dev.bat                               # 관측기 소스 실행(관리자 승격) — 관측·업로드
+run_dev.bat --invite-code CODE            # 첫 실행: 초대 코드로 기기 등록(코드는 저장하지 않는다)
+run_dev.bat --capture 5                   # 관측 + 5분 발굴 수집 창
 build.bat                                 # 출처 선언 검사 → 테스트 → PyInstaller → dist\YukTracker.exe
 python tools\dump_item_names.py --check   # 클라이언트의 아이템 id→이름 표 추출 확인
-python tools\market_probe.py --root DIR    # 수집한 창을 재생해 육의전 페이지 판독(읽기 전용)
+python tools\market_probe.py --root DIR   # 수집한 창을 재생해 육의전 페이지 판독(읽기 전용)
 ```
+
+배포용 exe 는 허브 주소를 빌드 때 받는다(공개 레포 소스에 주소를 두지 않는다):
+
+```
+set YUKTRACKER_HUB_URL=https://<허브 공개 주소>
+build.bat
+```
+
+받는 사람은 `YukTracker.exe` 를 관리자 권한으로 실행하고 **초대 코드만** 입력하면 된다 —
+기기 토큰·기기 id 는 `%APPDATA%\YukTracker\config.json` 에 저장된다(초대 코드는 저장하지 않는다).
 
 허브 실행·배포(Docker compose)와 API 예시는 [hub/README.md](hub/README.md).
 

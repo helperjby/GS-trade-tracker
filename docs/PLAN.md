@@ -146,7 +146,7 @@ python scripts/mine_packet_discovery.py --all --lead-sec 30
   (`max_devices` 7) — 명단은 관리자만 바꾸고 활성 여부에 따른 자동 제외는 두지 않는다. 정본 HUB-PROTOCOL §0·§3-0·§3-6,
   절차 hub/README "공개 노출".
 
-### PR-Y1b — 이 프로젝트, 관측 모드 (PR-Y2'·Y3 뒤)
+### PR-Y1b — 이 프로젝트, 관측 모드 (2026-09-22 **완료**)
 - `market_cb(slot_idx, page, observation, *, pid)`(엔진이 이미 파싱한 `MarketPage`) → 행마다 `row_to_dict` + `item_name`
   (`item_names.load_item_table` 표, 미해석 null + 카운터 `market_unknown_item`) → 스풀 `%APPDATA%\YukTracker\spool\*.jsonl`
   (obs_id = `device:agent_ts_ms:sha1(body)[:12]`, 봉투에 `item_table{gcs_sha256, rows, archive_ts}`·`anomalies`·`hdr4`·
@@ -160,7 +160,16 @@ python scripts/mine_packet_discovery.py --all --lead-sec 30
   공개 레포 소스에 tailnet 이름을 두지 않는다). `ssl.SSLCertVerificationError` 는 무한 재시도 대신 안내(인증서 저장소가 낡은 PC).
   시작 줄 `[아이템표] N건 (gcs …)`·`[허브] <url> 기기 <device_id>`, 주기적 `os.stat` 재검사로 패치 추종. 미상 플래그(`flag45`·`flag46`·
   `unknown40`)는 이름 붙이지 않고 원값 그대로.
-- 테스트: 스풀 영속·재시도(스레드 `http.server`)·중복 obs_id·파서 None 시 카운터만·표 없을 때 이름 null.
+- 구현 모듈: `market_observer.py`(봉투·아이템 이름·단조시계→벽시계) · `spool.py`(배치 파일 + 업로더 스레드) ·
+  `hub_client.py`(urllib 요청·응답 해석·행동 매핑) · `hub_setup.py`(첫 실행 등록) · `app_config.py`(설정·`local_id`) ·
+  `agent.setup_market`(배선) · `tools/gen_build_config.py`(빌드 시 허브 주소 주입, gitignore).
+- 확정된 세부: `obs_id` 접두사는 허브 `device_id` 가 아니라 **설치본 고유 `local_id`**(재등록해도 스풀의 id 가 안 흔들린다,
+  HUB-PROTOCOL §3-1) · 배치 1개 = 스풀 파일 1개(보내기 **전에** 쓴다) · 413 은 반으로 분할 · 백오프 1s→300s(지터 없음 —
+  고정 기기 7대) · 아이템 표는 10분마다 `os.stat` 재검사 · `--no-upload` 로 업로드만 끌 수 있다.
+- 테스트(신규 62): 설정 왕복·손상 내성·`local_id` 1회, 봉투 모양·시각 변환·이름 미해석, 스풀 영속·순서·분할·격리,
+  응답별 행동 표, 진짜 `http.server` 로 요청 모양(Content-Length·Bearer·평문 413), 등록 UX 7경로, 배선.
+- 종단 스모크(로컬 허브 2리스너, 13/13): 공개 stats 403 → 잘못된 초대 코드 401 → 등록 → 업로드 200 → 중복 → 검색 →
+  미해석 null → 401 정지·스풀 유지 → device_mismatch → 400 격리 → 재시작 뒤 스풀 이어 올리기.
 
 ### 배포·실기기 게이트(G7)
 1. 이 프로젝트 `build.bat` → 각 PC 에 `YukTracker.exe`(SEAssist 머지·배포 불필요).
@@ -188,4 +197,4 @@ python scripts/mine_packet_discovery.py --all --lead-sec 30
 
 ## 5. 순서 요약
 Step 0 수집 ∥ PR-Y1(완료) → Step 1 분석(완료) → PR-Y2(SEAssist #306, 미머지) → PR-Y2b(#5) → PR-Y3 허브(#6·#10) →
-PR-Y2' 이식(완료) → **PR-Y1b** → 배포·G7 → PR-Y4.
+PR-Y2' 이식(완료) → PR-Y1b(완료) → **배포·G7** → PR-Y4.
