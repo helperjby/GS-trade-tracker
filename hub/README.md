@@ -35,8 +35,8 @@ curl -s "http://127.0.0.1:8800/api/market/stats" -H "Authorization: Bearer <secr
 
 ## 파이 배포 (Docker)
 
-전제: SEAssist 대시보드와 같은 Pi(Docker + compose 플러그인, Tailscale). 데이터 볼륨은 대시보드와 **별도 폴더**
-(예 `/mnt/dashdata/yuktracker-hub`).
+전제: SEAssist 대시보드와 같은 Pi(Docker + compose 플러그인, Tailscale). 데이터 볼륨은 대시보드(`~/dashboard/data`)와 **별도 폴더** —
+기본은 compose 파일 옆 `./data`(실배포 2026-09-22: `/home/jby/yuktracker-hub/data`). 이 Pi 에 `/mnt/dashdata` 는 없다(루트가 SSD 로 이전됨).
 
 ```bash
 # 1) 이 폴더를 파이로 복사 (Windows 에서, Git Bash)
@@ -45,8 +45,9 @@ tar -C <repo루트> -czf - --exclude=hub/data --exclude=hub/config.json hub \
 
 # 2) 파이에서 1회 설정
 cd ~/yuktracker-hub
-cp config.json.example config.json      # secret 설정(16자 이상). db_path 는 손대지 않아도 된다 — 컨테이너는 HUB_DB_PATH=/data/hub.db
-echo 'HUB_DATA_DIR=/mnt/dashdata/yuktracker-hub' > .env
+S=$(python3 -c 'import secrets;print(secrets.token_urlsafe(24))'); sed "s/CHANGE-ME/$S/" config.json.example > config.json; chmod 600 config.json
+                                        # secret 생성(32자; 16자 이상 필수). db_path 는 손대지 않아도 된다 — 컨테이너는 HUB_DB_PATH=/data/hub.db
+# (선택) 데이터를 다른 폴더에 두려면: echo 'HUB_DATA_DIR=/절대/경로' > .env   — 기본은 ./data
 
 # 3) 기동/업데이트 (재복사 후 동일 명령)
 docker compose up -d --build

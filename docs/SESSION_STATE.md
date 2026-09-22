@@ -1,8 +1,8 @@
 # Session State
 
-Updated: 2026-09-22 새벽 (Asia/Seoul) — **방향 전환(사용자 결정 2026-09-22): SEAssist 레포에는 더 이상 머지하지 않는다.**
-**PR-Y3 허브 = 이 레포 PR #6**(https://github.com/helperjby/GS-trade-tracker/pull/6, 브랜치 `claude/hub-market-api-20260922`, PR #5 위 스택, `/code-review 6 high` 14건 전부 반영 2026-09-22, 머지 대기) ·
-**PR-Y2b = 이 레포 PR #5**(https://github.com/helperjby/GS-trade-tracker/pull/5, `/code-review 5 high` 15건 전부 반영 c042521 2026-09-22, 머지 대기) ·
+Updated: 2026-09-22 오전 (Asia/Seoul) — **방향 전환(사용자 결정 2026-09-22): SEAssist 레포에는 더 이상 머지하지 않는다.**
+**PR #5(PR-Y2b 아이템 표)·PR #6(PR-Y3 허브) 머지 완료**(https://github.com/helperjby/GS-trade-tracker/pull/5 840d8d3 · https://github.com/helperjby/GS-trade-tracker/pull/6 1ed43ef,
+각 `/code-review high` 15건·14건 전부 반영) · **허브 Pi 배포 완료(2026-09-22 11:24, `~/yuktracker-hub`, :8800, G7 `stats` 응답 확인 — 아래 "허브 배포")** ·
 SEAssist PR #306(PR-Y2) **미머지 → 닫음 예정, 이 레포로 이식(PR-Y2')** · Step 1 = SEAssist #304·#305(머지, 동결 시점 참조)
 
 ## 현재 상태
@@ -85,12 +85,18 @@ SEAssist PR #306(PR-Y2) **미머지 → 닫음 예정, 이 레포로 이식(PR-Y
   hub/README, PLAN 갱신. **검증**: hub 28 passed(`-W error::NotAppKeyWarning`) · 루트 92 passed · 실서버 스모크 16/16(127.0.0.1:8801,
   scratchpad config: CHANGE-ME 기동 거부 → DB 가 config 폴더 옆 → POST 2/3 → 재POST 중복 2 → search 3 → keyset 커서 limit=1 로 3행+빈 호출 →
   stats → 401 → 잘못된 행·2⁶³·agent_ts 0·item_id abc 전부 400 → stats 불변).
+- **허브 배포(2026-09-22 11:24, Pi `jby@192.168.0.14`)**: `hub/` 만 tar 로 `~/yuktracker-hub` 에 복사, 컨테이너 `yuktracker-hub-yuktracker-hub-1`
+  (restart unless-stopped, `0.0.0.0:8800`, 기동 로그 `db_path=/data/hub.db`), DB `/home/jby/yuktracker-hub/data/hub.db`(compose 기본 `./data` → `/data`,
+  Dockerfile `HUB_DB_PATH`). 시크릿은 Pi 가 생성(32자 `token_urlsafe`, `~/yuktracker-hub/config.json` chmod 600) — 레포·문서·채팅에 적지 않는다,
+  관측기 `hub_secret`(PR-Y1b)·미루봇(PR-Y4)이 이 값을 공유. 확인: 컨테이너 안·LAN `192.168.0.14:8800`·tailnet `100.123.248.88:8800` 에서 `GET /` 200,
+  `stats` 인증 200(전부 0·devices []), 무인증 401. **`/mnt/dashdata` 는 이 Pi 에 없다**(루트가 SSD `/dev/sda2` 로 이전, 대시보드도 `~/dashboard/data`)
+  → hub/README 의 데이터 폴더 예시를 `./data` 기본으로 정정. 갱신 절차 = hub/ 재복사 → `docker compose up -d --build`(DB 는 볼륨이라 유지).
+  PR #5 머지 뒤 #6 base 는 GitHub 이 자동으로 `main` 으로 바꿨다(브랜치 자동 삭제).
 
 ## 다음 행동
 
-1. **이 레포 PR #5 머지**(리뷰 15건 반영 완료) → 2. **허브 PR #6 머지**(리뷰 14건 반영 완료; #5 머지 후 base 가 `main` 으로 바뀌었는지 확인, 아니면 `gh pr edit 6 --base main`) →
-   Pi 배포(`hub/README.md`: tar+ssh → `~/yuktracker-hub` → `config.json`(secret, `/data/hub.db`) → `docker compose up -d --build` →
-   `curl …:8800/api/market/stats`). SEAssist PR #306 은 **닫는다**(머지 안 함).
+1. PR #5·#6 머지 · Pi 배포 — **완료(2026-09-22)**. SEAssist PR #306 은 **닫는다**(머지 안 함). 2. 허브 운영 확인: 첫 실업로드(PR-Y1b) 뒤
+   `stats.devices` 에 기기가 보이고 `docker compose logs` 에 `market 관측 수신` 줄이 찍히는지(G7 2차).
 3. **PR-Y2' 이식(이 레포)**: #306 worktree 의 프레이머 확장·`packet_market.py`·엔진 `market_cb`/헬스·테스트·`docs/PACKET-MARKET.md`(마스킹)·
    실캡처 대조 도구 → 이 레포 소유 코드로. 벤더 동결 처리 방식(패치 계층 vs 소유 전환, `sync_seassist_core.py`·`VENDOR.json`·`test_vendor` 핀)
    결정 포함. 검증 = 합성 프레임 테스트 + `%TEMP%\market-y2-corpus` 45창 오프라인 재생(9창 40페이지·라벨 8/8 재현).
