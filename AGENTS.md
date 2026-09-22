@@ -17,9 +17,8 @@
 2. `docs/PLAN.md` — 전체 설계와 PR 순서(Step 0/1 → Y1 → Y2(SEAssist, 미머지) → Y2b → **Y3 허브** → Y2' 이식 → Y1b → Y4)
 3. `docs/SESSION_STATE.md` — 현재 상태·다음 행동
 4. `docs/HUB-PROTOCOL.md` — 관측기 ↔ 허브 ↔ 미루봇 계약(엔드포인트·필드·정규화·신선도)의 정본
-5. SEAssist `docs/PACKET-PROCESS.md` §1~§3 · `docs/PACKET-MARKET-2026-09-21.md` — 게이트 사다리·등급·가설 레지스트리
-   (H-2609-08 육의전 목록 B, H-2609-10 아이템 id = 클라 표 코드, H-2609-11 `@45` = 기간). **동결 시점(main b54cb73) 참조**:
-   그 뒤의 분석·가설 기록은 이 레포 `docs/PACKET-MARKET.md`(PR-Y2' 에서 이식)에 잇는다.
+5. `docs/PACKET-MARKET.md` — 육의전 프로토콜 판정의 정본(필드 표·가설 레지스트리 H-2609-07~11·재현·PATCH-RECHECK).
+   게이트 사다리·등급 정의 자체는 SEAssist `docs/PACKET-PROCESS.md` §1~§3 **동결 시점(main b54cb73) 참조**.
 
 ## 진실의 원천 순서
 

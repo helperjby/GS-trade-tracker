@@ -40,8 +40,8 @@
 ```
 
 - SEAssist GUI·대시보드는 건드리지 않는다. 관측은 이 프로그램이, 저장·검색은 `hub/` 가 전담.
-- 패킷 코어는 SEAssist 레포의 **벤더 사본**(`tools/sync_seassist_core.py`, `VENDOR.json` 에 출처 커밋·해시) — **b54cb73 에서 동결**.
-  육의전 프레이머 확장·파서는 SEAssist 에 남지 않고(PR #306 미머지) 이 레포 소유 코드로 들어온다(PR-Y2').
+- 패킷 코어는 SEAssist 에서 왔지만 **이 레포 소유**다(PR-Y2' 전량 소유 전환). `VENDOR.json` 이 출처 커밋(b54cb73)과 그 시점
+  해시를 기록하고 달라진 파일은 `diverged` 에 사유와 함께 선언한다. 육의전 프레이머 확장·파서는 여기 들어와 있다.
 - 에이전트→허브는 WS 이벤트가 아니라 **HTTP POST + 로컬 스풀**로 at-least-once(허브가 `obs_id` 로 dedup).
 
 ## 3. 단계와 PR
@@ -90,15 +90,20 @@ python scripts/mine_packet_discovery.py --all --lead-sec 30
   (라이브 재생·오프라인·프로브 3중 대조)·`market --shadow`; `check_packet_corpus.py` `market` 열 + 창 9개 등록(45창, market 39).
 - 문서: FINDINGS §0·§5.4, PROCESS §3(H-2609-08 **B**, H-2609-10·11 제안), TOOLS, PACKET-MARKET 부록, CHANGELOG.
 
-### PR-Y2' — 위 PR-Y2 를 이 레포로 이식 (2026-09-22 결정, 허브 PR 다음)
-- 가져올 것: 프레이머 확장(`MARKET_OPCODES`·`is_market`·`observe_market` 전량 대기·`MarketObservation`) · `packet_market.py`(파서·
-  `row_to_dict`·`mask_seller`) · 엔진 `market_cb`/헬스 카운터 · 관련 테스트(합성 프레임) · `docs/PACKET-MARKET.md`(분석·필드 표·가설
-  H-2609-08/10/11 — 판매자명 마스킹) · 실캡처 대조 도구(`tools/market_probe.py`: OneDrive 창 **읽기 전용**, `--mask`).
-- 벤더 동결 처리 방식은 이 PR 의 계획에서 정한다 — 후보: (a) 사본은 그대로 두고 확장을 별도 모듈/서브클래스로 얹기
-  (b) `sync_seassist_core.py` 에 패치 계층(복사 뒤 이 레포 패치 적용, `VENDOR.json` 에 패치 해시) (c) 사본을 이 레포 소유 코드로 전환
-  (`VENDOR.json` 은 출처 기록으로만, `test_vendor` 핀은 변경 시 갱신). 어느 쪽이든 `--check` 는 b54cb73 체크아웃 기준.
-- 검증: 합성 프레임 테스트 + `%TEMP%\market-y2-corpus`(45창)·`market-y2-review`(11창) 오프라인 재생으로 9창 40페이지·라벨 8/8 재현.
-  SEAssist 고정 아카이브(비공개 레포의 `packet` 폴더)에는 손대지 않는다(머지 직전 복사 절차 폐기).
+### PR-Y2' — 위 PR-Y2 를 이 레포로 이식 (2026-09-22 **완료**)
+- **벤더 동결 처리 = 전량 소유 전환**(사용자 결정 2026-09-22). 프레이머 확장과 엔진 콜백은 `StreamFramer.feed()` 루프 **안**에
+  들어가야 해서(서브클래스는 루프 전체 복제) 동결 사본으로는 받을 수 없다. `tools/sync_seassist_core.py` 의 복사 경로를 없애고
+  `VENDOR.json` 을 출처 기록(`origin.commit` b54cb73 + 파일별 해시)과 `diverged` 선언으로 바꿨다 — 선언 없는 변경은 `--check` 와
+  `tests/test_vendor.py` 가 잡는다. 상류 비교는 `--upstream`(정보용).
+- 가져온 것: 프레이머 확장(`MARKET_OPCODES`·`is_market`·`observe_market` 전량 대기·`MarketObservation`·`take_market`) ·
+  `seassist/packet_market.py`(파서·`row_to_dict`·`mask_seller`) · 엔진 `market_cb`/헬스 7종 · 합성 프레임 테스트 37건 ·
+  `docs/PACKET-MARKET.md`(분석·필드 표·가설 레지스트리 — 판매자명은 합성으로 치환) · 오프라인 대조 도구 `tools/market_probe.py`
+  (창 파일 **읽기 전용**, 판매자명 기본 마스킹, 라이브 재생 vs 프로브 2중 대조).
+- 가져오지 않은 것(범위 결정): 그림자 원장 `note_market`, SEAssist 전용 도구(`packet_explore`·`check_packet_corpus`·
+  `packet_patch_audit`)와 코퍼스 매니페스트. 실캡처를 붙드는 근거는 이 레포에선 `market_probe` 재생 기록(PACKET-MARKET §9)이다.
+- 소유 전환으로 가능해진 공개 레포 스크럽: 패킷 코어 주석의 실기기명 5건·운영 대수 서술 제거(SESSION_STATE 미해결 항목 해소).
+- 검증: 합성 프레임 테스트 + 오프라인 재생 — 검토 폴더 80창에서 **9창 40페이지·369행·라벨 8/8·라이브 == 프로브·거부 0·유실 0**,
+  고정 코퍼스 45창에서 8창 39페이지(9번째 등록 창은 음성). 비공개 레포의 고정 아카이브에는 손대지 않는다.
 
 ### 아이템 id → 이름 표 (2026-09-21 결정, PR-Y2b 이 레포 PR #5)
 - **출처 = 클라 리소스** `C:\AKInteractive\Gersang\gersang.gcs` 안의 zlib 스트림 `;\t육의전 검색 기능 리스트`
@@ -182,5 +187,5 @@ python scripts/mine_packet_discovery.py --all --lead-sec 30
 - 스풀·창 파일·허브 DB 에 타 유저 판매자명이 남는다 — 레포 픽스처는 합성으로, 운영 파일은 로컬·업로드 후 삭제, 허브 DB 는 Pi 볼륨.
 
 ## 5. 순서 요약
-Step 0 수집 ∥ PR-Y1(완료) → Step 1 분석(완료) → PR-Y2(SEAssist #306, 미머지) → PR-Y2b(#5) → **PR-Y3 허브(이 레포)** →
-PR-Y2' 이식 → PR-Y1b → 배포·G7 → PR-Y4.
+Step 0 수집 ∥ PR-Y1(완료) → Step 1 분석(완료) → PR-Y2(SEAssist #306, 미머지) → PR-Y2b(#5) → PR-Y3 허브(#6·#10) →
+PR-Y2' 이식(완료) → **PR-Y1b** → 배포·G7 → PR-Y4.
