@@ -59,9 +59,9 @@ CREATE TABLE market_item_names (        -- 학습 표: 관측기가 보낸 id→
 
 ```jsonc
 // → 요청 (관측 1~100건, 관측당 행 0~64)
-{"v":1, "device_id":"HIC0TCR",
+{"v":1, "device_id":"DEV-A",
  "observations":[
-   {"obs_id":"HIC0TCR:1758500000123:0123456789ab",   // "{device}:{agent_ts_ms}:{sha1(body)[:12]}" — 관측기가 만든다
+   {"obs_id":"DEV-A:1758500000123:0123456789ab",   // "{device}:{agent_ts_ms}:{sha1(body)[:12]}" — 관측기가 만든다
     "agent_ts":1758500000.123, "opcode":12831,         // 0x321f
     "page":null, "total_pages":12, "hdr4":0,           // page: 응답엔 페이지 번호가 없다(null 허용)
     "anomalies":[],                                     // 파서 anomaly 이름들 (있으면 그대로)
@@ -109,7 +109,7 @@ CREATE TABLE market_item_names (        -- 학습 표: 관측기가 보낸 id→
  "listings":[
    {"listing_id":700001,"item_id":853,"item_name":"봉인의돌","quantity":10,"price":45000000,"seller":"판매자A",
     "category":"item","flag45":2,"flag46":0,"first_seen_ts":1758499000.0,"last_seen_ts":1758500000.1,
-    "seen_count":3,"last_device":"HIC0TCR"}, …]}
+    "seen_count":3,"last_device":"DEV-A"}, …]}
 ```
 
 | 인자 | 기본 | 규칙 |
@@ -143,7 +143,7 @@ CREATE TABLE market_item_names (        -- 학습 표: 관측기가 보낸 id→
 ```jsonc
 {"v":1,"server_time":…,"observations":412,"listings":1380,"items":97,"item_names":95,
  "fresh_listings":210,"fresh_sec":86400.0,"latest_recv_ts":1758500055.2,
- "devices":[{"device_id":"HIC0TCR","observations":300,"last_recv_ts":…},{"device_id":"F1_JBY","observations":112,"last_recv_ts":…}]}
+ "devices":[{"device_id":"DEV-A","observations":300,"last_recv_ts":…},{"device_id":"DEV-B","observations":112,"last_recv_ts":…}]}
 ```
 
 ### 3-5. `GET /` — 무인증 상태 줄

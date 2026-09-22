@@ -36,12 +36,12 @@ curl -s "http://127.0.0.1:8800/api/market/stats" -H "Authorization: Bearer <secr
 ## 파이 배포 (Docker)
 
 전제: SEAssist 대시보드와 같은 Pi(Docker + compose 플러그인, Tailscale). 데이터 볼륨은 대시보드(`~/dashboard/data`)와 **별도 폴더** —
-기본은 compose 파일 옆 `./data`(실배포 2026-09-22: `/home/jby/yuktracker-hub/data`). 이 Pi 에 `/mnt/dashdata` 는 없다(루트가 SSD 로 이전됨).
+기본은 compose 파일 옆 `./data`(실배포 2026-09-22: `~/yuktracker-hub/data`). 이 Pi 에 `/mnt/dashdata` 는 없다(루트가 SSD 로 이전됨).
 
 ```bash
 # 1) 이 폴더를 파이로 복사 (Windows 에서, Git Bash)
 tar -C <repo루트> -czf - --exclude=hub/data --exclude=hub/config.json hub \
-  | ssh jby@192.168.0.14 'mkdir -p ~/yuktracker-hub && tar xzf - -C ~/yuktracker-hub --strip-components=1'
+  | ssh <user>@<pi> 'mkdir -p ~/yuktracker-hub && tar xzf - -C ~/yuktracker-hub --strip-components=1'
 
 # 2) 파이에서 1회 설정
 cd ~/yuktracker-hub
@@ -61,7 +61,7 @@ curl -s -H "Authorization: Bearer <시크릿>" http://127.0.0.1:8800/api/market/
 - DB 위치는 Dockerfile 의 `ENV HUB_DB_PATH=/data/hub.db` 가 config 의 `db_path` 보다 우선한다 — compose 가 `/data` 를 볼륨에
   매핑하므로 운영자가 config 를 안 고쳐도 `compose up --build` 에 데이터가 사라지지 않는다. 기동 로그 첫 줄에 `db_path=` 가 찍힌다.
 - 증분 폴링 소비자(미루봇)는 `next_since_ts` 와 `next_since_key` 를 둘 다 저장해 다음 호출에 넣는다(HUB-PROTOCOL §3-3).
-- 접속 주소: tailnet `http://100.123.248.88:8800`(관측기 PC) / LAN `http://192.168.0.14:8800`(집 Wi-Fi).
+- 접속 주소: tailnet `http://<pi-tailnet-ip>:8800`(관측기 PC) / LAN `http://<pi-lan-ip>:8800`(집 Wi-Fi).
   미루봇(같은 Pi)은 `http://127.0.0.1:8800`. **포트포워딩 금지** — 평문 HTTP + 공유 시크릿 전제.
 - 시크릿: `config.json` 의 `secret` 하나를 관측기(`hub_secret`, PR-Y1b)·봇이 공유. 레포엔 `.example` 만 커밋.
 - 판매자명 등 실데이터가 DB 에 쌓인다 — 볼륨은 Pi 로컬(OneDrive 밖), 덤프·DB 를 레포에 넣지 않는다.
