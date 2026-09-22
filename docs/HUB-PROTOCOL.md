@@ -25,6 +25,7 @@
   | `GET /` | 허용 | 없음 |
   | `POST /api/market/register` | 허용 | 초대 코드(본문) + IP 속도제한 |
   | `POST /api/market/observations` | 허용 | 기기 토큰 `Authorization: Bearer <token>`; 직접 접속이면 관리 시크릿도 |
+  | `GET /api/market/ping` | 허용 | 위와 같음 — 토큰 확인 전용(§3-7), 자가진단이 쓴다 |
   | `GET /api/market/search` `listings` `stats` | **`403 {"ok":false,"error":"not_public"}`**(자격 검사 전) | 관리 시크릿 `Authorization: Bearer <secret>` |
 
   자격 없음·불일치·범위 밖(기기 토큰으로 조회, 공개 요청의 관리 시크릿)은 전부 `401 {"error":"unauthorized"}`.
@@ -254,6 +255,31 @@ HTTP 관리 라우트를 두지 않는 이유: 공개 표면을 늘리지 않고
 는 "이미 등록 상태" 안내. `alias` 는 관리자가 붙이는 별칭이고 `label` 은 기기가 스스로 적은 값이라 서로 덮지 않는다. 토큰 해시는
 출력하지 않고, alias·label·note 의 제어 문자는 `?`, 전각 문자는 표시 폭 2 로 정렬한다. 없는 DB 경로는 만들지 않는다(exit 1).
 
+### 3-7. `GET /api/market/ping` — 기기 토큰 확인 (관측기 `--selftest`)
+
+```jsonc
+// ← 200 (기기 토큰)                                  // ← 200 (관리 시크릿, 직접 접속)
+{"ok":true,"v":1,"device_id":"d-3f9a1c7e2b",          {"ok":true,"v":1,"device_id":"admin",
+ "label":"소가","server_time":1758500000.5}            "label":"","server_time":…}
+```
+
+관측기가 가진 자격은 기기 토큰 하나이고 조회 라우트(§3-2~§3-4)는 공개 리스너에서 403 `not_public` 이며 빈 배치 업로드는
+400 이다 — 그래서 **"내 토큰이 아직 유효한가"를 관측을 만들어 보내기 전에 물을 수 있는 유일한 라우트**다(자가진단·현장 지원).
+
+| 응답 | 조건 |
+|---|---|
+| `200` | 기기 토큰(공개·직접 모두) 또는 직접 접속의 관리 시크릿. `label` 은 관리자 별칭 > 기기가 적은 label > `""` |
+| `401 {"error":"unauthorized"}` | 토큰 없음·무효, 공개 요청의 관리 시크릿 |
+| `403 {"ok":false,"error":"device_revoked"}` | 기기가 명단에서 제거됨(§3-6) |
+| `429 … + Retry-After` | 기기 당 `upload_limit_per_min` — **업로드와 같은 버킷**을 쓴다(자가진단이 업로드 몫을 쓴다는 뜻) |
+
+- 판정은 전부 인증 미들웨어가 한다 — 핸들러는 **DB 를 건드리지 않는다**. `devices.last_seen_ts` 는 "마지막 업로드 시도" 의미를
+  유지한다(ping 은 그 값을 움직이지 않는다).
+- 관측기는 200 의 `device_id` 를 설정의 `hub_device_id` 와 대조한다 — 다르면 업로드가 403 `device_mismatch` 가 될 상태라
+  재등록을 안내한다(§3-1).
+- **옛 판 허브**(이 라우트 이전)는 직접 접속에서 404, 공개 리스너에서는 관리 라우트로 보여 403 `not_public` 이다. 관측기는 둘을
+  같은 안내("허브가 옛 판입니다")로 묶는다.
+
 ## 4. 시각·신선도
 
 - 허브 저장 시각은 `seen_ts = min(agent_ts, recv_ts)`: 스풀에 묵었다가 늦게 올라온 관측은 **관측 시각**이 남고(그때 본
@@ -314,3 +340,7 @@ Tunnel 로 바꾸면 `CF-Connecting-IP`) `register_limit_per_hour`(10) `upload_l
   charset 이 모르는 인코딩이면 무인증 register 가 500 + 트레이스백을 쌓던 것을 400 으로. ③ 모든 쓰기를 `Database._tx`
   (commit/rollback 보장)로 통과 — `prune` 의 두 DELETE 와 `touch_device` 가 잠금으로 실패해도 암묵 트랜잭션이 남지
   않는다(남으면 그 연결이 낡은 WAL 스냅샷을 붙들어 `devices.py` 의 제거가 안 먹고 다른 프로세스 쓰기가 막힌다).
+- 2026-09-22 v1 additive(PR-Y5, 배포 준비): **§3-7 `GET /api/market/ping`** — 기기 토큰 확인 전용 라우트. 관측기의 자격은 기기
+  토큰 하나이고 조회 라우트는 공개 리스너에서 403, 빈 배치 업로드는 400 이라 "토큰이 아직 유효한가"를 물을 길이 없었다
+  (관측기 `--selftest` 가 쓴다). 스키마·기존 라우트 무변경, 인증·속도제한은 업로드와 같은 규칙을 그대로 따르고 핸들러는 DB 를
+  건드리지 않는다. §0 라우트 표에 한 줄 추가.

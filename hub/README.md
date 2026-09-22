@@ -7,7 +7,8 @@
 - 의존성: `aiohttp` 하나 + stdlib sqlite3. **`src/` import 금지** — 관측기 exe 와 별개 배포 단위(빌드 컨텍스트 = 이 폴더).
   관측기의 "런타임 의존성 0" 규칙은 `src/yuktracker/` 에만 적용된다.
 - 라우팅: `GET /`(무인증 상태 줄) · `POST /api/market/register`(초대 코드 → 기기 토큰, 무 Bearer) · `POST /api/market/observations`
-  (기기 토큰; 직접 접속이면 관리 시크릿도) · `GET /api/market/search` · `GET /api/market/listings` · `GET /api/market/stats`(관리 시크릿,
+  (기기 토큰; 직접 접속이면 관리 시크릿도) · `GET /api/market/ping`(기기 토큰 확인 — 관측기 `--selftest`) ·
+  `GET /api/market/search` · `GET /api/market/listings` · `GET /api/market/stats`(관리 시크릿,
   **직접 접속 전용** — Funnel 경유는 403 `not_public`). 규칙은 HUB-PROTOCOL §0.
 - 공개: 리스너 둘 — 관리 **8800**(봇·제작자 직접 접속, Funnel 금지) / 공개 **8801**(Pi 의 **Tailscale Funnel** 이
   `https://<pi-node>.<tailnet>.ts.net/` 로 낸다, 아래 "공개 노출"). 일반 사용자 PC 에는 Npcap + 관측기 exe 만 있고 VPN 이 없기 때문.
@@ -108,6 +109,7 @@ curl -s -X POST $H/api/market/register -H "Content-Type: application/json" \
   -d '{"v":1,"invite_code":"<invite_code>","label":"GATE"}'                   # 200 device_id·token
 curl -s -X POST $H/api/market/register -H "Content-Type: application/json" \
   -d '{"v":1,"invite_code":"nope"}'                                           # 401 bad_invite
+curl -s -H "Authorization: Bearer <위 200 응답의 token>" $H/api/market/ping               # 200 device_id — 지인 PC 의 자가진단이 쓰는 라우트(§3-7)
 docker compose exec yuktracker-hub python devices.py list                     # GATE 가 보인다 → revoke <device_id> --note gate
 docker compose exec yuktracker-hub python devices.py alias <device_id> "친구1"  # 관리자 별칭(목록·로그에 이 이름이 먼저)
 ```
@@ -135,7 +137,7 @@ docker compose exec yuktracker-hub python devices.py alias <device_id> "친구1"
 ## 구조
 
 ```
-server.py   aiohttp — 리스너 둘(관리 8800 / 공개 8801, DB·속도제한 공유) · 공개/직접 구분 · Bearer(관리 시크릿/기기 토큰) 미들웨어 · RateLimiter · 업로드 전건 검증 · register · 5 라우트 · 일 1회 retention
+server.py   aiohttp — 리스너 둘(관리 8800 / 공개 8801, DB·속도제한 공유) · 공개/직접 구분 · Bearer(관리 시크릿/기기 토큰) 미들웨어 · RateLimiter · 업로드 전건 검증 · register · 6 라우트 · 일 1회 retention
 db.py       SQLite — market_observations / market_listings / market_item_names / devices(등록 정의 하나 = 미제거) · 정규화 한 정의 · upsert · prune
 devices.py  관리 CLI — 기기 list / revoke / unrevoke / alias / note (서버와 같은 DB 파일, 시크릿 불필요)
 tests/      pytest — 인증·공개/직접 · 등록·기기 토큰·취소 · 속도제한 · 검증(전건 거부) · dedup · upsert · 이름 학습 · 정규화 · 신선도 · 증분 목록 · 통계 · prune · CLI
