@@ -62,8 +62,9 @@ from typing import Callable, Optional
 
 from . import pcap_ffi
 from . import tcp_flow_map
-from .gersang_protocol import ENTER, JOCHUL_OPCODES, FlowDecoder
+from .gersang_protocol import ENTER, JOCHUL_OPCODES, MARKET_OPCODES, FlowDecoder
 from .logger import format_exc_brief, get_logger
+from .packet_market import parse_market_page
 
 # ─────────────────────────── 튜닝 상수 ───────────────────────────
 
@@ -102,6 +103,9 @@ _JOIN_TIMEOUT_SEC = 2.0
 #: 조철 번호 표기 — 헬스 줄 키(`30dd=`)와 경고 문구가 런타임 집합에서 파생한다.
 _JOCHUL_OPS = tuple(sorted(JOCHUL_OPCODES))
 _JOCHUL_OPS_TEXT = "/".join(f"0x{op:04x}" for op in _JOCHUL_OPS)
+#: 육의전 번호 표기 — 헬스 줄 키(`321f=`)와 경고 문구(패킷 PR-Y2).
+_MARKET_OPS = tuple(sorted(MARKET_OPCODES))
+_MARKET_OPS_TEXT = "/".join(f"0x{op:04x}" for op in _MARKET_OPS)
 
 #: 파서 드랍 사유 토큰 (health 카운터 키 — 사전 시드해 dict 크기를 고정,
 #: health_snapshot 의 무락 복사가 안전해진다).
@@ -159,7 +163,7 @@ class _Flow:
                  "last_event_ts", "lock_notified", "reset_sig",
                  "fullness_drops_seen", "jochul_rejects_seen",
                  "popup_unknown_seen",
-                 "party_malformed_seen", "observation_token")
+                 "party_malformed_seen", "market_rejects_seen", "observation_token")
 
     def __init__(self, slot_idx: int, pid: int, local_port: int,
                  server_port: int = tcp_flow_map.MAIN_PORT, *,
@@ -180,6 +184,7 @@ class _Flow:
         self.jochul_rejects_seen = 0
         self.popup_unknown_seen = 0
         self.party_malformed_seen = 0
+        self.market_rejects_seen = 0
         self.observation_token = object()
 
     @property
@@ -278,6 +283,14 @@ class PacketStateSource:
     출처). 슬롯 재등록 직후 구 프로세스의 흐름이 FLOW_MISS_LIMIT 동안 남는데,
     상위가 슬롯의 *현재* pid 로 스탬프하면 구 프로세스 값이 새 pid 로 기록되어
     런타임 저장소의 PID 신선도 가드가 무력화된다.
+
+    ``market_cb(slot_idx, page, observation, pid=)`` 는 육의전 목록 페이지 관측이다
+    (`packet_market.MarketPage` — 파싱 성공분만, `observation` 은 프레이머의 raw
+    `MarketObservation`: ts·opcode·body). 같은 성격(관측값)·같은 스레드 계약(패킷 PR-Y2,
+    H-2609-08 B — 관측 전용 배선). 콜백이 있어야 프레이머의 ``observe_market`` 이 켜진다
+    (세그먼트마다 콜백 유무로 설정 — wordinput 과 같다). 파싱 실패는
+    ``market_parse_failures`` 로만 세고 전달하지 않으며, 콜백 예외는 wordinput 처럼 삼키고
+    ``market_callback_errors`` 로 센다.
     """
 
     def __init__(
@@ -291,6 +304,7 @@ class PacketStateSource:
         party_cb: Optional[Callable[..., None]] = None,
         battle_cb: Optional[Callable[..., None]] = None,
         wordinput_cb: Optional[Callable[..., None]] = None,
+        market_cb: Optional[Callable[..., None]] = None,
         invalidate_cb: Optional[Callable[[int], None]] = None,
         aux_c2s: bool = False,
         enter_anchor: bool = True,
@@ -304,6 +318,7 @@ class PacketStateSource:
         self._party_cb = party_cb
         self._battle_cb = battle_cb
         self._wordinput_cb = wordinput_cb
+        self._market_cb = market_cb
         self._invalidate_cb = invalidate_cb
         self._aux_c2s = bool(aux_c2s)
         #: 전투 ENTER 앵커 락(기본 on). 실기기에서 유령 IN 이 의심되면 재배포 없이 끌 수 있게
@@ -339,6 +354,8 @@ class PacketStateSource:
             party_tables=0, party_malformed=0,
             wordinput_open=0, wordinput_refresh=0,
             wordinput_dropped=0, wordinput_callback_errors=0,
+            market_frames=0, market_rows=0, market_rejected=0, market_dropped=0,
+            market_parse_failures=0, market_anomalies=0, market_callback_errors=0,
         )
 
     # ---------- lifecycle (소유자 스레드) ----------
@@ -603,19 +620,23 @@ class PacketStateSource:
                 counts = dict(st.opcode_counts)
                 jochul_counts = " ".join(
                     f"{op:04x}={counts.get(op, 0)}" for op in _JOCHUL_OPS)
+                market_counts = " ".join(
+                    f"{op:04x}={counts.get(op, 0)}" for op in _MARKET_OPS)
                 per_flow.append(
                     f"s{fl.slot_idx + 1}:frames={st.frames} lock={int(st.locked)} "
                     f"anchor={st.enter_anchor_locks} "
                     f"03f0={counts.get(0x03F0, 0)} 0fa4={counts.get(0x0FA4, 0)} "
-                    f"1772={counts.get(0x1772, 0)} {jochul_counts}")
+                    f"1772={counts.get(0x1772, 0)} {jochul_counts} {market_counts}")
             get_logger().info(
                 "[패킷] 헬스 — packets=%d fed=%d flows=%d aux_flows=%d aux_segs=%d "
                 "battle=%d jochul=%d rejected=%d popup_unknown=%d popup_suppressed=%d "
+                "market=%d mrej=%d "
                 "fullness=%d unmapped=%d aux_unmapped=%d aux_c2s=%d invalid=%d | %s",
                 h["packets"], h["fed_segments"], h["tracked_flows"],
                 h["tracked_aux_flows"], h["aux_segments"],
                 h["battle_events"], h["jochul_events"], h["jochul_rejected"],
                 h["popup_unknown"], h["popup_unknown_suppressed"],
+                h["market_frames"], h["market_rejected"],
                 h["fullness_updates"], h["unmapped_segments"],
                 h["aux_unmapped_segments"], h["aux_c2s_segments"],
                 h["state_invalidations"], " ".join(per_flow) or "-")
@@ -670,9 +691,12 @@ class PacketStateSource:
         before = fl.reset_sig
         fl.decoder.framer.retain_exit_body = self._battle_cb is not None
         fl.decoder.framer.observe_wordinput = self._wordinput_cb is not None
+        fl.decoder.framer.observe_market = self._market_cb is not None
         wordinput_drops = fl.decoder.wordinput_dropped
+        market_drops = fl.decoder.market_dropped
         events = fl.decoder.feed_segment(seg.seq, seg.payload, now)
         self._health["wordinput_dropped"] += fl.decoder.wordinput_dropped - wordinput_drops
+        self._health["market_dropped"] += fl.decoder.market_dropped - market_drops
         self._health["fed_segments"] += 1
         fl.reset_sig = fl.current_reset_sig()
         if fl.reset_sig != before:
@@ -800,6 +824,33 @@ class PacketStateSource:
                     wcb(fl.slot_idx, observation, pid=fl.pid)
                 except Exception:
                     self._health["wordinput_callback_errors"] += 1
+
+        # 육의전 목록(0x321f, H-2609-08 B) — 관측 전용. 전투 상태·러너 무접촉, 같은 스레드 계약.
+        # 거부 델타는 조철과 같은 드리프트 진단축(번호는 왔는데 모양이 다르다).
+        mrej = fl.decoder.market_rejected
+        if mrej != fl.market_rejects_seen:
+            self._health["market_rejected"] += mrej - fl.market_rejects_seen
+            fl.market_rejects_seen = mrej
+            self._warn_once(
+                "market_rejected",
+                f"육의전 번호({_MARKET_OPS_TEXT}) 프레임이 판별식(9+48×행 수·헤더)에 불일치 — "
+                "클라 패치 드리프트 의심, PACKET-FINDINGS §5.4 확인")
+        mcb = self._market_cb
+        for observation in fl.decoder.take_market():
+            page = parse_market_page(observation.body)
+            if page is None:
+                # is_market 은 통과했는데 파서가 거부 — 두 구현의 드리프트(같은 상수를 쓴다).
+                self._health["market_parse_failures"] += 1
+                continue
+            self._health["market_frames"] += 1
+            self._health["market_rows"] += page.count
+            if page.anomalies:
+                self._health["market_anomalies"] += 1
+            if mcb is not None:
+                try:
+                    mcb(fl.slot_idx, page, observation, pid=fl.pid)
+                except Exception:
+                    self._health["market_callback_errors"] += 1
 
     def _reconcile(self, flows, pids: dict[int, int],
                    flow_map: dict[_FlowKey, _Flow],

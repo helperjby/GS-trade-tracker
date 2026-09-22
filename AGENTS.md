@@ -17,9 +17,8 @@
 2. `docs/PLAN.md` — 전체 설계와 PR 순서(Step 0/1 → Y1 → Y2(SEAssist, 미머지) → Y2b → **Y3 허브** → Y2' 이식 → Y1b → Y4)
 3. `docs/SESSION_STATE.md` — 현재 상태·다음 행동
 4. `docs/HUB-PROTOCOL.md` — 관측기 ↔ 허브 ↔ 미루봇 계약(엔드포인트·필드·정규화·신선도)의 정본
-5. SEAssist `docs/PACKET-PROCESS.md` §1~§3 · `docs/PACKET-MARKET-2026-09-21.md` — 게이트 사다리·등급·가설 레지스트리
-   (H-2609-08 육의전 목록 B, H-2609-10 아이템 id = 클라 표 코드, H-2609-11 `@45` = 기간). **동결 시점(main b54cb73) 참조**:
-   그 뒤의 분석·가설 기록은 이 레포 `docs/PACKET-MARKET.md`(PR-Y2' 에서 이식)에 잇는다.
+5. `docs/PACKET-MARKET.md` — 육의전 프로토콜 판정의 정본(필드 표·가설 레지스트리 H-2609-07~11·재현·PATCH-RECHECK).
+   게이트 사다리·등급 정의 자체는 SEAssist `docs/PACKET-PROCESS.md` §1~§3 **동결 시점(main b54cb73) 참조**.
 
 ## 진실의 원천 순서
 
@@ -30,9 +29,10 @@
 
 ## 규칙
 
-- **SEAssist 레포에 PR 을 내지 않는다(2026-09-22).** 벤더 사본(`src/yuktracker/seassist/`)은 SEAssist main b54cb73 시점에
-  동결됐고 `VENDOR.json` 이 출처 커밋·해시를 기록한다. 프로토콜 확장(육의전 프레이머·파서)은 이 레포 소유 코드로 들어간다 —
-  방식(사본 위에 별도 모듈 / 동기화 도구의 패치 계층 / 사본의 소유 전환)은 PR-Y2' 계획에서 정하고, 그 전까지 사본을 손으로 고치지 않는다.
+- **SEAssist 레포에 PR 을 내지 않는다(2026-09-22).** 패킷 코어(`src/yuktracker/seassist/`)는 **이 레포 소유**다 —
+  PR-Y2' 에서 전량 소유 전환했고 복사 경로는 없다(프레이머 확장·엔진 콜백이 `StreamFramer.feed()` 루프 안에 들어가야 해서).
+  `VENDOR.json` 이 출처 커밋(b54cb73)과 그 시점의 해시를 기록하고, 내용이 달라진 파일은 `diverged` 에 **사유와 함께 선언**한다 —
+  선언 없는 변경은 `tools/sync_seassist_core.py --check` 와 `tests/test_vendor.py` 가 잡는다(상류 비교는 `--upstream`, 정보용).
   `config.py` 는 이 프로젝트 소유 심.
 - **새 opcode·필드 주장은 가설 레지스트리 행(SEAssist PACKET-PROCESS §3 형식) 없이는 코드에 넣지 않는다.** 등급 D 는
   파서·업로드에 못 들어간다. 이 트랙의 런타임은 관측 전용이라 목표 등급은 B. 레지스트리의 후속 기록은 이 레포 `docs/PACKET-MARKET.md`.
@@ -53,8 +53,8 @@
 ```powershell
 python -m pytest                                   # 관측기 테스트 (tests/)
 python -X utf8 -m pytest hub/tests -q              # 허브 테스트 (aiohttp 필요: pip install -r hub/requirements.txt)
-python tools\sync_seassist_core.py --check         # 벤더 사본 == 동결 시점 소스 ? (b54cb73 체크아웃 기준)
-                                                   # 소스 위치 = %SEASSIST_REPO% 또는 --source, 없으면 rc 2 로 건너뜀
+python tools\sync_seassist_core.py --check         # 출처 대비 차이 == VENDOR.json diverged 선언 ? (rc 1 = 불일치)
+python tools\sync_seassist_core.py --upstream      # 상류 체크아웃과 파일별 비교(정보용, %SEASSIST_REPO% 없으면 rc 2)
 run_dev.bat [--capture N | --capture 0]
 build.bat
 python hub\server.py --config hub\config.json      # 허브 로컬 실행 (배포는 hub/README.md)

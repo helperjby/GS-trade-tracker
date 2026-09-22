@@ -1,54 +1,72 @@
 {
   "source": "SEAssist",
   "source_subdir": "src/core",
-  "commit": "62e33db519a4bb238c6f0657d87457a97c34d8d1",
-  "dirty": false,
-  "synced_at": "2026-09-21T08:45:11+00:00",
-  "owned": [
+  "note": "2026-09-22 전량 소유 전환 — 이 폴더는 이 레포가 소유한다(동기화 복사 없음). 아래 origin 은 출처 기록이고, 지금 내용이 출처와 다른 파일은 diverged 가 사유와 함께 선언한다. tools/sync_seassist_core.py --check 와 tests/test_vendor.py 가 이 선언을 검사한다.",
+  "origin": {
+    "commit": "b54cb7349d5a2130581bc1593e86af5a002d95ed",
+    "note": "동결 시점(#303·#304·#305 머지). 모듈 내용은 62e33db519a4bb238c6f0657d87457a97c34d8d1 와 같다 — 해시는 줄바꿈 LF 정규화 뒤 sha256.",
+    "recorded_at": "2026-09-21T08:45:11+00:00",
+    "files": {
+      "admin.py": {
+        "sha256": "e4edc3be2015e619ac85a938032e20ea2d11e87fe6fabca638c4ba8071c7c70e",
+        "bytes": 2464
+      },
+      "gersang_protocol.py": {
+        "sha256": "bf07c451df508e03081d5421cb0f9f353136296b6cbec5bc886df5f6c87881ba",
+        "bytes": 68935
+      },
+      "ledger_paths.py": {
+        "sha256": "3f0af0ae3d3ce2fd4673a3c1611323db6dd80156aac8f5bcba1a79042c852877",
+        "bytes": 4900
+      },
+      "log_history.py": {
+        "sha256": "0717f6bb69edede06fdfdefb26c93435ff0e8c8c6d416f1ad7ca9bb561f13d18",
+        "bytes": 3514
+      },
+      "logger.py": {
+        "sha256": "bb8db4e12c1a5dbac957c1ea03acca6d636658d26f6c05ce5eaf1633954d45d1",
+        "bytes": 6428
+      },
+      "packet_discovery_ledger.py": {
+        "sha256": "6ad0a4bc013f9fdb683d2692d35a87e5b863a1cea0972f68092e00a1a41c5048",
+        "bytes": 36425
+      },
+      "packet_state_source.py": {
+        "sha256": "17388a75639642e8a45a9e295134bc9f74c18075391055edb5d5ab711dcd9a91",
+        "bytes": 54407
+      },
+      "pcap_ffi.py": {
+        "sha256": "84ee92625cfb49f42bdf47a7d313deac8ec068e8a0545a7fcd8ce9e8131b3856",
+        "bytes": 37458
+      },
+      "tcp_flow_map.py": {
+        "sha256": "d7f26b0f1d4ff83404856290214b5823e935d01b8ee577e055bc2816b44db636",
+        "bytes": 11953
+      },
+      "wordinput_packet_state.py": {
+        "sha256": "6865e46c01720ddbc29dee684ae2945536b897f5aab7f25c6cf5dfa2d1d2a8ad",
+        "bytes": 6476
+      }
+    }
+  },
+  "repo_own": [
+    "VENDOR.json",
     "__init__.py",
     "config.py",
-    "VENDOR.json"
+    "packet_market.py"
   ],
-  "files": {
-    "admin.py": {
-      "sha256": "e4edc3be2015e619ac85a938032e20ea2d11e87fe6fabca638c4ba8071c7c70e",
-      "bytes": 2464
+  "diverged": [
+    {
+      "file": "gersang_protocol.py",
+      "why": "PR-Y2' 육의전 프레이머 확장 — MARKET_OPCODES·is_market·market_row_count·MarketObservation, StreamFramer(observe_market=) 전량 대기(≤9+48×64B)·take_market·market_dropped/rejected, FlowDecoder 패스스루와 market_ts. 상류에는 없는 기능이다(SEAssist PR 미머지). 더해서 공개 레포 규칙에 따라 주석의 실기기명 5건을 합성 이름(DEV-1·DEV-2)으로 바꿨다."
     },
-    "gersang_protocol.py": {
-      "sha256": "bf07c451df508e03081d5421cb0f9f353136296b6cbec5bc886df5f6c87881ba",
-      "bytes": 68935
+    {
+      "file": "packet_discovery_ledger.py",
+      "why": "공개 레포 규칙 — 주석의 운영 대수 서술을 일반 서술로 바꿨다(코드 경로 무변경)."
     },
-    "ledger_paths.py": {
-      "sha256": "3f0af0ae3d3ce2fd4673a3c1611323db6dd80156aac8f5bcba1a79042c852877",
-      "bytes": 4900
-    },
-    "log_history.py": {
-      "sha256": "0717f6bb69edede06fdfdefb26c93435ff0e8c8c6d416f1ad7ca9bb561f13d18",
-      "bytes": 3514
-    },
-    "logger.py": {
-      "sha256": "bb8db4e12c1a5dbac957c1ea03acca6d636658d26f6c05ce5eaf1633954d45d1",
-      "bytes": 6428
-    },
-    "packet_discovery_ledger.py": {
-      "sha256": "6ad0a4bc013f9fdb683d2692d35a87e5b863a1cea0972f68092e00a1a41c5048",
-      "bytes": 36425
-    },
-    "packet_state_source.py": {
-      "sha256": "17388a75639642e8a45a9e295134bc9f74c18075391055edb5d5ab711dcd9a91",
-      "bytes": 54407
-    },
-    "pcap_ffi.py": {
-      "sha256": "84ee92625cfb49f42bdf47a7d313deac8ec068e8a0545a7fcd8ce9e8131b3856",
-      "bytes": 37458
-    },
-    "tcp_flow_map.py": {
-      "sha256": "d7f26b0f1d4ff83404856290214b5823e935d01b8ee577e055bc2816b44db636",
-      "bytes": 11953
-    },
-    "wordinput_packet_state.py": {
-      "sha256": "6865e46c01720ddbc29dee684ae2945536b897f5aab7f25c6cf5dfa2d1d2a8ad",
-      "bytes": 6476
+    {
+      "file": "packet_state_source.py",
+      "why": "PR-Y2' 엔진 배선 — PacketStateSource(market_cb=)·헬스 7종·세그먼트마다 observe_market 동기화·거부 델타 경고·헬스 줄 market/mrej. 상류에는 없는 기능이다(SEAssist PR 미머지)."
     }
-  }
+  ]
 }

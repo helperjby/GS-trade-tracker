@@ -1,6 +1,7 @@
 # Session State
 
-Updated: 2026-09-22 오후 (Asia/Seoul) — **허브 공개 업로드(Tailscale Funnel + 초대 코드 자기등록, 아래 절, PR #10 머지 대기)** ·
+Updated: 2026-09-22 저녁 (Asia/Seoul) — **PR-Y2' 이식 완료(아래 절): 벤더 전량 소유 전환 + 육의전 프레이머·파서·엔진 콜백 ·
+다음은 PR-Y1b(관측 모드·등록 UX·업로드)** · 허브 공개 업로드 PR #10 **머지 완료** ·
 **방향 전환(사용자 결정 2026-09-22): SEAssist 레포에는 더 이상 머지하지 않는다.**
 **PR #5(PR-Y2b 아이템 표)·PR #6(PR-Y3 허브) 머지 완료**(https://github.com/helperjby/GS-trade-tracker/pull/5 840d8d3 · https://github.com/helperjby/GS-trade-tracker/pull/6 1ed43ef,
 각 `/code-review high` 15건·14건 전부 반영) · **허브 Pi 배포 완료(2026-09-22 11:24, `~/yuktracker-hub`, :8800, G7 `stats` 응답 확인 — 아래 "허브 배포")** ·
@@ -50,6 +51,29 @@ SEAssist PR #306(PR-Y2) **미머지 → 닫음 예정, 이 레포로 이식(PR-Y
   --build`(포트 8800·8801) → `sudo tailscale funnel --bg 8801`(관리 콘솔 HTTPS·`funnel` 노드 속성) → 폰 LTE 게이트(`GET /` 200 · stats 403
   (더미 Bearer) · register 200/401) → `devices.py list`. 그 뒤 PR-Y2' → PR-Y1b(등록 UX 포함).
 
+## PR-Y2' 이식 (2026-09-22 저녁, 이 레포)
+
+- **벤더 동결 처리 = 전량 소유 전환**(사용자 결정). 후보 셋 중 (a) 별도 모듈/서브클래스는 불가능에 가깝다 — 육의전 전량 대기
+  분기가 `StreamFramer.feed()` 루프 안(`observe_wordinput` 과 같은 자리)에 있어야 해서 서브클래스는 100줄 루프 복제가 된다.
+  `tools/sync_seassist_core.py` 는 복사(`sync`)를 잃고 **출처 대비 차이 보고**만 한다: `--check`(차이 == `VENDOR.json` 의
+  `diverged` 선언인가, rc 1 = 불일치) · `--upstream`(상류 체크아웃과 파일별 비교, 정보용). `VENDOR.json` 은
+  `origin{commit b54cb73, files{sha256,bytes}}` + `repo_own` + `diverged[{file,why}]` 구조.
+- **이식은 패치가 아니라 통째 교체**: 동결 시점(b54cb73) 두 파일의 LF 정규화 해시가 기존 핀과 정확히 일치함을 확인한 뒤
+  이식 원본의 판으로 갈아끼웠다 → 그 커밋의 diff 가 곧 순수 육의전 델타다. `gersang_protocol.py`(+126) ·
+  `packet_state_source.py`(+54) · `seassist/packet_market.py`(신규 218줄, stdlib + `.gersang_protocol` 만).
+- 콜백 계약 `market_cb(slot_idx, page, observation, *, pid)` — 파싱 성공분만, 스니퍼 스레드, 예외는 엔진이 삼키고
+  `market_callback_errors`. 헬스 7종(`market_frames`·`rows`·`rejected`·`dropped`·`parse_failures`·`anomalies`·`callback_errors`).
+- **가져오지 않은 것**(범위 결정): 그림자 원장 `note_market`, SEAssist 전용 도구(`packet_explore`·`check_packet_corpus`·
+  `packet_patch_audit`)·코퍼스 매니페스트, GUI 배선.
+- 테스트 37건 이식 + 하네스 자작: `tests/packet_frames.py`(합성 빌더 — 실캡처 조철 본문 대신 합성 `jochul_body`),
+  `tests/packet_engine_harness.py`(pcap·flow 네임스페이스 스텁으로 DLL 없이 `_capture()` 구동).
+- `tools/market_probe.py`(신규): 창 파일 읽기 전용 재생 — **라이브 재생(프로덕션 경로) vs 프레이머 독립 프로브** 2중 대조,
+  라벨 대조, 판매자명 **기본 마스킹**(`--raw-seller` 로만 원본). 불일치 rc 1 · 페이지 0 rc 2. 테스트 6건.
+- 검증: 루트 137 passed · 검토 폴더 80창 재생 = **9창 40페이지·369행·라벨 8/8·라이브 == 프로브·거부 0·유실 0**(PR-Y2 기록 재현) ·
+  고정 코퍼스 45창 = 8창 39페이지(9번째 등록 창은 음성이라 0페이지, 매니페스트의 market 39 와 일치).
+- 문서: `docs/PACKET-MARKET.md` 신규(이 트랙의 프로토콜 정본 — 필드 표·라벨 대조·예측 검정·가설 레지스트리 H-2609-07~11·
+  재현 기록·PATCH-RECHECK·다음 캡처). 판매자명은 합성(`판매자A`~`H`), 기기명·창 파일명·실캡처 경로는 옮기지 않았다.
+
 ## 현재 상태
 
 - 레포: https://github.com/helperjby/GS-trade-tracker (**public** — 2026-09-22 공개. 기기명·Pi 주소·사용자명·
@@ -79,10 +103,9 @@ SEAssist PR #306(PR-Y2) **미머지 → 닫음 예정, 이 레포로 이식(PR-Y
 - 벤더 사본은 SEAssist 62e33db 와 일치(`VENDOR.json`, `--check` 통과). 비승격 스모크(`--no-elevate`)는 rc 2(관리자 아님) 로 정상 종료.
   `--check` 는 로컬 체크아웃이 62e33db/b54cb73 벤더 모듈과 같을 때만 통과한다 —
   09-21 현재 비공개 레포 본체는 다른 브랜치라 "불일치 6건" 이 뜨지만 벤더 사본은 무변경(`tests/test_vendor.py` 해시 핀 green).
-  **벤더 사본의 실기기명 잔여(공개 노출, 미해결)**: `gersang_protocol.py`(주석에 실기기명 5건 + 날짜별 세션 기록)와
-  `packet_discovery_ledger.py`(운영 대수·OneDrive 연동 여부) 두 파일. **둘 다 `VENDOR.json` 해시 핀 대상**이라 손으로 고치면
-  `test_vendor` 가 깨지고, AGENTS.md "사본을 손으로 고치지 않는다" 규칙에도 걸린다 → PR-Y2' 의 벤더 동결 처리(패치 계층 vs 소유 전환)에서
-  같이 결정한다. GitHub 코드 검색으로 이 기기명들이 이 프로젝트에 매칭된다는 뜻이므로 문서 쪽 치환만으로 가려졌다고 보지 않는다.
+  ~~벤더 사본의 실기기명 잔여~~ → **해소(2026-09-22, PR-Y2')**: 소유 전환으로 고칠 수 있게 되어 `gersang_protocol.py` 주석의
+  실기기명 5건과 `packet_discovery_ledger.py` 의 운영 대수 서술을 지웠다(`src/` 에 0건). git 이력과 머지된 PR #1~#4 본문의
+  잔여는 그대로다(위 항목).
 - **실기기 첫 검증 완료(2026-09-21, 실기기 1대, Windows Terminal + 한글 IME)**: `run_dev.bat` 로 창 3개
   (`<OneDrive>\SEAssist\wordinput_review\<디바이스>\packet_discovery\` — `<디바이스>` 폴더명 = 그 PC 의 기기명,
   `ledger_paths._device_name`), 마지막 창(18:08, 547세그, 유실 0, writer 오류 0)에
@@ -153,9 +176,7 @@ SEAssist PR #306(PR-Y2) **미머지 → 닫음 예정, 이 레포로 이식(PR-Y
 
 1. PR #5·#6 머지 · Pi 배포 — **완료(2026-09-22)**. SEAssist PR #306 은 **닫는다**(머지 안 함). 2. 허브 운영 확인: 첫 실업로드(PR-Y1b) 뒤
    `stats.devices` 에 기기가 보이고 `docker compose logs` 에 `market 관측 수신` 줄이 찍히는지(G7 2차).
-3. **PR-Y2' 이식(이 레포)**: #306 worktree 의 프레이머 확장·`packet_market.py`·엔진 `market_cb`/헬스·테스트·`docs/PACKET-MARKET.md`(마스킹)·
-   실캡처 대조 도구 → 이 레포 소유 코드로. 벤더 동결 처리 방식(패치 계층 vs 소유 전환, `sync_seassist_core.py`·`VENDOR.json`·`test_vendor` 핀)
-   결정 포함. 검증 = 합성 프레임 테스트 + `%TEMP%\market-y2-corpus` 45창 오프라인 재생(9창 40페이지·라벨 8/8 재현).
+3. ~~PR-Y2' 이식~~ — **완료(2026-09-22, 위 절)**. SEAssist PR #306 은 닫는다(이식 원본 worktree 는 PR-Y1b 까지 보존).
 4. PR-Y1b(여기): `market_cb` → `load_item_table` 이름 해석 → 스풀 → 첫 실행 `--invite-code` 등록(§3-0) → `hub_url/hub_device_id/hub_token`
    (`%APPDATA%\YukTracker\config.json`)로 HTTPS 업로드(HUB-PROTOCOL §3-1; 429 대기·401/403 정지·`device_id` 는 POST 시점). 5. 실기기: Step 0 잔여 캡처 2창(라벨 5열 `@45` 검정 · 용병 탭 열람 · 수량 ≥65,536·타 PC 세션) ·
    `python tools\console_input_probe.py` 진단 → `_Console` 수정 PR. 6. PR-Y4 미루봇: `http://127.0.0.1:8800`, HUB-PROTOCOL §3-2/§3-3(`Lv.` 표시 보류).
