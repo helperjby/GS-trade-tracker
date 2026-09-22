@@ -16,6 +16,9 @@ from .seassist.config import appdata_base
 
 APP_DIR_NAME = "YukTracker"
 ITEM_TABLE_CACHE_NAME = "item_names.json"
+CONFIG_NAME = "config.json"
+SPOOL_DIR_NAME = "spool"
+QUARANTINE_DIR_NAME = "quarantine"
 
 
 def app_dir() -> Path:
@@ -25,3 +28,18 @@ def app_dir() -> Path:
 
 def item_table_cache_path() -> Path:
     return app_dir() / ITEM_TABLE_CACHE_NAME
+
+
+def config_path() -> Path:
+    """`%APPDATA%\\YukTracker\\config.json` — 허브 주소·기기 토큰(`app_config`)."""
+    return app_dir() / CONFIG_NAME
+
+
+def spool_dir() -> Path:
+    """업로드 대기 배치(`obs_*.jsonl`) — 200 응답 뒤에 지운다."""
+    return app_dir() / SPOOL_DIR_NAME
+
+
+def quarantine_dir() -> Path:
+    """허브가 400 으로 거부한 배치 — 재시도해도 같은 400 이라 옆으로 치운다(진단용)."""
+    return spool_dir() / QUARANTINE_DIR_NAME
