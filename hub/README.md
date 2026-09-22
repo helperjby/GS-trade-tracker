@@ -42,20 +42,25 @@ curl -s "http://127.0.0.1:8800/api/market/stats" -H "Authorization: Bearer <secr
 ## 파이 배포 (Docker)
 
 전제: SEAssist 대시보드와 같은 Pi(Docker + compose 플러그인, Tailscale). 데이터 볼륨은 대시보드(`~/dashboard/data`)와 **별도 폴더** —
-기본은 compose 파일 옆 `./data`(실배포 2026-09-22: `~/yuktracker-hub/data`). 이 Pi 에 `/mnt/dashdata` 는 없다(루트가 SSD 로 이전됨).
+기본은 compose 파일 옆 `./data`(실배포 2026-09-22: 배포 사용자 홈의 `yuktracker-hub/data`). 이 Pi 에 `/mnt/dashdata` 는 없다(루트가 SSD 로 이전됨).
+
+아래 `<…>` 는 자리표시자다 — **반드시 실제 값으로 바꾼 뒤 실행한다.** 따옴표를 지우고 그대로 붙여넣으면
+`<`·`>` 가 셸 리다이렉션으로 해석돼 `ssh` 가 아예 실행되지 않고 엉뚱한 파일이 생긴다.
 
 ```bash
 # 1) 이 폴더를 파이로 복사 (Windows 에서, Git Bash)
-tar -C <repo루트> -czf - --exclude=hub/data --exclude=hub/config.json hub \
-  | ssh <user>@<pi> 'mkdir -p ~/yuktracker-hub && tar xzf - -C ~/yuktracker-hub --strip-components=1'
+REPO="<repo루트>"; PI="<user>@<pi-lan-ip>"       # 두 값만 바꾸면 아래 두 줄은 그대로 쓴다
+tar -C "$REPO" -czf - --exclude=hub/data --exclude=hub/config.json hub \
+  | ssh "$PI" 'mkdir -p ~/yuktracker-hub && tar xzf - -C ~/yuktracker-hub --strip-components=1'
 
 # 2) 파이에서 1회 설정
 cd ~/yuktracker-hub
 S=$(python3 -c 'import secrets;print(secrets.token_urlsafe(24))'); I=$(python3 -c 'import secrets;print(secrets.token_urlsafe(9))')
 sed -e "s/CHANGE-ME-INVITE/$I/" -e "s/CHANGE-ME/$S/" config.json.example > config.json; chmod 600 config.json
-                                        # secret 32자(관리 — 봇·제작자만) · invite_code 12자(커뮤니티 공유; 비우면 등록 닫힘). INVITE 치환이 먼저여야 한다.
+                                        # secret 32자(관리 — 봇·제작자만) · invite_code 12자(지인 공유; 비우면 등록 닫힘). INVITE 치환이 먼저여야 한다.
                                         # db_path 는 손대지 않아도 된다 — 컨테이너는 HUB_DB_PATH=/data/hub.db
-# (선택) 데이터를 다른 폴더에 두려면: echo 'HUB_DATA_DIR=/절대/경로' > .env   — 기본은 ./data
+# (선택) 데이터를 다른 폴더에 두려면: echo "HUB_DATA_DIR=$HOME/yuktracker-hub/data" > .env   — 기본은 ./data
+#        .env 는 셸이 읽지 않는다 — `~` 는 확장되지 않으니 반드시 절대 경로를 쓴다(위처럼 $HOME 을 셸에서 펼쳐 넣는다).
 
 # 3) 기동/업데이트 (재복사 후 동일 명령)
 docker compose up -d --build
@@ -75,7 +80,9 @@ curl -s -H "Authorization: Bearer <시크릿>" http://127.0.0.1:8800/api/market/
 - 접속 주소: 일반 사용자 관측기 = 공개 `https://<pi-node>.<tailnet>.ts.net`(Funnel, 아래) / 제작자 PC = tailnet `http://<pi-tailnet-ip>:8800`
   / LAN `http://<pi-lan-ip>:8800` / 미루봇(같은 Pi) `http://127.0.0.1:8800`. 직접 접속은 평문 HTTP — **공유기 포트포워딩은 여전히 금지**
   (TLS 는 Funnel 이 맡고, 그 밖의 경로는 신뢰망 안이라는 전제).
-- 자격: `secret`(관리 — 봇·제작자 조회, 직접 접속 전용, exe 에 넣지 않는다) / `invite_code`(커뮤니티 공유 — 기기 등록) / 기기 토큰
+  **실주소는 시크릿과 같이 레포·문서에 적지 않는다** — Pi 에서 `tailscale ip -4`(tailnet) · `hostname -I`(LAN) 로 그때그때 확인하고,
+  관측기·봇에는 `hub_url`/`MIRUBOT_MARKET_API_ORIGIN` 설정값으로만 넣는다.
+- 자격: `secret`(관리 — 봇·제작자 조회, 직접 접속 전용, exe 에 넣지 않는다) / `invite_code`(지인 공유 — 기기 등록) / 기기 토큰
   (등록 응답, 관측기 `hub_token`). 레포엔 `.example` 만 커밋.
 - 판매자명 등 실데이터가 DB 에 쌓인다 — 볼륨은 Pi 로컬(OneDrive 밖), 덤프·DB 를 레포에 넣지 않는다.
 

@@ -103,6 +103,12 @@ MAX_ITEM_NAME_LEN = 128
 MAX_CATEGORY_LEN = 32
 #: 기기 label — 운영자 화면(devices.py list)에 그대로 찍히므로 인쇄 가능 문자만.
 MAX_LABEL_LEN = 64
+#: obs_id 는 "{device}:{13자리 ms}:{12자리 해시}" 라 device 보다 27 길다(HUB-PROTOCOL §3-1).
+#: device_id 를 obs_id 와 같은 128 로 두면 긴 기기명이 device_id 검증은 통과하고 파생 obs_id 는
+#: 반드시 400 이 돼, 그 PC 의 배치가 영구히 격리된다(400 은 재시도 안 함).
+#: 허브가 발급하는 id(`d-`+10hex)는 12자라 여유가 많지만, 관리 시크릿 업로드는 자유 문자열이다.
+MAX_OBS_ID_LEN = 128
+MAX_DEVICE_ID_LEN = MAX_OBS_ID_LEN - len(":") - 13 - len(":") - 12  # 101
 
 CFG_KEY = web.AppKey("cfg", dict)
 DB_KEY = web.AppKey("db", db_mod.Database)
@@ -348,7 +354,7 @@ def validate_upload(body, cfg: dict, now: float) -> tuple:
     if not isinstance(body, dict):
         raise _Bad()
     device_id = body.get("device_id")
-    if not isinstance(device_id, str) or not device_id.strip() or len(device_id) > 128:
+    if not isinstance(device_id, str) or not device_id.strip() or len(device_id) > MAX_DEVICE_ID_LEN:
         raise _Bad(field="device_id")
     obs_list = body.get("observations")
     if not isinstance(obs_list, list) or not obs_list:
@@ -362,7 +368,7 @@ def validate_upload(body, cfg: dict, now: float) -> tuple:
         if not isinstance(obs, dict):
             raise _Bad(index=i)
         obs_id = obs.get("obs_id")
-        if not isinstance(obs_id, str) or not 1 <= len(obs_id) <= 128:
+        if not isinstance(obs_id, str) or not 1 <= len(obs_id) <= MAX_OBS_ID_LEN:
             raise _Bad(index=i, field="obs_id")
         agent_ts = obs.get("agent_ts")
         if not _is_num(agent_ts):

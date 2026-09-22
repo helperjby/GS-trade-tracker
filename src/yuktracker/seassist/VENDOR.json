@@ -1,8 +1,7 @@
 {
-  "source": "C:\\dev\\gersang\\.claude\\worktrees\\yuguijeon-packet-analysis-d6a358",
+  "source": "SEAssist",
   "source_subdir": "src/core",
   "commit": "62e33db519a4bb238c6f0657d87457a97c34d8d1",
-  "branch": "claude/yuguijeon-packet-analysis-d6a358",
   "dirty": false,
   "synced_at": "2026-09-21T08:45:11+00:00",
   "owned": [

@@ -52,18 +52,24 @@ SEAssist PR #306(PR-Y2) **미머지 → 닫음 예정, 이 레포로 이식(PR-Y
 
 ## 현재 상태
 
-- 레포: https://github.com/helperjby/GS-trade-tracker (private). `main` = 부트스트랩(문서만), **PR #1**
+- 레포: https://github.com/helperjby/GS-trade-tracker (**public** — 2026-09-22 공개. 기기명·Pi 주소·사용자명·
+  비공개 레포 경로/브랜치/링크를 문서·PR·커밋 메시지에 적지 않는다). `main` = 부트스트랩(문서만), **PR #1**
   (https://github.com/helperjby/GS-trade-tracker/pull/1, 브랜치 `feat/y1-capture-mode`) 가 코드 전부(28 파일). 이후 변경은 이 레포의 PR 로.
+- **공개 정리(PR #9)의 남은 노출 — 작업 트리만 고쳤다**: 기기명·Pi 사용자명/LAN·tailnet 주소·비공개 레포 PR 링크는
+  ① **git 이력**(`git show <구커밋>:hub/README.md` 로 그대로 읽힌다), ② **머지된 PR #1~#4 본문**(기기명·비공개 레포 링크)에
+  아직 남아 있다. 둘 다 파일 수정으로는 지워지지 않는다 — ①은 이력 재작성(`git filter-repo` + force push, 협업자 합의 필요),
+  ②는 `gh pr edit` 로 본문 교체(단 GitHub 은 본문 편집 이력도 보존한다). 노출된 값은 시크릿이 아니라 주소·이름이므로
+  회전 대상은 없지만, "공개 레포에서 제거됐다"고 가정하지 않는다. 벤더 사본 잔여는 아래 벤더 절 참조.
 
 - 사용자 결정(2026-09-21): 소비자 봇 = 미루봇-IRIS, 허브 = SEAssist 대시보드 서버(Pi) 확장(→ 09-22 대체), 수집기 =
   **SEAssist GUI 가 아닌 별도 경량 프로그램(이 프로젝트, 별도 실행파일)**, 육의전 opcode 는 모름 → 발굴부터.
-- **사용자 결정(2026-09-22)**: ① SEAssist 레포(`15. Gersang auto eating`, `C:\dev\gersang`)에는 더 이상 머지하지 않는다 — 육의전 트랙은
-  전부 이 레포에서. ② 열려 있는 SEAssist PR #306(PR-Y2)도 머지하지 않고 이 레포로 **이식**(PR-Y2'). 이식 원본 = worktree
-  `C:\dev\gersang\.claude\worktrees\market-y2-20260921`(브랜치 `claude/market-y2-20260921`, e905cd1, 커밋 6개) — #306 닫기는 사용자,
+- **사용자 결정(2026-09-22)**: ① SEAssist 레포(비공개)에는 더 이상 머지하지 않는다 — 육의전 트랙은
+  전부 이 레포에서. ② 열려 있는 SEAssist PR #306(PR-Y2)도 머지하지 않고 이 레포로 **이식**(PR-Y2'). 이식 원본 = 비공개 레포의
+  로컬 worktree(경로·브랜치·커밋은 레포에 적지 않는다, 커밋 6개) — #306 닫기는 사용자,
   worktree 는 이식이 끝날 때까지 보존. ③ 허브 = SEAssist dashboard 확장이 아니라 **이 레포의 독립 서버 `hub/`**(aiohttp+sqlite, Pi 별도
   컨테이너·포트 8800). ④ 벤더 사본은 SEAssist main **b54cb73**(= #303·#304·#305 머지 상태; 벤더 모듈 내용은 62e33db 와 동일) 시점에
-  동결 — 이후 변경(프레이머 확장·파서)은 이 레포 소유 코드로, 방식(패치 계층 vs 소유 전환)은 PR-Y2' 계획에서. ⑤ 고정 아카이브
-  `15. Gersang auto eating\packet` 에 9창을 복사하는 "머지 직전 절차"는 폐기(#306 미머지). 지난 세션의 임시 root
+  동결 — 이후 변경(프레이머 확장·파서)은 이 레포 소유 코드로, 방식(패치 계층 vs 소유 전환)은 PR-Y2' 계획에서. ⑤ 비공개 레포의
+  고정 아카이브에 9창을 복사하는 "머지 직전 절차"는 폐기(#306 미머지). 지난 세션의 임시 root
   `%TEMP%\market-y2-corpus`(45창)·`%TEMP%\market-y2-review`(11창)는 이식 검증용으로 남겨 둔다.
 - SEAssist 레포 쪽 선행 변경 = **PR #303**(비공개 레포, 커밋 62e33db, 머지됨): 경로 함수를
   `src/core/ledger_paths.py` 로 분리(wordinput_runner 재수출), `packet_state_source` 의 numpy/PIL
@@ -72,9 +78,14 @@ SEAssist PR #306(PR-Y2) **미머지 → 닫음 예정, 이 레포로 이식(PR-Y
   관측기는 수집 모드만 있다(파서·업로드는 PR-Y2'·PR-Y1b).
 - 벤더 사본은 SEAssist 62e33db 와 일치(`VENDOR.json`, `--check` 통과). 비승격 스모크(`--no-elevate`)는 rc 2(관리자 아님) 로 정상 종료.
   `--check` 는 로컬 체크아웃이 62e33db/b54cb73 벤더 모듈과 같을 때만 통과한다 —
-  09-21 현재 `C:\dev\gersang` 본체는 `codex/monster-sweep`(5e8fdba) 이라 "불일치 6건" 이 뜨지만 벤더 사본은 무변경(`tests/test_vendor.py` 해시 핀 green).
-- **실기기 첫 검증 완료(2026-09-21, 디바이스 DEV-A, Windows Terminal + 한글 IME)**: `run_dev.bat` 로 창 3개
-  (`<OneDrive>\SEAssist\wordinput_review\<디바이스>\packet_discovery\`), 마지막 창(18:08, 547세그, 유실 0, writer 오류 0)에
+  09-21 현재 비공개 레포 본체는 다른 브랜치라 "불일치 6건" 이 뜨지만 벤더 사본은 무변경(`tests/test_vendor.py` 해시 핀 green).
+  **벤더 사본의 실기기명 잔여(공개 노출, 미해결)**: `gersang_protocol.py`(주석에 실기기명 5건 + 날짜별 세션 기록)와
+  `packet_discovery_ledger.py`(운영 대수·OneDrive 연동 여부) 두 파일. **둘 다 `VENDOR.json` 해시 핀 대상**이라 손으로 고치면
+  `test_vendor` 가 깨지고, AGENTS.md "사본을 손으로 고치지 않는다" 규칙에도 걸린다 → PR-Y2' 의 벤더 동결 처리(패치 계층 vs 소유 전환)에서
+  같이 결정한다. GitHub 코드 검색으로 이 기기명들이 이 프로젝트에 매칭된다는 뜻이므로 문서 쪽 치환만으로 가려졌다고 보지 않는다.
+- **실기기 첫 검증 완료(2026-09-21, 실기기 1대, Windows Terminal + 한글 IME)**: `run_dev.bat` 로 창 3개
+  (`<OneDrive>\SEAssist\wordinput_review\<디바이스>\packet_discovery\` — `<디바이스>` 폴더명 = 그 PC 의 기기명,
+  `ledger_paths._device_name`), 마지막 창(18:08, 547세그, 유실 0, writer 오류 0)에
   `market_manual` 라벨 9건 — SEAssist `packet_explore.py list` 에 `market_manual×9` 로 보인다. 라벨에 적은 판매자명이
   CP949 로 s2c 세그먼트 안에서 확인됐고, 프레이머(`timeline`)로는 **opcode `0x321f` · sub 218 · len 489** 프레임
   (창당 1~4회, `초기화` 라벨 직전). 본문은 48B × 10 항목, 아이템명 문자열은 없다(ID). 실데이터는 레포에 넣지 않는다.
