@@ -171,6 +171,23 @@ _POPUP_MARKER_OPCODE = int.from_bytes(_WORDINPUT_POPUP_MARKER[3:5], "little")
 _POPUP_MARKER_SUBTYPE = _WORDINPUT_POPUP_MARKER[LEN_PREFIX + SUBTYPE_OFFSET]
 _POPUP_MARKER_BODY_LEN = len(_WORDINPUT_POPUP_MARKER) - LEN_PREFIX
 
+# ─────────────────────────── 육의전 목록 (H-2609-08, B) ───────────────────────────
+#: 육의전(유저 거래소) 목록 응답 — 유저가 육의전을 열·검색·페이지 넘길 때만 s2c 로 온다
+#: (docs/PACKET-MARKET-2026-09-21.md). 관측된 번호만 — 패치로 옮겨 가면 여기 추가한다.
+OP_MARKET_LIST = 0x321F
+MARKET_OPCODES = frozenset({OP_MARKET_LIST})
+#: 본문 = 9B 헤더(magic·opcode·reserved·[4]=0·총 페이지 u16·행 수 u16) + 48B × 행 수.
+MARKET_HEADER_LEN = 9
+MARKET_ROW_LEN = 48
+_MARKET_COUNT_SLICE = slice(7, 9)
+#: 행 수 상한 — 전량 대기·큐 수용의 상한이다. 관측 최대는 10(페이지 크기)이지만 10 을 판별
+#: 상수로 박지 않는다(꼬리 상수 일반화로 기각된 H-2607-05 전례). 구조 정합(`len == 9 + 48×count`)
+#: 이 강한 검사이고 이 값은 쓰레기 프레임의 대기 상한(≤3,081B ≈ TCP 세그먼트 2개)일 뿐이다.
+#: 10 초과는 파서(`packet_market`)가 anomaly 로 표시한다.
+MARKET_MAX_ROWS = 64
+_MARKET_FULL_WAIT_MAX_BODY = MARKET_HEADER_LEN + MARKET_ROW_LEN * MARKET_MAX_ROWS
+_MARKET_QUEUE_MAX = 64
+
 
 def wordinput_kind(opcode: int, body: bytes) -> str | None:
     """Classify a complete candidate body; unknown layouts return None."""
@@ -235,6 +252,7 @@ __all__ = [
     "StreamFramer",
     "BattleEvent",
     "WordinputObservation",
+    "MarketObservation",
     "wordinput_kind",
     "FramerStats",
     "FlowStats",
@@ -244,6 +262,8 @@ __all__ = [
     "is_fullness",
     "fullness_value",
     "is_jochul",
+    "is_market",
+    "market_row_count",
     "is_party_table",
     "parse_party_table",
     "PartyRecord",
@@ -265,6 +285,11 @@ __all__ = [
     "OP_JOCHUL",
     "OP_JOCHUL_PATCHED",
     "JOCHUL_OPCODES",
+    "OP_MARKET_LIST",
+    "MARKET_OPCODES",
+    "MARKET_HEADER_LEN",
+    "MARKET_ROW_LEN",
+    "MARKET_MAX_ROWS",
     "SUBTYPE_OFFSET",
     "ENTER_SUBTYPE_VALUE",
     "EXIT_SUBTYPE_VALUE",
@@ -281,6 +306,18 @@ __all__ = [
 class WordinputObservation:
     ts: float  # decoder completion timestamp; not physical popup onset
     kind: str  # open | refresh; neither implies that the popup is still open
+    opcode: int
+    body: bytes
+
+
+@dataclass(frozen=True)
+class MarketObservation:
+    """육의전 목록 프레임 1개(전량 대기 완료) — 파싱은 `packet_market.parse_market_page` 몫.
+
+    프레이머는 파싱하지 않는다(stdlib·상대 import 0 계약). `ts` 는 완성 시점(재정렬 흡수분은
+    조립 가능해진 시점)이지 물리 도착 시각이 아니다 — 페이지는 신선도의 기준이 되는 스냅샷이다.
+    """
+    ts: float
     opcode: int
     body: bytes
 
@@ -470,6 +507,29 @@ def is_jochul(opcode: int, body: bytes) -> bool:
     if opcode not in JOCHUL_OPCODES or len(body) != _JOCHUL_BODY_LEN:
         return False
     return body[0] == MAGIC and int.from_bytes(body[1:5], "little") == opcode
+
+
+def market_row_count(body: bytes) -> int:
+    """육의전 목록 헤더의 행 수(`body[7:9]` u16 LE). 길이 검사는 호출자 몫."""
+    return int.from_bytes(body[_MARKET_COUNT_SLICE], "little")
+
+
+def is_market(opcode: int, body: bytes) -> bool:
+    """육의전 목록 응답 프레임인가 — 번호(`MARKET_OPCODES`) + 헤더 + 길이 정합.
+
+    `len(body) == 9 + 48 × count` 가 판별의 핵심이다(코퍼스 40/40, H-2609-08). `body[4]` 는
+    판별 조건이 **아니다** — "항상 0" 은 C 등급 관찰이라 상수로 박으면 H-2607-05(꼬리 상수)
+    가 재발한다; 파서(`packet_market`)가 anomaly 로 남긴다. 헤더는 magic 과 opcode(body[1:3])·
+    예약 바이트 body[3] 을 대조한다. 행 수 상한(`MARKET_MAX_ROWS`)은 대기·큐 상한과 같은 값이다.
+    """
+    if opcode not in MARKET_OPCODES or len(body) < MARKET_HEADER_LEN:
+        return False
+    if (body[0] != MAGIC or int.from_bytes(body[1:3], "little") != opcode
+            or body[3] != 0):
+        return False
+    count = market_row_count(body)
+    return (count <= MARKET_MAX_ROWS
+            and len(body) == MARKET_HEADER_LEN + MARKET_ROW_LEN * count)
 
 
 # `_probe` 반환 규약 — 오프라인 `_frame_len_at` 이 둘을 뭉뚱그려 None 으로 돌려주던 것을
@@ -783,15 +843,25 @@ class StreamFramer:
     (`_chain_start`) — 같은 순간에 k-락이 잡혔을 때와 같은 프레임을 보므로 오프라인 재생과
     어긋나지 않는다. 그 백로그 프레임의 ts 는 일반 락과 똑같이 락 시각이다.
     끄려면 ``enter_anchor=False``.
+
+    육의전 목록 관측 (opt-in)
+    -------------------------
+    ``observe_market=True`` 면 `MARKET_OPCODES` 프레임을 자체 상한(9 + 48 × `MARKET_MAX_ROWS`)
+    까지 전량 기다려 `take_market()` 큐에 raw 본문으로 넣는다(파싱은 `packet_market`). 기본
+    off — 드레인하지 않는 소비자에서 큐가 상한까지 차 `market_dropped` 가 오르는 일을 막고,
+    기존 소비자의 바이트 동작을 그대로 둔다. 락 앵커에는 관여하지 않는다(H-2609-08 B —
+    관측 전용 배선, 2026-09-21).
     """
 
     def __init__(self, lock_k: int = DEFAULT_LOCK_K, *,
                  retain_exit_body: bool = False,
                  observe_wordinput: bool = False,
+                 observe_market: bool = False,
                  popup_anchor: bool = True,
                  enter_anchor: bool = True) -> None:
         self.retain_exit_body = retain_exit_body
         self.observe_wordinput = observe_wordinput
+        self.observe_market = observe_market
         self.popup_anchor = popup_anchor
         self.enter_anchor = enter_anchor
         # ENTER 앵커 탐색 재개 지점 — 이 앞의 후보는 전부 확정 거부됐다(버퍼 offset).
@@ -800,6 +870,11 @@ class StreamFramer:
         self._anchor_locked = False
         self._wordinput: list[WordinputObservation] = []
         self.wordinput_dropped = 0
+        # 육의전 목록(opt-in) — 큐·유실·거부. 거부 = 번호는 맞는데 모양(9+48×count·헤더)이 안
+        # 맞거나 상한을 넘어 조기 발화된 프레임(본문 미보유) — 클라 패치 드리프트 진단축.
+        self._market: list[MarketObservation] = []
+        self.market_dropped = 0
+        self._market_rejected = 0
         self._lock_k = max(1, int(lock_k))
         self._buf = bytearray()
         self._locked = False
@@ -924,10 +999,23 @@ class StreamFramer:
         out, self._wordinput = self._wordinput, []
         return out
 
+    def take_market(self) -> list[MarketObservation]:
+        """읽어둔 육의전 목록 프레임(opt-in)을 꺼내 비운다. 드레인하지 않으면 상한까지 쌓인다."""
+        out, self._market = self._market, []
+        return out
+
+    @property
+    def market_rejected(self) -> int:
+        """육의전 번호지만 `is_market`(9+48×count·헤더)에 떨어졌거나 상한 초과로 조기 발화된
+        프레임 누적 수 — 0 이 아니면 본문 드리프트 의심(도착 자체는 했다는 뜻)."""
+        return self._market_rejected
+
     def reset(self) -> None:
         """파스 상태만 비운다 — **누적 카운터는 보존**한다(관측 연속성)."""
         self.wordinput_dropped += len(self._wordinput)
         self._wordinput.clear()
+        self.market_dropped += len(self._market)
+        self._market.clear()
         self._buf.clear()
         self._locked = False
         self._skip = 0
@@ -941,7 +1029,8 @@ class StreamFramer:
         self._prev_companion = None
         self._marker_waiting = False
 
-    def feed(self, data: bytes, ts: float, *, wordinput_ts: float | None = None) -> list[BattleEvent]:
+    def feed(self, data: bytes, ts: float, *, wordinput_ts: float | None = None,
+             market_ts: float | None = None) -> list[BattleEvent]:
         events: list[BattleEvent] = []
         if not data:
             return events
@@ -1053,6 +1142,13 @@ class StreamFramer:
             word_shape = _WORDINPUT_SHAPES.get(opcode) if self.observe_wordinput else None
             if word_shape is not None and body_len == word_shape[0] and n < total:
                 break
+            # 육의전 목록(opt-in)도 동일 — 행 수가 body[7:9] 라 `need`(8B) 밖이고 본문이 489B
+            # 까지라 OP_STATUS 의 256B 상한에 안 든다. 자체 상한(9+48×MARKET_MAX_ROWS)까지
+            # 전량 기다린다. 상한 밖은 종전처럼 조기 발화하고 아래에서 거부로 센다.
+            market_wait = (self.observe_market and opcode in MARKET_OPCODES
+                           and body_len <= _MARKET_FULL_WAIT_MAX_BODY)
+            if market_wait and n < total:
+                break
 
             self._frames += 1
             # ⚠️ max() — 재정렬 흡수 후 drain 은 **보류 당시의 ts** 로 재생되므로,
@@ -1070,6 +1166,16 @@ class StreamFramer:
                         self._wordinput.append(WordinputObservation(observed_at, word_shape[1], opcode, body))
                     else:
                         self.wordinput_dropped += 1
+            if self.observe_market and opcode in MARKET_OPCODES:
+                body = bytes(buf[LEN_PREFIX:total]) if market_wait else b""
+                if market_wait and is_market(opcode, body):
+                    if len(self._market) < _MARKET_QUEUE_MAX:
+                        self._market.append(MarketObservation(
+                            ts if market_ts is None else market_ts, opcode, body))
+                    else:
+                        self.market_dropped += 1
+                else:
+                    self._market_rejected += 1
             if opcode == OP_STATUS:
                 body = bytes(buf[LEN_PREFIX:total])
                 if is_fullness(opcode, body):
@@ -1177,10 +1283,12 @@ class StreamFramer:
         # "기대 opcode 소멸" 판정 근거로 쓸 수 없게 되므로 두 opcode 는 항상 통과시킨다.
         # 조철 번호도 같다 — 수백 전투에 한 번 오는 번호라 긴 세션에선 상한이 먼저 차고,
         # 그러면 헬스 줄의 `30dd=`/`30df=` 가 "안 왔다"와 "못 셌다"를 가르지 못한다.
+        # 육의전 번호도 같다 — 유저가 육의전을 열 때만 오는 희소 번호라 긴 세션에선 상한이
+        # 먼저 차고, 그러면 `321f=` 가 "안 왔다"와 "못 셌다"를 가르지 못한다.
         if len(self._opcodes) >= _OPCODE_HIST_CAP and opcode not in (
             OP_BATTLE_ENTER,
             OP_BATTLE_EXIT,
-        ) and opcode not in JOCHUL_OPCODES:
+        ) and opcode not in JOCHUL_OPCODES and opcode not in MARKET_OPCODES:
             self._opcodes_dropped += 1
             return
         self._opcodes[opcode] = 1
@@ -1218,11 +1326,13 @@ class FlowDecoder:
         reorder_budget_sec: float = 1.0,
         retain_exit_body: bool = False,
         observe_wordinput: bool = False,
+        observe_market: bool = False,
         popup_anchor: bool = True,
         enter_anchor: bool = True,
     ) -> None:
         self.framer = StreamFramer(lock_k, retain_exit_body=retain_exit_body,
                                    observe_wordinput=observe_wordinput,
+                                   observe_market=observe_market,
                                    popup_anchor=popup_anchor,
                                    enter_anchor=enter_anchor)
         self._budget_bytes = reorder_budget_bytes
@@ -1277,6 +1387,18 @@ class FlowDecoder:
     @property
     def wordinput_dropped(self) -> int:
         return self.framer.wordinput_dropped
+
+    def take_market(self) -> list[MarketObservation]:
+        """`feed_segment` 직후에 꺼낸다 — 재정렬 흡수분까지 함께 나온다."""
+        return self.framer.take_market()
+
+    @property
+    def market_dropped(self) -> int:
+        return self.framer.market_dropped
+
+    @property
+    def market_rejected(self) -> int:
+        return self.framer.market_rejected
 
     @property
     def stats(self) -> FlowStats:
@@ -1384,7 +1506,8 @@ class FlowDecoder:
                     continue
                 self._dup_bytes += overlap
                 data = data[overlap:]
-            events.extend(self.framer.feed(data, ts, wordinput_ts=ready_ts))
+            events.extend(self.framer.feed(data, ts, wordinput_ts=ready_ts,
+                                           market_ts=ready_ts))
             self._next = (self._next + len(data)) % _SEQ_MOD
         if not self._pending:
             self._gap_since = None

@@ -50,9 +50,19 @@
     }
   },
   "repo_own": [
+    "VENDOR.json",
     "__init__.py",
     "config.py",
-    "VENDOR.json"
+    "packet_market.py"
   ],
-  "diverged": []
+  "diverged": [
+    {
+      "file": "gersang_protocol.py",
+      "why": "PR-Y2' 육의전 프레이머 확장 — MARKET_OPCODES·is_market·market_row_count·MarketObservation, StreamFramer(observe_market=) 전량 대기(≤9+48×64B)·take_market·market_dropped/rejected, FlowDecoder 패스스루와 market_ts. 상류에는 없는 기능이다(SEAssist PR 미머지)."
+    },
+    {
+      "file": "packet_state_source.py",
+      "why": "PR-Y2' 엔진 배선 — PacketStateSource(market_cb=)·헬스 7종·세그먼트마다 observe_market 동기화·거부 델타 경고·헬스 줄 market/mrej. 상류에는 없는 기능이다(SEAssist PR 미머지)."
+    }
+  ]
 }

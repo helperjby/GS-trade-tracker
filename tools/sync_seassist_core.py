@@ -47,6 +47,7 @@ OWNED = (
     "log_history.py",
     "logger.py",
     "packet_discovery_ledger.py",
+    "packet_market.py",
     "packet_state_source.py",
     "pcap_ffi.py",
     "tcp_flow_map.py",
