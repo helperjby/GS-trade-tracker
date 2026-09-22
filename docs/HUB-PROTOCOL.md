@@ -62,11 +62,12 @@ CREATE TABLE market_item_names (        -- 학습 표: 관측기가 보낸 id→
   first_seen_ts REAL NOT NULL, last_seen_ts REAL NOT NULL, last_device TEXT NOT NULL);
 CREATE TABLE devices (                  -- 초대 코드로 자기등록한 관측기 기기 (§3-0); prune 대상 아님
   device_id TEXT PRIMARY KEY,           -- 허브 발급 "d-"+10hex — 사용자 PC 이름은 다른 사용자와 겹칠 수 있어 식별자로 안 쓴다
-  label TEXT NOT NULL DEFAULT '',       -- 사용자 표시명(display_name·hostname), 인쇄 가능 문자 ≤64
+  label TEXT NOT NULL DEFAULT '',       -- 기기가 등록 때 스스로 적은 표시명, 인쇄 가능 문자 ≤64 (신뢰하지 않는다)
+  alias TEXT NOT NULL DEFAULT '',       -- 관리자가 붙이는 별칭(§3-6 devices.py alias) — 표시는 이쪽을 앞세운다
   token_hash TEXT NOT NULL UNIQUE,      -- sha256(token) hex — 토큰 원문은 등록 응답 1회만, 저장하지 않는다
   created_ts REAL NOT NULL, created_ip TEXT,
   last_seen_ts REAL, upload_count INTEGER NOT NULL DEFAULT 0,   -- 인증된 업로드마다 last_seen, 저장 성공이면 +1
-  revoked_ts REAL, note TEXT NOT NULL DEFAULT '');              -- 취소 = 다음 요청부터 403 (요청마다 조회, 캐시 없음)
+  revoked_ts REAL, note TEXT NOT NULL DEFAULT '');              -- 제거 = 다음 요청부터 403 (요청마다 조회, 캐시 없음)
 ```
 
 - `listing_key` 에 아이템 id·판매자를 붙이는 이유: 등록 id 가 재사용돼도 다른 판매 건이 섞이지 않게. 같은 등록의
@@ -79,9 +80,10 @@ CREATE TABLE devices (                  -- 초대 코드로 자기등록한 관�
 - 이름 학습: 행에 `item_name` 이 있으면 `market_item_names` 에 upsert. 조회 때 행의 `item_name` 이 NULL 이면 이 표로
   보충한다(`COALESCE`) — 표가 없는 PC 의 관측도 다른 PC 가 한 번이라도 이름을 보냈으면 검색된다.
 - 기기 표: market 표는 서버 이벤트루프만 쓰지만 `devices` 는 관리 CLI `hub/devices.py`(별도 프로세스, §3-6)가 드물게 한 행 UPDATE 를
-  넣는다 — WAL + busy timeout. 취소된 기기·재등록으로 버려진 옛 행은 지우지 않는다(`stats` 에 남아 추적). **활성** 의 정의는 하나
-  (`_ACTIVE_WHERE`, 정원 §3-0 과 `stats.devices_active`): 미취소 + 최근 `device_idle_days`(30) 안 업로드, 한 번도 안 올린 기기는 등록
-  뒤 하루 — 버려진 행·고아 등록은 시간이 지나면 정원에서 빠진다(취소하지 않아도).
+  넣는다 — WAL + busy timeout. 제거된 기기·재등록으로 버려진 옛 행은 지우지 않는다(`stats` 에 남아 추적). **"등록"의 정의는 하나**
+  (`_ACTIVE_WHERE`, 정원 §3-0 과 `stats.devices_registered`): `revoked_ts IS NULL`. **업로드 여부·마지막 업로드 시각은 정원에 영향을
+  주지 않는다** — 2026-09-22 사용자 결정으로 활성 여부에 따른 자동 제외는 두지 않는다(아는 사람 최대 7명에게 직접 배포하므로 명단은
+  관리자가 관리한다). 한 번도 안 올린 기기도 자리를 차지하고, 자리를 비우는 유일한 길은 `devices.py revoke`(§3-6).
 
 ## 2. 정규화 한 정의
 
@@ -111,7 +113,7 @@ CREATE TABLE devices (                  -- 초대 코드로 자기등록한 관�
 | `403 {"ok":false,"error":"registration_closed"}` | 설정 `invite_code` 가 비어 있음 |
 | `400 {"ok":false,"error":"bad_request","field"?}` | 비 JSON·dict 아님 / `invite_code` 가 문자열 아님·공백뿐 / `label` 이 문자열 아님·64자 초과·제어 문자 |
 | `401 {"ok":false,"error":"bad_invite"}` | 코드 불일치 |
-| `403 {"ok":false,"error":"registration_full"}` | **활성** 기기(§1: 미취소 + `device_idle_days` 안 업로드, 미업로드는 등록 뒤 하루) ≥ `max_devices` — 5xx 가 아닌 이유: 관측기가 조용히 재시도하지 않게 |
+| `403 {"ok":false,"error":"registration_full"}` | **등록된**(미제거) 기기 수 ≥ `max_devices`(7) — 업로드 여부와 무관하다(§1). 관리자가 `devices.py revoke` 로 한 자리를 비워야 새 기기가 들어온다. 5xx 가 아닌 이유: 관측기가 조용히 재시도하지 않게 |
 | `500 {"ok":false,"error":"storage_error","server_time"}` | DB 오류 |
 
 - `device_id` 는 허브가 발급한다. 관측기는 `device_id`·`token` 을 저장하고 이후 업로드의 `device_id` 에 **그 값**을 쓴다(§3-1) —
@@ -221,7 +223,7 @@ CREATE TABLE devices (                  -- 초대 코드로 자기등록한 관�
  "fresh_listings":210,"fresh_sec":86400.0,"latest_recv_ts":1758500055.2,
  "devices":[{"device_id":"d-3f9a1c7e2b","label":"DESKTOP-ABC","observations":300,"last_recv_ts":…},   // label: 등록 기기의 표시명,
             {"device_id":"DEV-B","label":null,"observations":112,"last_recv_ts":…}],                 //        관리 시크릿 업로드는 null
- "devices_registered":7,"devices_active":5,"devices_revoked":1}   // devices 표 집계: 미취소 전체 / 활성(§1 정의 — 정원 기준) / 취소
+ "devices_registered":5,"devices_revoked":1,"devices_max":7}      // devices 표 집계: 등록(미제거 = 정원이 세는 수) / 제거 / 정원
 ```
 
 ### 3-5. `GET /` — 무인증 상태 줄
@@ -231,17 +233,18 @@ CREATE TABLE devices (                  -- 초대 코드로 자기등록한 관�
 ### 3-6. 기기 관리 — `hub/devices.py` (HTTP 아님, Pi 에서)
 
 ```bash
-docker compose exec yuktracker-hub python devices.py list                      # device_id label created last_seen uploads revoked note
-docker compose exec yuktracker-hub python devices.py revoke <device_id> --note "사유"
-docker compose exec yuktracker-hub python devices.py revoke --stale 30 [--note "…"]   # 30일 넘게 업로드 없는 기기 일괄 취소(메모 없으면 stale>30d)
+docker compose exec yuktracker-hub python devices.py list                      # device_id alias label created last_seen uploads revoked note
+docker compose exec yuktracker-hub python devices.py revoke <device_id> --note "사유"   # 명단에서 제거 — 정원 자리 1개 반환
 docker compose exec yuktracker-hub python devices.py unrevoke <device_id>
+docker compose exec yuktracker-hub python devices.py alias <device_id> "<별칭>"        # 빈 문자열이면 해제
 docker compose exec yuktracker-hub python devices.py note <device_id> "메모"
 ```
 
-서버와 같은 SQLite 파일(`HUB_DB_PATH`)에 직접 쓴다 — 서버는 요청마다 토큰을 조회하므로 취소는 다음 업로드부터 `403 device_revoked`.
-HTTP 관리 라우트를 두지 않는 이유: 공개 표면을 늘리지 않고 셸에 시크릿이 필요 없다. 이미 취소된 기기를 다시 취소해도 원래
-`revoked_ts` 는 보존(메모만 갱신), 활성 기기의 `unrevoke` 는 "이미 활성" 안내. 토큰 해시는 출력하지 않고, label·note 의 제어 문자는
-`?`, 전각 문자는 표시 폭 2 로 정렬한다. 없는 DB 경로는 만들지 않는다(exit 1).
+서버와 같은 SQLite 파일(`HUB_DB_PATH`)에 직접 쓴다 — 서버는 요청마다 토큰을 조회하므로 제거는 다음 업로드부터 `403 device_revoked`.
+HTTP 관리 라우트를 두지 않는 이유: 공개 표면을 늘리지 않고 셸에 시크릿이 필요 없다. 명단을 바꾸는 것은 **관리자뿐**이다 — 시간이 지나
+저절로 빠지는 기기는 없다(§1). 이미 제거된 기기를 다시 제거해도 원래 `revoked_ts` 는 보존(메모만 갱신), 등록 상태인 기기의 `unrevoke`
+는 "이미 등록 상태" 안내. `alias` 는 관리자가 붙이는 별칭이고 `label` 은 기기가 스스로 적은 값이라 서로 덮지 않는다. 토큰 해시는
+출력하지 않고, alias·label·note 의 제어 문자는 `?`, 전각 문자는 표시 폭 2 로 정렬한다. 없는 DB 경로는 만들지 않는다(exit 1).
 
 ## 4. 시각·신선도
 
@@ -269,7 +272,7 @@ HTTP 관리 라우트를 두지 않는 이유: 공개 표면을 늘리지 않고
 
 공개·등록(2026-09-22): `public_port`(8801 — 공개 리스너, `port` 와 달라야 기동) `invite_code`(앞뒤 공백을 벗긴 뒤 비어 있으면 등록
 닫힘; 있으면 **8자 이상**, 예시값 `CHANGE-ME-INVITE`·`secret` 과 같은 값은 기동 거부 — 초대 코드는 커뮤니티에 공유하는 반공개 값)
-`max_devices`(500, §1 활성 기준) `device_idle_days`(30) `admin_public`(false) `proxy_header`(`Tailscale-Funnel-Request`; Cloudflare
+`max_devices`(7, §1 등록 기준 — 아는 사람에게 직접 배포) `admin_public`(false) `proxy_header`(`Tailscale-Funnel-Request`; Cloudflare
 Tunnel 로 바꾸면 `CF-Connecting-IP`) `register_limit_per_hour`(10) `upload_limit_per_min`(120) `auth_fail_limit_per_min`(30). 설정은
 기동 때 읽는다 — 초대 코드 교체는 `config.json` 수정 뒤 `docker compose restart`.
 
@@ -290,3 +293,14 @@ Tunnel 로 바꾸면 `CF-Connecting-IP`) `register_limit_per_hour`(10) `upload_l
   (헤더 부재 = 직접 접속이라는 fail-open 제거, 헤더는 2차 방어), 인증 실패 집계는 토큰 검사 뒤(공유 NAT), XFF 없는 공개 요청은
   `public:?`, 정원 = 활성 정의(`device_idle_days` + 미업로드 하루)·`revoke --stale`, 기기 기록은 관측과 같은 트랜잭션 + 거부도 last_seen,
   등록 본문 4KiB(411/413), 429 가 취소 검사보다 먼저, 초대 코드 strip, CLI 중복 취소 보존·전각 폭, README 게이트는 더미 Bearer.
+- 2026-09-22 v1 기기 명단은 관리자가 관리(사용자 결정): 배포 대상은 **아는 사람 최대 7명**이라 ① `max_devices` 기본 500 → **7**,
+  ② **활성 여부에 따른 자동 제외 폐기** — `device_idle_days`·미업로드 유예·`devices.py revoke --stale` 을 없애고 "등록"의 정의를
+  `revoked_ts IS NULL` 하나로(§1). 한 번도 안 올린 기기도 자리를 차지하고 자리를 비우는 것은 `revoke` 뿐이다. ③ 관리자 별칭
+  `devices` 표 `alias` + `devices.py alias <device_id> "<별칭>"`(§3-6) — 기기가 스스로 적은 `label` 과 별개, 표시·로그는 별칭 우선.
+  §3-4 는 `devices_active` 대신 `devices_max`(설정된 정원)를 싣고 `devices[].alias` 가 는다.
+- 2026-09-22 v1 고정 기기 전제의 최소 방어(사용자 결정 — 배포 대상이 아는 사람 고정 기기라 XFF 우회 방어·자가 치유는 하지
+  않는다): ① compose 가 공개 리스너를 `127.0.0.1:8801:8801` 로 루프백에만 낸다(Funnel 은 같은 호스트에서 프록시하므로
+  그대로 동작, LAN 직접 접속 경로만 사라진다). ② `request.json()` 의 `except` 에 `LookupError` 추가 — `Content-Type` 의
+  charset 이 모르는 인코딩이면 무인증 register 가 500 + 트레이스백을 쌓던 것을 400 으로. ③ 모든 쓰기를 `Database._tx`
+  (commit/rollback 보장)로 통과 — `prune` 의 두 DELETE 와 `touch_device` 가 잠금으로 실패해도 암묵 트랜잭션이 남지
+  않는다(남으면 그 연결이 낡은 WAL 스냅샷을 붙들어 `devices.py` 의 제거가 안 먹고 다른 프로세스 쓰기가 막힌다).

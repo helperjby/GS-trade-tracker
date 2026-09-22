@@ -1,5 +1,5 @@
-"""devices.py CLI — list/revoke/unrevoke/note · --stale 일괄 취소 · 이미 취소/활성 안내 · 미지 기기 exit 1 · 없는 DB 는
-만들지 않음 · 경로 해석 · 토큰 해시 미출력 · 전각 폭 정렬 · 서버가 연 DB 에 대한 취소가 즉시 먹는다(별도 연결·WAL)."""
+"""devices.py CLI — list/revoke/unrevoke/alias/note · 이미 제거/등록 안내 · 미지 기기 exit 1 · 없는 DB 는
+만들지 않음 · 경로 해석 · 토큰 해시 미출력 · 전각 폭 정렬 · 서버가 연 DB 에 대한 제거가 즉시 먹는다(별도 연결·WAL)."""
 from __future__ import annotations
 
 import asyncio
@@ -41,18 +41,18 @@ def test_cli_list_revoke_unrevoke_note_roundtrip(tmp_path):
     text = out.getvalue()
     assert a in text and b in text and "PC-A" in text and "PC-B" in text
     assert "ab" * 32 not in text and "cd" * 32 not in text
-    assert "2대 (활성 2 / 취소 0)" in text
+    assert "2행 (등록 2 / 제거 0)" in text
     assert text.splitlines()[0].split() == list(cli._COLUMNS)
 
     out = io.StringIO()
     assert cli.main(["--db", path, "revoke", a, "--note", "spam\x1b[0m"], out=out, clock=lambda: T0 + 500) == 0
-    assert "취소됨" in out.getvalue()
+    assert "제거됨" in out.getvalue()
     da = _list(path)[a]
     assert da["revoked_ts"] == T0 + 500 and da["note"] == "spam?[0m"    # 제어 문자는 ? 로
 
-    out = io.StringIO()   # 두 번째 취소 — 원래 시각 보존, 메모만 갱신
+    out = io.StringIO()   # 두 번째 제거 — 원래 시각 보존, 메모만 갱신
     assert cli.main(["--db", path, "revoke", a, "--note", "again"], out=out, clock=lambda: T0 + 900) == 0
-    assert "이미 취소됨" in out.getvalue()
+    assert "이미 제거됨" in out.getvalue()
     da = _list(path)[a]
     assert da["revoked_ts"] == T0 + 500 and da["note"] == "again"
 
@@ -62,42 +62,43 @@ def test_cli_list_revoke_unrevoke_note_roundtrip(tmp_path):
 
     out = io.StringIO()
     assert cli.main(["--db", path, "list"], out=out) == 0
-    assert "2대 (활성 1 / 취소 1)" in out.getvalue() and "again" in out.getvalue()
+    assert "2행 (등록 1 / 제거 1)" in out.getvalue() and "again" in out.getvalue()
 
     out = io.StringIO()
-    assert cli.main(["--db", path, "unrevoke", b], out=out) == 0          # 활성인 기기 — 아무것도 안 바꾸고 안내
-    assert "이미 활성" in out.getvalue()
+    assert cli.main(["--db", path, "unrevoke", b], out=out) == 0          # 등록 상태 — 아무것도 안 바꾸고 안내
+    assert "이미 등록 상태" in out.getvalue()
     out = io.StringIO()
     assert cli.main(["--db", path, "unrevoke", a], out=out) == 0
     assert "복구됨" in out.getvalue()
     assert _list(path)[a]["revoked_ts"] is None and _list(path)[a]["note"] == "again"   # 메모는 남는다
 
 
-def test_cli_revoke_stale_bulk(tmp_path):
+def test_cli_alias_set_clear_and_unknown_device(tmp_path):
+    """관리자 별칭 — 기기가 스스로 적은 label 은 건드리지 않고, 목록에 별도 열로 보인다."""
     path = str(tmp_path / "hub.db")
-    d = db_mod.Database(path)
-    now = T0 + 60 * DAY
-    fresh = d.create_device("fresh", "h1", now - 10 * DAY, None)
-    d.touch_device(fresh, now - 1 * DAY)
-    never = d.create_device("never", "h2", now - 40 * DAY, None)              # 등록만, 40일
-    idle = d.create_device("idle", "h3", now - 50 * DAY, None)
-    d.touch_device(idle, now - 31 * DAY)                                       # 31일 전 마지막
-    noted = d.create_device("noted", "h4", now - 50 * DAY, None)
-    d.set_device_note(noted, "keep")
-    already = d.create_device("already", "h5", now - 50 * DAY, None)
-    d.set_device_revoked(already, now - 5 * DAY)
-    d.close()
+    a, b = _seed(path)
     out = io.StringIO()
-    assert cli.main(["--db", path, "revoke", "--stale", "30"], out=out, clock=lambda: now) == 0
-    assert "일괄 취소: 3대" in out.getvalue()
-    rows = _list(path)
-    assert rows[fresh]["revoked_ts"] is None
-    assert rows[never]["revoked_ts"] == now and rows[never]["note"] == "stale>30d"
-    assert rows[idle]["revoked_ts"] == now
-    assert rows[noted]["revoked_ts"] == now and rows[noted]["note"] == "keep"      # 있는 메모는 덮지 않는다
-    assert rows[already]["revoked_ts"] == now - 5 * DAY                            # 이미 취소된 행은 그대로
-    # 인자 검사: device_id 와 --stale 은 하나만, --stale 은 1 이상
-    for argv in (["revoke"], ["revoke", fresh, "--stale", "3"], ["revoke", "--stale", "0"]):
+    assert cli.main(["--db", path, "alias", a, "  형 PC  "], out=out) == 0
+    assert "별칭 저장" in out.getvalue()
+    row = _list(path)[a]
+    assert (row["alias"], row["label"]) == ("형 PC", "PC-A")        # 앞뒤 공백은 벗기고 label 은 그대로
+
+    out = io.StringIO()                                            # 제어 문자는 ? 로(터미널에 그대로 찍힌다)
+    assert cli.main(["--db", path, "alias", b, "esc[31m"], out=out) == 0
+    assert _list(path)[b]["alias"] == "esc?[31m"
+
+    out = io.StringIO()
+    assert cli.main(["--db", path, "list"], out=out) == 0
+    text = out.getvalue()
+    assert "형 PC" in text and text.splitlines()[0].split() == list(cli._COLUMNS)
+
+    out = io.StringIO()                                            # 빈 문자열 = 해제
+    assert cli.main(["--db", path, "alias", a, ""], out=out) == 0
+    assert "별칭 해제" in out.getvalue() and _list(path)[a]["alias"] == ""
+
+    assert cli.main(["--db", path, "alias", "d-0000000000", "x"], out=io.StringIO()) == 1   # 미지 기기
+
+    for argv in (["revoke"], ["alias", a], ["revoke", a, "--stale", "3"]):   # --stale 은 이제 없다
         with pytest.raises(SystemExit) as ei:
             cli.main(["--db", path, *argv], out=io.StringIO())
         assert ei.value.code == 2

@@ -74,10 +74,10 @@ DEFAULTS = {
     "max_agent_ts_ahead_sec": 86400,
     #: 초대 코드 — 빈 문자열이면 등록 닫힘(§3-0). 8자 이상, 예시값·secret 와 같은 값은 기동 거부.
     "invite_code": "",
-    #: 활성 기기 정원 — 넘으면 403 registration_full. "활성" = 미취소 + 최근 device_idle_days 안에 업로드
-    #: (한 번도 안 올린 기기는 등록 뒤 하루만) — 재설치로 버려진 옛 행이 정원을 영원히 차지하지 않는다.
-    "max_devices": 500,
-    "device_idle_days": 30,
+    #: 기기 정원 — 넘으면 403 registration_full. 세는 대상은 **미제거 기기 전부**(업로드 여부 무관).
+    #: 2026-09-22 사용자 결정: 아는 사람에게 직접 배포(최대 7명), 활성 여부에 따른 자동 제외는 두지 않는다 —
+    #: 자리를 비우는 것은 관리자의 `devices.py revoke` 뿐이다.
+    "max_devices": 7,
     #: true 면 공개 요청에서도 관리 시크릿을 받는다. 기본 false — 조회 라우트는 직접 접속 전용.
     "admin_public": False,
     #: 관리 리스너에서 이 헤더가 있으면 공개 요청(tailscaled 가 Funnel 요청에 붙인다). Cloudflare Tunnel 이면 "CF-Connecting-IP".
@@ -90,8 +90,6 @@ DEFAULTS = {
 CLIENT_MAX_SIZE = 4 * 1024 * 1024
 #: 등록 본문은 초대 코드 + label 뿐 — 무인증 라우트라 큰 본문은 파싱 전에 자른다.
 MAX_REGISTER_BODY = 4096
-#: 한 번도 업로드하지 않은 기기가 "활성"으로 세어지는 기간(등록 직후 첫 업로드까지의 여유).
-UNSEEN_GRACE_SEC = 86400
 ENV_DB_PATH = "HUB_DB_PATH"
 MIN_SECRET_LEN = 16
 PLACEHOLDER_SECRETS = frozenset({"CHANGE-ME"})
@@ -151,7 +149,7 @@ def load_config(path: str, env=None) -> dict:
             raise SystemExit(f"config: '{key}' 는 1~65535 정수여야 합니다")
     if cfg["port"] == cfg["public_port"]:
         raise SystemExit("config: 'public_port' 는 'port' 와 달라야 합니다 — 공개 리스너(Funnel 대상)와 관리 리스너를 나눈다")
-    for key in ("max_devices", "device_idle_days", "register_limit_per_hour", "upload_limit_per_min",
+    for key in ("max_devices", "register_limit_per_hour", "upload_limit_per_min",
                 "auth_fail_limit_per_min"):
         v = cfg.get(key)
         if not _is_int(v) or v < 1:
@@ -456,10 +454,6 @@ def _storage_error(now: float) -> web.Response:
     return web.json_response({"ok": False, "error": "storage_error", "server_time": now}, status=500)
 
 
-def _device_idle_sec(cfg: dict) -> float:
-    return float(int(cfg["device_idle_days"]) * 86400)
-
-
 # ---------------------------------------------------------------- handlers
 
 async def index(request: web.Request) -> web.Response:
@@ -484,7 +478,10 @@ async def api_market_register(request: web.Request) -> web.Response:
         return web.json_response({"ok": False, "error": "registration_closed"}, status=403)
     try:
         body = await request.json()
-    except ValueError:
+    except (ValueError, LookupError):
+        # ValueError = 깨진 JSON·잘못된 UTF-8. LookupError = Content-Type 의 charset 이 모르는 인코딩
+        # ("charset=bogus") — aiohttp 가 body.decode(charset) 에서 던지므로 여기서 400 으로 받지 않으면
+        # 무인증 라우트가 500 + 트레이스백을 로그에 쌓는다.
         body = None
     try:
         invite, label = validate_register(body)
@@ -495,9 +492,10 @@ async def api_market_register(request: web.Request) -> web.Response:
         return web.json_response({"ok": False, "error": "bad_invite"}, status=401)
     db = request.app[DB_KEY]
     try:
-        active = db.count_active_devices(now, _device_idle_sec(cfg), UNSEEN_GRACE_SEC)
-        if active >= int(cfg["max_devices"]):
-            log.warning("기기 등록 거부(정원 %d, 활성 %d): label=%r ip=%s", int(cfg["max_devices"]), active, label, ip)
+        registered = db.count_active_devices()
+        if registered >= int(cfg["max_devices"]):
+            log.warning("기기 등록 거부(정원 %d, 등록 %d): label=%r ip=%s — 자리를 비우려면 devices.py revoke",
+                        int(cfg["max_devices"]), registered, label, ip)
             return web.json_response({"ok": False, "error": "registration_full"}, status=403)
         token = secrets.token_urlsafe(32)
         device_id = db.create_device(label, _token_hash(token), now, ip)
@@ -506,6 +504,13 @@ async def api_market_register(request: web.Request) -> web.Response:
         return _storage_error(now)
     log.info("기기 등록: %s label=%r ip=%s", device_id, label, ip)
     return web.json_response({"ok": True, "v": PROTO_V, "device_id": device_id, "token": token, "server_time": now})
+
+
+def _device_name(dev) -> str:
+    """로그·표시용 이름 — 관리자가 붙인 ``alias`` 우선, 없으면 기기가 스스로 적은 ``label``, 둘 다 없으면 빈 문자열."""
+    if dev is None:
+        return ""
+    return (dev.get("alias") or "").strip() or (dev.get("label") or "").strip()
 
 
 def _touch_device(db: db_mod.Database, dev, now: float) -> None:
@@ -524,7 +529,10 @@ async def api_market_observations(request: web.Request) -> web.Response:
     dev = request.get(DEVICE_KEY)
     try:
         body = await request.json()
-    except ValueError:
+    except (ValueError, LookupError):
+        # ValueError = 깨진 JSON·잘못된 UTF-8. LookupError = Content-Type 의 charset 이 모르는 인코딩
+        # ("charset=bogus") — aiohttp 가 body.decode(charset) 에서 던지므로 여기서 400 으로 받지 않으면
+        # 무인증 라우트가 500 + 트레이스백을 로그에 쌓는다.
         body = None
     now = time.time()
     try:
@@ -544,7 +552,7 @@ async def api_market_observations(request: web.Request) -> web.Response:
         log.exception("market 관측 저장 실패: %s", device_id)
         return _storage_error(now)
     log.info("market 관측 수신: %s%s 신규 %d / 중복 %d / 행 %d", device_id,
-             f"({dev['label']})" if dev is not None and dev.get("label") else "", accepted, duplicates, rows)
+             f"({_device_name(dev)})" if _device_name(dev) else "", accepted, duplicates, rows)
     return web.json_response({"ok": True, "accepted": accepted, "duplicates": duplicates,
                               "rows": rows, "server_time": now})
 
@@ -585,9 +593,9 @@ async def api_market_listings(request: web.Request) -> web.Response:
 async def api_market_stats(request: web.Request) -> web.Response:
     cfg = request.app[CFG_KEY]
     now = time.time()
-    stats = request.app[DB_KEY].market_stats(now, float(cfg["search_max_age_sec"]),
-                                             _device_idle_sec(cfg), UNSEEN_GRACE_SEC)
-    return web.json_response({"v": PROTO_V, "server_time": now, **stats})
+    stats = request.app[DB_KEY].market_stats(now, float(cfg["search_max_age_sec"]))
+    return web.json_response({"v": PROTO_V, "server_time": now,
+                              "devices_max": int(cfg["max_devices"]), **stats})
 
 
 # ---------------------------------------------------------------- retention

@@ -2,8 +2,10 @@ services:
   yuktracker-hub:
     build: .
     restart: unless-stopped
-    # 8800 = 관리 리스너(봇·제작자 직접 접속, Funnel 걸지 않음) · 8801 = 공개 리스너(`tailscale funnel --bg 8801` 대상)
-    ports: ["8800:8800", "8801:8801"]
+    # 8800 = 관리 리스너 — 봇(같은 Pi)·제작자(Tailscale VPN)가 직접 붙는다. tailscale0 로도 받아야 해서 전 인터페이스.
+    # 8801 = 공개 리스너 — tailscaled 가 같은 호스트의 127.0.0.1:8801 로 프록시하므로 **루프백에만** 낸다.
+    #        (0.0.0.0 으로 내면 LAN·게스트 와이파이에서 Funnel 을 우회해 평문으로 직접 찔러볼 수 있다.)
+    ports: ["8800:8800", "127.0.0.1:8801:8801"]
     volumes:
       - "${HUB_DATA_DIR:-./data}:/data"
       - "./config.json:/app/config.json:ro"

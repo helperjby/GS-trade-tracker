@@ -23,12 +23,29 @@ SEAssist PR #306(PR-Y2) **미머지 → 닫음 예정, 이 레포로 이식(PR-Y
 - **`/code-review 10 high` 13건 전부 반영**(2차 커밋): ① 헤더 부재 = 직접 접속이라는 fail-open → **공개 리스너 `public_port` 8801 분리**
   (`serve()` 가 관리 8800 + 공개 8801 을 한 프로세스에서, DB·limiter 공유; 공개 리스너는 헤더 무관 전부 공개, 8800 의 헤더 검사는 2차
   방어; compose `8801:8801`, Funnel 은 8801), ② 인증 실패 집계는 토큰 검사 **뒤**(공유 NAT 의 정상 기기 안 막힘), ③ XFF 없는 공개
-  요청은 `public:?` 버킷 + 경고 1회, ④ 정원 = 활성 정의(`device_idle_days` 30 + 미업로드 하루, `_ACTIVE_WHERE` 하나) + `devices.py
-  revoke --stale N`, ⑤ 거부(400/403)도 last_seen, ⑥ 기기 기록은 관측과 같은 트랜잭션(커밋 1회, 실패 시 무기록), ⑦ 등록 본문
+  요청은 `public:?` 버킷 + 경고 1회, ④ 정원 = 활성 정의(`device_idle_days` + 미업로드 하루) — **아래 09-22 사용자 결정으로 폐기**,
+  ⑤ 거부(400/403)도 last_seen, ⑥ 기기 기록은 관측과 같은 트랜잭션(커밋 1회, 실패 시 무기록), ⑦ 등록 본문
   4KiB(411/413, 파싱 전), ⑧ 429 가 취소 검사보다 먼저, ⑨ 초대 코드 strip(config·요청), ⑩ CLI 중복 취소는 시각 보존·"이미 활성",
   ⑪ 전각 폭 정렬, ⑫ stats 가 `count_active_devices` 재사용(`devices_active` 추가), ⑬ README 게이트 더미 Bearer·본문 모양·`hub_secret` 문장.
 - 문서: HUB-PROTOCOL §0 전송 전제 개정·§1 devices·§3-0·§3-1·§3-4·§3-6·§6·§7, hub/README "공개 노출" 절(Funnel 절차·외부망 게이트·운영 메모,
   `sed` 순서 INVITE 먼저), PLAN §PR-Y3 공개 항목·§PR-Y1b(관측기 키 `hub_url`·`hub_device_id`·`hub_token`, 첫 실행 등록, 429/401/403 규약)·G7.
+- **기기 명단 규칙 확정(2026-09-22 사용자 지시, PR #10 에 반영)**: ① 배포 대상 = **아는 사람 최대 7명** → `max_devices` 기본 500 → **7**.
+  ② **활성 여부에 따른 자동 제외 없음** → `device_idle_days`·미업로드 유예(`UNSEEN_GRACE_SEC`)·`devices.py revoke --stale` 삭제,
+  "등록"의 정의는 `revoked_ts IS NULL` 하나(`_ACTIVE_WHERE`). 한 번도 안 올린 기기도 자리를 차지하고, 자리를 비우는 유일한 길은
+  관리자의 `revoke`. ③ 관리자가 **제거**(`revoke`, soft — 행은 감사용으로 남음)와 **별칭**(`devices` 표 `alias` + `devices.py alias`)을
+  할 수 있다 — 별칭은 기기가 등록 때 스스로 적은 `label` 과 별개이고 목록·서버 로그에서 앞선다. `stats` 는 `devices_active` 대신
+  `devices_max`(설정 정원)를 싣는다. 검증: hub 82 passed, CLI 왕복(별칭 지정·해제·제거로 자리 반환) 실행 확인.
+- **고정 기기 전제로 범위 축소(2026-09-22 사용자 지시)**: 배포 대상이 지인 고정 기기(slot1~5 배정, 최대 7)라 슬롯 고갈·
+  XFF 우회 방어·자가 치유 로직은 하지 않기로. 남긴 기술 부채는 "서버 먹통 방지" 셋뿐이고 전부 반영: ① compose 공개
+  리스너 `127.0.0.1:8801:8801`(Funnel 은 같은 호스트 프록시라 무영향, LAN 직접 접속만 차단 — 제작자 PC 는 Tailscale VPN
+  으로 8800 직결이라 8800 은 전 인터페이스 유지), ② `request.json()` 이 `LookupError` 도 받아 charset 폭탄이 500+
+  트레이스백 대신 400(무인증 라우트의 로그·디스크 고갈 차단), ③ `Database._tx` 로 모든 쓰기의 commit/rollback 보장 —
+  `prune` 두 DELETE·`touch_device` 가 잠금으로 실패해도 트랜잭션이 안 남는다(한 명의 불안정한 업로드가 WAL 스냅샷을
+  붙들어 나머지 전원을 멈추던 경로). 검증: 잠긴 DB 상대로 둘 다 `in_transaction=False`, 잠금 해제 직후 CLI 의 제거가
+  즉시 보임. charset `bogus-enc` → 400. hub 82 passed · 루트 92 passed.
+- **재설치 동작 확인(사용자 질문)**: `device_id` 는 허브가 등록마다 새로 발급 → 재설치 재등록은 409 거부도, 기존 행
+  갱신도 아니고 **새 행 추가**(옛 행이 자리를 계속 차지). 실패는 재설치 시점이 아니라 다음 사람 등록 때 `registration_full`
+  로 뒤늦게 난다 → 운영 규칙 = "재설치하면 알려줘" + 관리자가 같은 별칭 두 줄 중 옛 `device_id` 를 `revoke`. hub/README 에 기록.
 - 남은 것: PR #9 → #10 머지 → Pi: hub/ 재복사 → `config.json` 에 `invite_code`(+`public_port` 8801 기본) 추가 → `docker compose up -d
   --build`(포트 8800·8801) → `sudo tailscale funnel --bg 8801`(관리 콘솔 HTTPS·`funnel` 노드 속성) → 폰 LTE 게이트(`GET /` 200 · stats 403
   (더미 Bearer) · register 200/401) → `devices.py list`. 그 뒤 PR-Y2' → PR-Y1b(등록 UX 포함).

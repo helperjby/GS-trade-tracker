@@ -43,7 +43,7 @@ def test_register_happy_path_no_bearer_and_token_hashed(tmp_path):
             assert st3 == 200
             d3 = [d for d in app_db(app).list_devices() if d["device_id"] == data3["device_id"]][0]
             assert d3["label"] == "" and d3["created_ip"] == "127.0.0.1"
-            assert app_db(app).count_active_devices(time.time(), 30 * 86400, 86400) == 3
+            assert app_db(app).count_active_devices() == 3
         finally:
             await client.close()
     _run(scn())
@@ -64,19 +64,23 @@ def test_register_bad_invite_validation_full_and_closed(tmp_path):
             for bad in ("x" * 65, "esc\x1b[31m", "tab\tbed", 7):
                 st, data = await register(client, label=bad)
                 assert (st, data["field"]) == (400, "label"), bad
-            assert app_db(app).count_active_devices(time.time(), 30 * 86400, 86400) == 0   # 거부는 아무것도 안 만든다
-            # 3일 전에 등록만 하고 한 번도 안 올린 고아 행 — 정원(활성)에 안 센다
+            assert app_db(app).count_active_devices() == 0   # 거부는 아무것도 안 만든다
+            # 3일 전에 등록만 하고 한 번도 안 올린 행도 자리를 차지한다 — 자동 제외가 없다(사용자 결정)
             orphan = app_db(app).create_device("orphan", "h-orphan", time.time() - 3 * 86400, None)
+            st, data = await register(client)
+            assert (st, data["error"]) == (403, "registration_full")   # 미업로드 1대만으로 정원이 찬다
+            # 관리자가 빼야 자리가 난다
+            app_db(app).set_device_revoked(orphan, time.time())
             st, first = await register(client)
             assert st == 200
             st, data = await register(client)
-            assert (st, data["error"]) == (403, "registration_full")   # 활성 1대 = 정원
+            assert (st, data["error"]) == (403, "registration_full")
             app_db(app).set_device_revoked(first["device_id"], time.time())
             st, data = await register(client)
-            assert st == 200                                            # 취소된 기기는 정원에서 빠진다
+            assert st == 200                                            # 제거된 기기는 정원에서 빠진다
             st, s = await get(client, "/api/market/stats")
-            # registered = 미취소 전체(고아 + 새 기기), active = 새 기기만(고아는 등록 뒤 하루 지나 제외), revoked = first
-            assert (s["devices_registered"], s["devices_active"], s["devices_revoked"]) == (2, 1, 1)
+            # registered = 미제거(새 기기 1) / revoked = orphan + first, devices_max = 설정된 정원
+            assert (s["devices_registered"], s["devices_revoked"], s["devices_max"]) == (1, 2, 1)
             assert orphan in [d["device_id"] for d in app_db(app).list_devices()]
             # 정원 초과 뒤 잘못된 코드 → 코드 검사가 정원보다 먼저(401)
             st, data = await register(client, invite="wrong-code")
@@ -158,7 +162,7 @@ def test_device_token_upload_ok_counts_and_stats_label(tmp_path):
             st, s = await get(client, "/api/market/stats")
             (entry,) = s["devices"]
             assert (entry["device_id"], entry["label"], entry["observations"]) == (dev_id, "PC-1", 1)
-            assert (s["devices_registered"], s["devices_active"], s["devices_revoked"]) == (1, 1, 0)
+            assert (s["devices_registered"], s["devices_revoked"]) == (1, 0)
             # 관리 시크릿(직접 접속) 업로드는 자유 device_id·label null 그대로
             st, data = await post(client, body(obs(obs_id="k2"), device_id="DEV-9"))
             assert st == 200

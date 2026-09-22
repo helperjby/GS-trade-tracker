@@ -137,7 +137,8 @@ python scripts/mine_packet_discovery.py --all --lead-sec 30
 - **공개 업로드(2026-09-22 추가)**: 관측기는 Npcap 만 있는 일반 사용자 PC 에서 돌므로 VPN 전제를 버리고, 공개 리스너 **8801** 을 Pi 의
   **Tailscale Funnel** 로 공개(관리 리스너 8800 은 직접 접속 전용) + **초대 코드 자기등록**(`POST /api/market/register` → 기기별 토큰·허브
   발급 `device_id`, `devices` 표). 관리 시크릿은 exe 금지·공개 요청 무시(공개 리스너 전부 + 8800 의 `Tailscale-Funnel-Request` 헤더 2차
-  방어, 조회 라우트 403 `not_public`), 속도제한 429, `hub/devices.py` CLI(취소 즉시 반영, `--stale`). 정본 HUB-PROTOCOL §0·§3-0·§3-6,
+  방어, 조회 라우트 403 `not_public`), 속도제한 429, `hub/devices.py` CLI(제거 즉시 반영, 별칭). 배포는 **아는 사람 최대 7명**
+  (`max_devices` 7) — 명단은 관리자만 바꾸고 활성 여부에 따른 자동 제외는 두지 않는다. 정본 HUB-PROTOCOL §0·§3-0·§3-6,
   절차 hub/README "공개 노출".
 
 ### PR-Y1b — 이 프로젝트, 관측 모드 (PR-Y2'·Y3 뒤)

@@ -69,7 +69,7 @@ def test_invite_code_stripped_empty_means_closed_and_new_defaults(tmp_path):
     assert cfg["invite_code"] == ""                              # 키 없음 = 등록 닫힘
     assert server_mod.load_config(str(_write(tmp_path / "n", invite_code=None)), env={})["invite_code"] == ""
     assert server_mod.load_config(str(_write(tmp_path / "w", invite_code="   ")), env={})["invite_code"] == ""
-    assert (cfg["port"], cfg["public_port"], cfg["max_devices"], cfg["device_idle_days"]) == (8800, 8801, 500, 30)
+    assert (cfg["port"], cfg["public_port"], cfg["max_devices"]) == (8800, 8801, 7)   # 정원 = 아는 사람 7명
     assert (cfg["admin_public"], cfg["proxy_header"]) == (False, "Tailscale-Funnel-Request")
     assert (cfg["register_limit_per_hour"], cfg["upload_limit_per_min"], cfg["auth_fail_limit_per_min"]) == (10, 120, 30)
     cfg = server_mod.load_config(str(_write(tmp_path / "ok", invite_code=" invite-code-1 ", proxy_header=" CF-Connecting-IP ",
@@ -79,7 +79,7 @@ def test_invite_code_stripped_empty_means_closed_and_new_defaults(tmp_path):
 
 
 @pytest.mark.parametrize("key, value", [
-    ("max_devices", 0), ("max_devices", True), ("max_devices", "5"), ("device_idle_days", 0),
+    ("max_devices", 0), ("max_devices", True), ("max_devices", "5"),
     ("register_limit_per_hour", "10"), ("upload_limit_per_min", 0), ("auth_fail_limit_per_min", -1),
     ("admin_public", "no"), ("admin_public", 1), ("proxy_header", ""), ("proxy_header", "   "), ("proxy_header", 5),
     ("port", 0), ("port", "8800"), ("public_port", 70000), ("public_port", 8800),   # 두 리스너는 포트가 달라야 한다

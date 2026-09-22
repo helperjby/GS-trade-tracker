@@ -69,6 +69,9 @@ curl -s -H "Authorization: Bearer <시크릿>" http://127.0.0.1:8800/api/market/
 - DB 위치는 Dockerfile 의 `ENV HUB_DB_PATH=/data/hub.db` 가 config 의 `db_path` 보다 우선한다 — compose 가 `/data` 를 볼륨에
   매핑하므로 운영자가 config 를 안 고쳐도 `compose up --build` 에 데이터가 사라지지 않는다. 기동 로그 첫 줄에 `db_path=` 가 찍힌다.
 - 증분 폴링 소비자(미루봇)는 `next_since_ts` 와 `next_since_key` 를 둘 다 저장해 다음 호출에 넣는다(HUB-PROTOCOL §3-3).
+- 공개 리스너 8801 은 compose 가 **`127.0.0.1:8801:8801`** 로 루프백에만 낸다 — tailscaled 가 같은 호스트에서
+  프록시하므로 Funnel 은 그대로 되고, LAN·게스트 와이파이에서 Funnel 을 건너뛰고 평문으로 찌르는 경로는 막힌다.
+  관리 리스너 8800 은 봇(같은 Pi)과 제작자(Tailscale VPN)가 직접 붙어야 해서 전 인터페이스에 남긴다.
 - 접속 주소: 일반 사용자 관측기 = 공개 `https://<pi-node>.<tailnet>.ts.net`(Funnel, 아래) / 제작자 PC = tailnet `http://<pi-tailnet-ip>:8800`
   / LAN `http://<pi-lan-ip>:8800` / 미루봇(같은 Pi) `http://127.0.0.1:8800`. 직접 접속은 평문 HTTP — **공유기 포트포워딩은 여전히 금지**
   (TLS 는 Funnel 이 맡고, 그 밖의 경로는 신뢰망 안이라는 전제).
@@ -99,12 +102,22 @@ curl -s -X POST $H/api/market/register -H "Content-Type: application/json" \
 curl -s -X POST $H/api/market/register -H "Content-Type: application/json" \
   -d '{"v":1,"invite_code":"nope"}'                                           # 401 bad_invite
 docker compose exec yuktracker-hub python devices.py list                     # GATE 가 보인다 → revoke <device_id> --note gate
+docker compose exec yuktracker-hub python devices.py alias <device_id> "친구1"  # 관리자 별칭(목록·로그에 이 이름이 먼저)
 ```
 
 운영 메모:
-- 취소는 **soft**(같은 초대 코드로 재등록 가능) — 고장·방치 클라를 멈추는 용도. 남용은 `invite_code` 교체 → `docker compose restart`
-  (기존 토큰은 유지, 신규 등록만 막힘). `max_devices`(500) 는 **활성** 기기 기준 = 미취소 + `device_idle_days`(30) 안 업로드(한 번도
-  안 올린 기기는 등록 뒤 하루) — 재설치로 버려진 행은 저절로 빠진다. 정리는 `devices.py revoke --stale 30`.
+- **명단은 관리자가 관리한다**(2026-09-22 결정): 배포 대상은 아는 사람 **최대 7명**이라 `max_devices` 기본이 **7** 이고,
+  정원이 세는 것은 **미제거 기기 전부**다 — 업로드를 한 번도 안 한 기기도 자리를 차지하며 시간이 지나 저절로 빠지는 일은 없다.
+  새 사람에게 자리를 내주려면 `devices.py revoke <device_id>` 로 하나를 뺀다(제거는 **soft** — 행은 감사용으로 남고 같은 초대
+  코드로 재등록하면 새 기기가 된다). 남용은 `invite_code` 교체 → `docker compose restart`(기존 토큰 유지, 신규 등록만 막힘).
+- 별칭: `devices.py alias <device_id> "소가"` — 등록 때 기기가 스스로 적은 `label` 과 별개로 관리자가 붙이는 이름이고,
+  목록·서버 로그는 별칭을 앞세운다. 빈 문자열이면 해제. 자리 현황은 `stats` 의 `devices_registered`/`devices_max`.
+  지인 1명 = 별칭 1개로 두면 `devices.py list` 와 `stats.devices[]` 가 그대로 접속 현황판이 된다.
+- **재설치 주의**: `device_id` 는 허브가 등록 때마다 새로 발급한다(호스트명·하드웨어에서 뽑지 않는다). 그래서 지인이
+  프로그램을 지웠다 다시 깔고 등록하면 **거부(409)도, 기존 행 갱신도 아니고 새 행이 하나 더 생긴다** — 옛 행이 자리를
+  계속 차지한다. 재설치 당시엔 아무 오류도 안 나고, 나중에 다른 사람이 등록할 때 `registration_full` 로 터진다.
+  → 지인들에게 "재설치할 일 있으면 말해줘"라고 안내하고, 관리자는 `devices.py list` 에서 같은 별칭 두 줄을 보면
+  옛 `device_id` 를 `revoke` 한다. (여유 슬롯 = `max_devices` − 사람 수 만큼은 말없이 흡수된다.)
 - 관리 시크릿은 Funnel 을 타지 않는다(`admin_public` false) — 봇은 127.0.0.1:8800, 제작자는 tailnet/LAN 의 8800 직접. 공개 리스너는
   자격을 보지 않고 403 을 주며, 8800 에 실수로 Funnel 을 걸어도 `Tailscale-Funnel-Request` 헤더로 한 번 더 막는다(2차 방어).
 - 속도제한: 등록 IP 10/h, 업로드 기기 120/min(취소된 기기의 폭주도), 인증 실패 공개 IP 30/min — 토큰 검사 뒤 실패에만(공유 NAT 의
@@ -116,7 +129,7 @@ docker compose exec yuktracker-hub python devices.py list                     # 
 
 ```
 server.py   aiohttp — 리스너 둘(관리 8800 / 공개 8801, DB·속도제한 공유) · 공개/직접 구분 · Bearer(관리 시크릿/기기 토큰) 미들웨어 · RateLimiter · 업로드 전건 검증 · register · 5 라우트 · 일 1회 retention
-db.py       SQLite — market_observations / market_listings / market_item_names / devices(활성 정의 하나) · 정규화 한 정의 · upsert · prune
-devices.py  관리 CLI — 기기 list / revoke [--stale N] / unrevoke / note (서버와 같은 DB 파일, 시크릿 불필요)
+db.py       SQLite — market_observations / market_listings / market_item_names / devices(등록 정의 하나 = 미제거) · 정규화 한 정의 · upsert · prune
+devices.py  관리 CLI — 기기 list / revoke / unrevoke / alias / note (서버와 같은 DB 파일, 시크릿 불필요)
 tests/      pytest — 인증·공개/직접 · 등록·기기 토큰·취소 · 속도제한 · 검증(전건 거부) · dedup · upsert · 이름 학습 · 정규화 · 신선도 · 증분 목록 · 통계 · prune · CLI
 ```

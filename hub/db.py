@@ -10,9 +10,11 @@
 - ``market_listings`` — 등록(판매 건) 1개의 **최신 상태**. 같은 등록을 여러 번 보면 upsert.
 - ``market_item_names`` — 관측기가 함께 보낸 아이템 id→이름 누적(이름을 못 푼 행을 검색 때 보충).
 - ``devices`` — 초대 코드로 자기등록한 관측기 기기: 허브가 발급한 ``device_id`` 와 업로드 토큰의 sha256.
-  토큰 원문은 저장하지 않는다(등록 응답 1회만). 취소(``revoked_ts``)는 다음 요청부터 바로 먹는다 — 서버는
-  요청마다 이 표를 본다. prune 대상이 아니다. "활성"(정원·stats)의 한 정의는 ``_ACTIVE_WHERE``: 미취소 +
-  최근 ``idle_sec`` 안에 업로드했거나, 한 번도 안 올렸으면 등록 뒤 ``unseen_grace_sec`` 안.
+  토큰 원문은 저장하지 않는다(등록 응답 1회만). 제거(``revoked_ts``)는 다음 요청부터 바로 먹는다 — 서버는
+  요청마다 이 표를 본다. prune 대상이 아니다. **"등록됨"의 정의는 하나** (``_ACTIVE_WHERE``): ``revoked_ts IS NULL``.
+  업로드 여부·마지막 업로드 시각은 정원에 영향을 주지 않는다 — 명단은 관리자만 바꾼다(2026-09-22 사용자 결정:
+  아는 사람 최대 7명에게 직접 배포, 활성 여부에 따른 자동 제외 없음). ``alias`` 는 관리자가 붙이는 별칭
+  (``label`` 은 기기가 등록 때 스스로 적은 값이라 신뢰하지 않는다).
 
 writer: market 표는 서버 이벤트루프 하나만 쓴다. ``devices`` 는 ``devices.py``(관리 CLI, 별도 프로세스)가 드물게
 한 행 UPDATE 를 넣는다 — WAL + busy timeout(``Database(timeout=)``) 아래서 서버의 업로드 트랜잭션과 안전하게 교차하고,
@@ -28,6 +30,7 @@ fsync 가 이벤트루프를 세워 봇의 search 가 밀린다.
 """
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import secrets
@@ -59,6 +62,7 @@ CREATE TABLE IF NOT EXISTS market_item_names (
 CREATE TABLE IF NOT EXISTS devices (
   device_id TEXT PRIMARY KEY,
   label TEXT NOT NULL DEFAULT '',
+  alias TEXT NOT NULL DEFAULT '',
   token_hash TEXT NOT NULL UNIQUE,
   created_ts REAL NOT NULL, created_ip TEXT,
   last_seen_ts REAL, upload_count INTEGER NOT NULL DEFAULT 0,
@@ -71,9 +75,9 @@ ROW_NORMALIZED_KEYS = frozenset({"listing_id", "item_id", "item_name", "quantity
                                  "category", "flag45", "flag46"})
 #: device_id 생성 시도 상한 — 40비트 난수라 충돌은 사실상 없지만 무한 루프는 두지 않는다.
 DEVICE_ID_ATTEMPTS = 5
-#: "활성 기기"의 한 정의 — 정원 판정(server)과 stats 가 같은 조건을 쓴다. 파라미터 (now − idle_sec, now − unseen_grace_sec).
-_ACTIVE_WHERE = ("revoked_ts IS NULL AND ((last_seen_ts IS NOT NULL AND last_seen_ts >= ?)"
-                 " OR (last_seen_ts IS NULL AND created_ts >= ?))")
+#: "등록된 기기"의 **한** 정의 — 정원 판정(server)·stats·CLI 가 전부 이 조건을 쓴다. 파라미터 없음.
+#: 업로드 여부로 자동 제외하지 않는다(사용자 결정) — 명단에서 빼는 것은 관리자의 ``devices.py revoke`` 뿐.
+_ACTIVE_WHERE = "revoked_ts IS NULL"
 
 
 def norm_item_name(name) -> str:
@@ -160,7 +164,8 @@ ON CONFLICT(item_id) DO UPDATE SET
   last_seen_ts   = MAX(last_seen_ts, excluded.last_seen_ts)
 """
 
-_DEVICE_COLUMNS = "device_id, label, created_ts, created_ip, last_seen_ts, upload_count, revoked_ts, note"
+_DEVICE_COLUMNS = ("device_id, label, alias, created_ts, created_ip, last_seen_ts, upload_count, "
+                   "revoked_ts, note")
 
 
 class Database:
@@ -179,6 +184,22 @@ class Database:
     def close(self) -> None:
         self._con.close()
 
+    @contextlib.contextmanager
+    def _tx(self):
+        """쓰기 한 덩이 — 성공하면 commit, 실패하면 **반드시 rollback** 한 뒤 다시 던진다.
+
+        롤백을 빠뜨리면 실패한 문장이 연 암묵 트랜잭션이 이 연결에 그대로 남는다. 그 뒤로 이 연결은
+        낡은 WAL 스냅샷을 붙들어 다른 프로세스(``devices.py``)가 커밋한 제거를 못 보고, 반대로 이 연결이
+        쓰기 락을 쥐고 있으면 CLI 쪽이 ``database is locked`` 로 죽는다 — 지인 한 명의 불안정한 업로드가
+        나머지 전원을 멈추게 하는 경로라 모든 쓰기를 여기로 통과시킨다.
+        """
+        try:
+            yield self._con
+            self._con.commit()
+        except Exception:
+            self._con.rollback()
+            raise
+
     # ---- 수집 (POST /api/market/observations) ----
 
     def insert_market_observations(self, device_id: str, observations: list, recv_ts: float,
@@ -192,9 +213,8 @@ class Database:
         ``seen_device`` 가 있으면(기기 토큰 업로드) 같은 트랜잭션에서 그 기기의 ``last_seen_ts``·``upload_count`` 도
         쓴다 — 커밋 1회, 실패하면 기기 기록도 남지 않는다.
         """
-        con = self._con
         accepted = duplicates = rows_applied = 0
-        try:
+        with self._tx() as con:          # 실패하면 관측·행·기기 기록 전부 롤백 — 커밋 1회
             for obs in observations:
                 agent_ts = float(obs["agent_ts"])
                 seen_ts = min(agent_ts, recv_ts)
@@ -230,10 +250,6 @@ class Database:
             if seen_device is not None:
                 con.execute("UPDATE devices SET last_seen_ts = ?, upload_count = upload_count + 1 WHERE device_id = ?",
                             (recv_ts, seen_device))
-            con.commit()
-        except Exception:
-            con.rollback()
-            raise
         return accepted, duplicates, rows_applied
 
     # ---- 기기 (POST /api/market/register · 업로드 인증 · devices.py) ----
@@ -258,7 +274,7 @@ class Database:
 
     def get_device_by_token_hash(self, token_hash: str) -> dict | None:
         r = self._con.execute(
-            "SELECT device_id, label, revoked_ts, upload_count, last_seen_ts FROM devices WHERE token_hash = ?",
+            "SELECT device_id, label, alias, revoked_ts, upload_count, last_seen_ts FROM devices WHERE token_hash = ?",
             (token_hash,)).fetchone()
         return dict(r) if r is not None else None
 
@@ -267,16 +283,15 @@ class Database:
         r = self._con.execute(f"SELECT {_DEVICE_COLUMNS} FROM devices WHERE device_id = ?", (device_id,)).fetchone()
         return dict(r) if r is not None else None
 
-    def count_active_devices(self, now: float, idle_sec: float, unseen_grace_sec: float) -> int:
-        """활성 기기 수(``_ACTIVE_WHERE``) — 등록 정원(``max_devices``) 판정용. 재설치로 버려진 옛 행·고아 등록은
-        시간이 지나면 빠진다(취소하지 않아도)."""
-        return int(self._con.execute(f"SELECT COUNT(*) FROM devices WHERE {_ACTIVE_WHERE}",
-                                     (now - float(idle_sec), now - float(unseen_grace_sec))).fetchone()[0])
+    def count_active_devices(self) -> int:
+        """등록된(미제거) 기기 수(``_ACTIVE_WHERE``) — 등록 정원(``max_devices``) 판정용. 업로드를 한 번도 안 한
+        기기도 자리를 차지한다(자동 제외 없음) — 자리를 비우는 것은 관리자의 ``devices.py revoke`` 뿐."""
+        return int(self._con.execute(f"SELECT COUNT(*) FROM devices WHERE {_ACTIVE_WHERE}").fetchone()[0])
 
     def touch_device(self, device_id: str, now: float) -> None:
         """인증은 됐지만 거부된 업로드(400·403) — ``last_seen_ts`` 만(운영자가 잘못 설정된 exe 를 찾을 수 있게)."""
-        self._con.execute("UPDATE devices SET last_seen_ts = ? WHERE device_id = ?", (now, device_id))
-        self._con.commit()
+        with self._tx() as con:
+            con.execute("UPDATE devices SET last_seen_ts = ? WHERE device_id = ?", (now, device_id))
 
     def list_devices(self) -> list[dict]:
         """토큰 해시는 싣지 않는다(CLI 출력·로그로 새지 않게)."""
@@ -284,24 +299,21 @@ class Database:
             f"SELECT {_DEVICE_COLUMNS} FROM devices ORDER BY created_ts, device_id").fetchall()]
 
     def set_device_revoked(self, device_id: str, revoked_ts: float | None) -> bool:
-        """취소(시각) 또는 복구(None). 반환 = 그런 기기가 있었는지."""
-        cur = self._con.execute("UPDATE devices SET revoked_ts = ? WHERE device_id = ?", (revoked_ts, device_id))
-        self._con.commit()
+        """제거(시각) 또는 복구(None) — 제거하면 정원 자리가 바로 빈다. 반환 = 그런 기기가 있었는지."""
+        with self._tx() as con:
+            cur = con.execute("UPDATE devices SET revoked_ts = ? WHERE device_id = ?", (revoked_ts, device_id))
         return cur.rowcount == 1
 
-    def revoke_stale_devices(self, now: float, idle_sec: float, note: str) -> int:
-        """``idle_sec`` 넘게 안 올린(한 번도 안 올렸으면 등록 뒤 그만큼 지난) 미취소 기기를 일괄 취소. 메모가 비어 있으면
-        ``note`` 를 남긴다. 반환 = 취소한 수."""
-        cur = self._con.execute(
-            "UPDATE devices SET revoked_ts = ?, note = CASE WHEN note = '' THEN ? ELSE note END "
-            "WHERE revoked_ts IS NULL AND COALESCE(last_seen_ts, created_ts) < ?",
-            (now, note, now - float(idle_sec)))
-        self._con.commit()
-        return cur.rowcount
+    def set_device_alias(self, device_id: str, alias: str) -> bool:
+        """관리자가 붙이는 별칭 — 기기가 스스로 적은 ``label`` 은 그대로 두고 표시만 이 값을 앞세운다.
+        빈 문자열이면 별칭 해제. 반환 = 그런 기기가 있었는지."""
+        with self._tx() as con:
+            cur = con.execute("UPDATE devices SET alias = ? WHERE device_id = ?", (alias, device_id))
+        return cur.rowcount == 1
 
     def set_device_note(self, device_id: str, note: str) -> bool:
-        cur = self._con.execute("UPDATE devices SET note = ? WHERE device_id = ?", (note, device_id))
-        self._con.commit()
+        with self._tx() as con:
+            cur = con.execute("UPDATE devices SET note = ? WHERE device_id = ?", (note, device_id))
         return cur.rowcount == 1
 
     # ---- 조회 (GET /api/market/*) ----
@@ -350,18 +362,18 @@ class Database:
             (float(since_ts), float(since_ts), str(since_key), int(limit))).fetchall()
         return [self._listing_dict(r) for r in rows]
 
-    def market_stats(self, now: float, fresh_sec: float = 86400.0, device_idle_sec: float = 30 * 86400.0,
-                     unseen_grace_sec: float = 86400.0) -> dict:
+    def market_stats(self, now: float, fresh_sec: float = 86400.0) -> dict:
         con = self._con
 
         def one(sql: str, *params):
             return con.execute(sql, params).fetchone()[0]
 
-        # 관측을 올린 device_id 별 집계 + 등록 기기면 label(관리 시크릿으로 올린 자유 device_id 는 null).
-        devices = [{"device_id": r["device_id"], "label": r["label"], "observations": r["c"],
-                    "last_recv_ts": r["m"]}
+        # 관측을 올린 device_id 별 집계 + 등록 기기면 별칭·label(관리 시크릿으로 올린 자유 device_id 는 null).
+        devices = [{"device_id": r["device_id"], "label": r["label"], "alias": r["alias"],
+                    "observations": r["c"], "last_recv_ts": r["m"]}
                    for r in con.execute(
-                       "SELECT o.device_id, d.label AS label, COUNT(*) AS c, MAX(o.recv_ts) AS m "
+                       "SELECT o.device_id, d.label AS label, d.alias AS alias, COUNT(*) AS c, "
+                       "MAX(o.recv_ts) AS m "
                        "FROM market_observations o LEFT JOIN devices d ON d.device_id = o.device_id "
                        "GROUP BY o.device_id ORDER BY o.device_id").fetchall()]
         return {
@@ -374,8 +386,8 @@ class Database:
             "fresh_sec": float(fresh_sec),
             "latest_recv_ts": one("SELECT MAX(recv_ts) FROM market_observations"),
             "devices": devices,
-            "devices_registered": one("SELECT COUNT(*) FROM devices WHERE revoked_ts IS NULL"),
-            "devices_active": self.count_active_devices(now, device_idle_sec, unseen_grace_sec),
+            # 등록 = 정원을 차지하는 수(미제거). 자동 제외가 없으니 "활성"과 같은 수라 따로 싣지 않는다.
+            "devices_registered": self.count_active_devices(),
             "devices_revoked": one("SELECT COUNT(*) FROM devices WHERE revoked_ts IS NOT NULL"),
         }
 
@@ -387,7 +399,9 @@ class Database:
         반환 (삭제된 관측 수, 삭제된 목록 행 수).
         """
         cutoff = now - int(market_days) * 86400
-        cur_o = self._con.execute("DELETE FROM market_observations WHERE recv_ts < ?", (cutoff,))
-        cur_l = self._con.execute("DELETE FROM market_listings WHERE last_seen_ts < ?", (cutoff,))
-        self._con.commit()
+        # 두 DELETE 는 한 트랜잭션 — 두 번째가 잠금으로 실패해도 첫 번째가 커밋 대기로 남아 24시간짜리
+        # 쓰기 락이 되지 않는다(_retention_loop 는 예외를 삼키고 하루를 잔다).
+        with self._tx() as con:
+            cur_o = con.execute("DELETE FROM market_observations WHERE recv_ts < ?", (cutoff,))
+            cur_l = con.execute("DELETE FROM market_listings WHERE last_seen_ts < ?", (cutoff,))
         return cur_o.rowcount, cur_l.rowcount
