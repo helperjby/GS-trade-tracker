@@ -363,5 +363,72 @@ class CliTest(unittest.TestCase):
         self.assertIn("-m yuktracker --capture 5", params)
 
 
+class StatusTickTest(unittest.TestCase):
+    """관측 모드 상태 줄 — 지인 PC 의 콘솔이 "되고 있는지"를 말해 주는 유일한 수단(PR-Y5)."""
+
+    def test_first_capture_announces_once(self) -> None:
+        state = {}
+        first = A._status_tick(state, capturing=True, pages=0, now=0.0)
+        self.assertIn("캡처 시작", first)
+        self.assertIsNone(A._status_tick(state, capturing=True, pages=0, now=1.0))
+
+    def test_waiting_for_flow_reminds_on_the_interval(self) -> None:
+        state = {}
+        # 시작 직후의 미개통은 조용하다 — 게임이 켜져 있으면 곧 잡힌다
+        self.assertIsNone(A._status_tick(state, capturing=False, pages=0, now=0.0))
+        self.assertIsNone(A._status_tick(state, capturing=False, pages=0,
+                                         now=A.FLOW_REMIND_SEC - 1))
+        line = A._status_tick(state, capturing=False, pages=0, now=A.FLOW_REMIND_SEC)
+        self.assertIn("대기 중", line)
+        self.assertIsNone(A._status_tick(state, capturing=False, pages=0,
+                                         now=A.FLOW_REMIND_SEC + 1))
+        self.assertIsNotNone(A._status_tick(state, capturing=False, pages=0,
+                                            now=2 * A.FLOW_REMIND_SEC))
+
+    def test_flow_loss_is_announced_and_recovery_too(self) -> None:
+        state = {}
+        A._status_tick(state, capturing=True, pages=0, now=0.0)
+        lost = A._status_tick(state, capturing=False, pages=0, now=5.0)
+        self.assertIn("끊겼습니다", lost)
+        back = A._status_tick(state, capturing=True, pages=0, now=6.0)
+        self.assertIn("캡처 시작", back)
+
+    def test_idle_reminder_stops_after_the_first_page(self) -> None:
+        state = {}
+        A._status_tick(state, capturing=True, pages=0, now=0.0)
+        self.assertIsNone(A._status_tick(state, capturing=True, pages=0,
+                                         now=A.IDLE_REMIND_SEC - 1))
+        line = A._status_tick(state, capturing=True, pages=0, now=A.IDLE_REMIND_SEC)
+        self.assertIn("육의전 창을 열어", line)
+        # 한 번이라도 목록을 보면 조용해진다(목록 줄이 대신 찍힌다)
+        self.assertIsNone(A._status_tick(state, capturing=True, pages=1,
+                                         now=10 * A.IDLE_REMIND_SEC))
+
+    def test_engine_without_the_method_is_treated_as_not_capturing(self) -> None:
+        self.assertFalse(A._capturing(object()))
+
+
+class ObserveModeStatusTest(_Base):
+    """배선 — 관측 모드(수집 창 없음)에서도 흐름 대기 줄이 실제로 콘솔에 찍힌다."""
+
+    def test_waiting_line_reaches_the_console(self) -> None:
+        clock = [0.0]
+
+        def fake_clock():
+            return clock[0]
+
+        def fake_sleep(s):
+            # 틱을 10초씩 건너뛰고, 안내가 두 번 날 만큼 지나면 Ctrl+C 로 빠져나온다
+            clock[0] += max(s, 10.0)
+            if clock[0] > 3 * A.FLOW_REMIND_SEC:
+                raise KeyboardInterrupt
+
+        opts = A.RunOptions(capture_min=None, pause_on_exit=False, attach_log=False)
+        rc = self._run(opts, "", factory=_factory(capturing=False), sleep=fake_sleep,
+                       clock=fake_clock)
+        self.assertEqual(rc, A.RC_OK)
+        self.assertIn("대기 중", self.out.getvalue())
+
+
 if __name__ == "__main__":
     unittest.main()

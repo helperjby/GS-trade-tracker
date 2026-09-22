@@ -65,14 +65,8 @@ def _read(status: int, headers, raw: bytes) -> Response:
                     text=text)
 
 
-def post_json(url: str, payload: dict, *, token: str = "",
-              timeout: float = TIMEOUT_SEC, opener=None) -> Response:
-    """POST 1회. 예외를 던지지 않고 `Response` 로 돌려준다(status 0 = 네트워크 실패)."""
-    data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-    headers = {"Content-Type": "application/json", "User-Agent": USER_AGENT}
-    if token:
-        headers["Authorization"] = "Bearer " + token
-    req = urllib.request.Request(url, data=data, headers=headers, method="POST")
+def _send(req: urllib.request.Request, timeout: float, opener) -> Response:
+    """요청 1회 — 예외를 던지지 않고 `Response` 로(status 0 = 네트워크 실패)."""
     do_open = opener.open if opener is not None else urllib.request.urlopen
     try:
         with do_open(req, timeout=timeout) as resp:
@@ -88,12 +82,41 @@ def post_json(url: str, payload: dict, *, token: str = "",
         return Response(status=0, error="network", text=str(e))
 
 
+def post_json(url: str, payload: dict, *, token: str = "",
+              timeout: float = TIMEOUT_SEC, opener=None) -> Response:
+    """POST 1회(JSON 본문)."""
+    data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+    headers = {"Content-Type": "application/json", "User-Agent": USER_AGENT}
+    if token:
+        headers["Authorization"] = "Bearer " + token
+    return _send(urllib.request.Request(url, data=data, headers=headers, method="POST"),
+                 timeout, opener)
+
+
+def get_json(url: str, *, token: str = "", timeout: float = TIMEOUT_SEC, opener=None) -> Response:
+    """GET 1회(본문 없음) — 상태 줄·ping 용."""
+    headers = {"User-Agent": USER_AGENT}
+    if token:
+        headers["Authorization"] = "Bearer " + token
+    return _send(urllib.request.Request(url, headers=headers, method="GET"), timeout, opener)
+
+
 def register(hub_url: str, invite_code: str, label: str = "", *, opener=None) -> Response:
     """`POST /api/market/register` — 무인증. 성공 200 이면 `device_id`·`token` 이 온다(토큰은 1회만 준다)."""
     payload = {"v": 1, "invite_code": invite_code}
     if label:
         payload["label"] = label
     return post_json(hub_url.rstrip("/") + "/api/market/register", payload, opener=opener)
+
+
+def status(hub_url: str, *, opener=None) -> Response:
+    """`GET /` — 무인증 상태 줄. 허브에 **닿는지**만 본다(자격 무관, `--selftest`)."""
+    return get_json(hub_url.rstrip("/") + "/", opener=opener)
+
+
+def ping(hub_url: str, token: str, *, opener=None) -> Response:
+    """`GET /api/market/ping` — 기기 토큰이 아직 유효한지(HUB-PROTOCOL §3-7). 200 이면 허브가 아는 기기 id 가 온다."""
+    return get_json(hub_url.rstrip("/") + "/api/market/ping", token=token, opener=opener)
 
 
 def upload(hub_url: str, token: str, device_id: str, observations: list, *, opener=None) -> Response:
@@ -124,6 +147,44 @@ def describe_register(resp: Response) -> str:
         field_name = resp.body.get("field")
         return f"등록 요청이 거부됐습니다(형식 오류{': ' + str(field_name) if field_name else ''})."
     return f"등록 실패 — HTTP {resp.status} {resp.error or resp.text}".strip()
+
+
+def describe_status(resp: Response) -> str:
+    """`GET /` 결과 한 줄 — 허브에 **닿는지**만 말한다(자격 문제는 ping 이 본다)."""
+    if resp.ok:
+        return f"허브가 응답했습니다 (v{resp.body.get('v', '?')})"
+    if resp.tls:
+        return ("허브 인증서를 검증하지 못했습니다 — 이 PC 의 인증서 저장소가 낡았을 수 있습니다"
+                f" (Windows 업데이트 뒤 다시 시도). {resp.text}")
+    if resp.status == 0:
+        return f"허브에 닿지 못했습니다 — 주소·네트워크를 확인하세요. {resp.text}"
+    return f"허브 주소가 이상합니다 — HTTP {resp.status} {resp.error or resp.text}".strip()
+
+
+def describe_ping(resp: Response) -> str:
+    """토큰 확인 결과 한 줄 — 다음에 뭘 해야 하는지까지(`describe_register` 와 같은 문체).
+
+    허브가 **옛 판**(ping 없음)이면 404 이거나, 공개 리스너에서는 관리 라우트로 보여 403 `not_public` 이다 —
+    둘 다 사용자가 할 일은 같다(관리자에게 허브 업데이트 요청).
+    """
+    if resp.ok:
+        label = str(resp.body.get("label") or "")
+        return (f"허브가 기기 토큰을 확인했습니다 — 기기 {resp.body.get('device_id', '?')}"
+                + (f" ({label})" if label else ""))
+    if resp.tls:
+        return ("허브 인증서를 검증하지 못했습니다 — 이 PC 의 인증서 저장소가 낡았을 수 있습니다"
+                f" (Windows 업데이트 뒤 다시 시도). {resp.text}")
+    if resp.status == 0:
+        return f"허브에 닿지 못했습니다 — 주소·네트워크를 확인하세요. {resp.text}"
+    if resp.status == 404 or (resp.status == 403 and resp.error == "not_public"):
+        return "허브에 토큰 확인 기능이 없습니다 — 허브가 옛 판입니다(관리자에게 업데이트를 요청하세요)."
+    if resp.status == 401:
+        return "허브가 기기 토큰을 거부했습니다(401) — --invite-code 로 다시 등록하세요."
+    if resp.status == 403 and resp.error == "device_revoked":
+        return "이 기기가 허브 명단에서 제거됐습니다(403) — 관리자에게 문의하세요."
+    if resp.status == 429:
+        return f"요청이 너무 잦습니다 — {resp.retry_after:.0f}초 뒤에 다시 시도하세요."
+    return f"토큰 확인 실패 — HTTP {resp.status} {resp.error or resp.text}".strip()
 
 
 def classify_upload(resp: Response) -> tuple[str, str]:

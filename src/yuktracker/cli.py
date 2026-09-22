@@ -4,7 +4,7 @@ from __future__ import annotations
 import argparse
 import sys
 
-from . import __version__
+from . import __version__, selftest
 from .agent import DEFAULT_CAPTURE_MIN, FLOW_WAIT_SEC, RunOptions, run
 
 #: 소스 실행 모드에서 UAC 재기동에 쓰는 모듈(`python -m yuktracker`). exe 는 UAC 매니페스트로 뜬다.
@@ -19,8 +19,10 @@ def build_parser() -> argparse.ArgumentParser:
                     metavar="MIN",
                     help=f"발굴 수집 창(원시 패킷 창 파일)도 연다(분, 값 없이 주면 "
                          f"{DEFAULT_CAPTURE_MIN:g}). 없어도 육의전 관측·업로드는 돈다")
-    ap.add_argument("--wait", type=float, default=FLOW_WAIT_SEC, metavar="SEC",
-                    help=f"게임 흐름 대기 상한(초, 기본 {FLOW_WAIT_SEC:g})")
+    ap.add_argument("--wait", type=float, default=None, metavar="SEC",
+                    help=f"게임 흐름 대기 상한(초, 기본 {FLOW_WAIT_SEC:g} · --selftest 는 {selftest.WAIT_SEC:g})")
+    ap.add_argument("--selftest", action="store_true",
+                    help="관측하지 않고 자가진단만 한다(권한·Npcap·거상·아이템 표·허브·토큰·스풀)")
     ap.add_argument("--no-elevate", action="store_true",
                     help="관리자 권한 재기동을 시도하지 않는다(개발·테스트)")
     ap.add_argument("--no-pause", action="store_true",
@@ -66,7 +68,13 @@ def main(argv: list[str] | None = None) -> int:
                 return 0
             print("권한 상승이 거부되었거나 실패했습니다. 관리자 명령 프롬프트에서 다시 실행하세요.")
             return 2
-    opts = RunOptions(capture_min=args.capture, flow_wait_sec=args.wait,
+    if args.selftest:
+        # 승격 경로를 그대로 지난 뒤다 — Npcap 프로브·캡처 확인에 관리자 권한이 필요하다.
+        return selftest.main(hub_url=args.hub_url, client_dir=args.client_dir,
+                             upload=not args.no_upload, pause=not args.no_pause,
+                             wait_sec=selftest.WAIT_SEC if args.wait is None else args.wait)
+    opts = RunOptions(capture_min=args.capture,
+                      flow_wait_sec=FLOW_WAIT_SEC if args.wait is None else args.wait,
                       pause_on_exit=not args.no_pause, hub_url=args.hub_url,
                       invite_code=args.invite_code, device_label=args.device_label,
                       client_dir=args.client_dir, upload=not args.no_upload)

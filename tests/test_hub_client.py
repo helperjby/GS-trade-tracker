@@ -26,9 +26,20 @@ class _Handler(BaseHTTPRequestHandler):
             body = json.loads(raw.decode("utf-8"))
         except ValueError:
             body = None
-        _Handler.seen.append({"path": self.path, "auth": self.headers.get("Authorization"),
+        _Handler.seen.append({"path": self.path, "method": "POST",
+                              "auth": self.headers.get("Authorization"),
                               "ctype": self.headers.get("Content-Type"),
                               "len": self.headers.get("Content-Length"), "body": body})
+        self._reply()
+
+    def do_GET(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler 규약
+        _Handler.seen.append({"path": self.path, "method": "GET",
+                              "auth": self.headers.get("Authorization"),
+                              "ctype": self.headers.get("Content-Type"),
+                              "len": self.headers.get("Content-Length"), "body": None})
+        self._reply()
+
+    def _reply(self) -> None:
         status, headers, payload = (_Handler.script.pop(0) if _Handler.script
                                     else (200, {}, b'{"ok": true}'))
         self.send_response(status)
@@ -142,6 +153,63 @@ class UploadTest(_ServerTest):
         resp = hub_client.upload(f"http://127.0.0.1:{port}", "t", "d-1", [self._obs()])
         self.assertEqual((resp.status, resp.error), (0, "network"))
         self.assertEqual(hub_client.classify_upload(resp)[0], "retry")
+
+
+class PingTest(_ServerTest):
+    """`GET /` 와 `GET /api/market/ping` — 자가진단이 허브 도달과 토큰 유효를 나눠 보는 근거(HUB-PROTOCOL §3-7)."""
+
+    def test_ping_request_shape_and_success_line(self) -> None:
+        _Handler.script.append((200, {}, _json({"ok": True, "v": 1, "device_id": "d-1",
+                                                "label": "친구1", "server_time": 2.0})))
+        resp = hub_client.ping(self.url + "/", "tok-1")
+        sent = _Handler.seen[0]
+        self.assertEqual((sent["path"], sent["method"]), ("/api/market/ping", "GET"))
+        self.assertEqual(sent["auth"], "Bearer tok-1")
+        self.assertIsNone(sent["ctype"])            # 본문 없는 요청 — Content-Type 을 붙이지 않는다
+        self.assertTrue(resp.ok)
+        line = hub_client.describe_ping(resp)
+        self.assertIn("d-1", line)
+        self.assertIn("친구1", line)
+
+    def test_status_reports_reachability_only(self) -> None:
+        _Handler.script.append((200, {}, _json({"service": "yuktracker-hub", "v": 1,
+                                                "server_time": 2.0})))
+        resp = hub_client.status(self.url)
+        self.assertEqual(_Handler.seen[0]["path"], "/")
+        self.assertTrue(resp.ok)
+        self.assertIn("응답", hub_client.describe_status(resp))
+
+    def test_old_hub_without_the_route_is_named_as_such(self) -> None:
+        """허브가 아직 이 판이 아니면 404(직접 접속) 또는 403 not_public(공개 리스너) 이다 — 둘 다 같은 안내."""
+        for status, payload in ((404, b"Not Found"),
+                                (403, _json({"ok": False, "error": "not_public"}))):
+            with self.subTest(status=status):
+                _Handler.script.append((status, {}, payload))
+                line = hub_client.describe_ping(hub_client.ping(self.url, "t"))
+                self.assertIn("옛 판", line)
+
+    def test_rejected_tokens_are_explained(self) -> None:
+        cases = [
+            ((401, _json({"error": "unauthorized"})), "--invite-code"),
+            ((403, _json({"ok": False, "error": "device_revoked"})), "제거"),
+            ((429, _json({"ok": False, "error": "rate_limited", "retry_after": 7})), "7초"),
+            ((500, _json({"ok": False, "error": "storage_error"})), "500"),
+        ]
+        for (status, payload), expect in cases:
+            with self.subTest(status=status):
+                _Handler.script.append((status, {}, payload))
+                resp = hub_client.ping(self.url, "t")
+                self.assertFalse(resp.ok)
+                self.assertIn(expect, hub_client.describe_ping(resp))
+
+    def test_unreachable_hub_is_a_network_failure(self) -> None:
+        sock = socket.socket()
+        sock.bind(("127.0.0.1", 0))
+        port = sock.getsockname()[1]
+        sock.close()
+        resp = hub_client.status(f"http://127.0.0.1:{port}")
+        self.assertEqual((resp.status, resp.error), (0, "network"))
+        self.assertIn("닿지 못했습니다", hub_client.describe_status(resp))
 
 
 class ClassifyTest(unittest.TestCase):
