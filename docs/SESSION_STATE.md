@@ -140,7 +140,14 @@ SEAssist PR #306(PR-Y2) **미머지 → 닫음 예정, 이 레포로 이식(PR-Y
   **Funnel 은 443·8443 이 이미 같은 Pi 의 다른 서비스에 걸려 있다** → 사용자 결정: 공개 리스너는 **10000 번**
   (`sudo tailscale funnel --bg --https=10000 8801`, 주소 `https://<pi-node>.<tailnet>.ts.net:10000`). hub/README·DEPLOY·HUB-PROTOCOL·
   PLAN·`gen_build_config.py` 의 443 전제를 이 형태로 고쳤다(관측기는 주소를 통째로 받으므로 코드 무변경).
-- 남은 것: 재배포·Funnel(10000) → 폰 LTE 게이트 → `build.bat`(`:10000` 주소 주입) → exe 전달 → 실기기 G7.
+- **Pi 재배포·Funnel 개통 완료(2026-09-23 11:06, PR #13 머지 뒤)**: hub/ 재복사 → `config.json` 에 `invite_code` 병합(secret 유지) →
+  `docker compose up -d --build`(8800 + 127.0.0.1:8801) → `register` 401 `bad_invite`·`devices.py` 동작 → `funnel --bg --https=10000 8801` →
+  공개 URL 게이트 전부 통과(GET / 200 · 더미 Bearer stats 403 `not_public` · bad invite 401 · GATE 등록 → ping 200 → revoke → 403
+  `device_revoked`, 공개 요청 XFF 경고 0). 폰 LTE 재확인은 사용자.
+- **첫 실빌드에서 드러난 결함(2026-09-23, PR #14)**: DEPLOY §2 대로 `YUKTRACKER_HUB_URL` 을 켜고 `build.bat` 을 돌리면 테스트 단계가
+  4건 깨진다 — 환경변수와 이전 빌드의 `_build_config.py`(`BUILD_HUB_URL`)가 "허브 주소 없음" 전제 테스트(자가진단 SKIP·관측만·등록
+  프롬프트 없음 → stdin 을 먹어 콘솔 훅 테스트까지 흐름이 바뀜)에 샜다. `tests/conftest.py` autouse 픽스처가 둘 다 지운다.
+- 남은 것: exe 전달 → 실기기 G7.
 
 ## 현재 상태
 
