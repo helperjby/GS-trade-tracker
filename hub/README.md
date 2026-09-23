@@ -128,7 +128,12 @@ docker compose exec yuktracker-hub python devices.py alias <device_id> "친구1"
 - `devices.py revoke <device_id>` 는 그 밖의 경우(분실·남용) — 제거는 **soft** 라 행은 감사용으로 남는다. 남용은 그 슬롯의 코드
   교체 → `docker compose restart`(기존 토큰 유지, 신규 등록만 막힘). 슬롯 추가도 같은 방법(표에 한 줄 + restart).
 - 별칭: `devices.py alias <device_id> "소가"` — 슬롯 이름이 자동으로 들어가므로 보통은 손댈 일이 없다. 바꿔도 재등록 교체는
-  `slot` 으로 찾는다. 빈 문자열이면 해제. 자리 현황은 `stats` 의 `devices_registered`/`devices_max`.
+  `slot` 으로 찾는다(재설치 때 별칭은 새 기기로 승계된다). 빈 문자열이면 해제. 자리 현황은 `stats` 의 `devices_registered`/`devices_max`
+  (`devices_orphaned` 가 0 이 아니면 설정 슬롯에 없는 등록 기기가 있다 — 아래).
+- **슬롯 이름은 바꾸지 않는 게 좋다**: 이름이 곧 기기의 정체성이라 `slot1` → `철수` 로 바꾸면 옛 이름으로 등록된 기기는 재등록 교체
+  대상에서 빠져 계속 올린다. 기동 로그에 `설정 슬롯에 없는 등록 기기 N개` 경고가 뜨면 그 기기를 `revoke` 하거나 이름을 되돌린다.
+  표시 이름을 바꾸고 싶으면 `alias` 로. 한 슬롯을 시간당 `register_slot_limit_per_hour`(5) 넘게 재등록하면 429 — 코드가 샜다는 신호이니
+  그 슬롯의 코드를 바꾼다. `devices.py list --active` 는 교체로 쌓인 옛 행을 뺀 현황판.
 - 관리 시크릿은 Funnel 을 타지 않는다(`admin_public` false) — 봇은 127.0.0.1:8800, 제작자는 tailnet/LAN 의 8800 직접. 공개 리스너는
   자격을 보지 않고 403 을 주며, 8800 에 실수로 Funnel 을 걸어도 `Tailscale-Funnel-Request` 헤더로 한 번 더 막는다(2차 방어).
 - 속도제한: 등록 IP 10/h, 업로드 기기 120/min(취소된 기기의 폭주도), 인증 실패 공개 IP 30/min — 토큰 검사 뒤 실패에만(공유 NAT 의

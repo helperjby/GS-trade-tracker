@@ -30,7 +30,8 @@
   | `GET /api/market/search` `listings` `stats` | **`403 {"ok":false,"error":"not_public"}`**(자격 검사 전) | 관리 시크릿 `Authorization: Bearer <secret>` |
 
   자격 없음·불일치·범위 밖(기기 토큰으로 조회, 공개 요청의 관리 시크릿)은 전부 `401 {"error":"unauthorized"}`.
-- 속도제한(프로세스 메모리, 재기동이면 리셋; 두 리스너가 버킷을 공유): 등록 IP 당 `register_limit_per_hour`(10), 업로드 기기 당
+- 속도제한(프로세스 메모리, 재기동이면 리셋; 두 리스너가 버킷을 공유): 등록 IP 당 `register_limit_per_hour`(10)·등록 **슬롯당**
+  `register_slot_limit_per_hour`(5, 성공한 교체만 — 새어 나간 코드로 한 슬롯을 계속 갈아치우지 못하게), 업로드 기기 당
   `upload_limit_per_min`(120 — 관리 시크릿은 무제한; 취소 검사보다 먼저라 취소된 클라의 폭주도 기기 단위로 429), 인증 실패 **공개
   요청** IP 당 `auth_fail_limit_per_min`(30) — 토큰 검사 **뒤** 실패에만 센다(공유 NAT 뒤의 고장난 클라 하나가 같은 IP 의 정상
   기기를 막지 않게; 직접 접속은 브리지 IP 를 봇과 공유하므로 세지 않는다). 초과는 `429 {"ok":false,"error":"rate_limited",
@@ -113,11 +114,15 @@ CREATE TABLE devices (                  -- 초대 코드로 자기등록한 관�
 초대 코드는 **슬롯별**이다(2026-09-23 사용자 결정 — 설정 `invite_codes = {슬롯 이름: 코드}`, 슬롯 = 지인 한 사람, 정원 = 슬롯 수):
 코드가 어느 슬롯인지 정하고, 기기 행에 `slot` 과 초기 `alias`(= 슬롯 이름)가 들어가 등록 즉시 명단에서 누구인지 보인다. **같은 슬롯
 코드로 다시 등록하면**(재설치·PC 교체) 새 기기가 슬롯을 받고 그 슬롯의 등록(미제거) 기기는 **같은 트랜잭션에서 제거**된다
-(`revoked_ts`, note `재등록 교체 → <새 id>`, 응답 `replaced` 에 id) — 관리자 개입 없이 끝나고 옛 exe 가 남아 있어도 다음 업로드부터
-`403 device_revoked`. 관리자가 별칭을 바꿔도 교체는 `slot` 으로 찾는다. 슬롯 없이 만든 행(수동 삽입)은 어떤 재등록에도 교체되지 않는다.
+(`revoked_ts`, note 는 관리자 메모 뒤에 `/ 재등록 교체 → <새 id>` 를 **덧붙임**, 응답 `replaced` 에 id) — 관리자 개입 없이 끝나고 옛 exe 가
+남아 있어도 다음 업로드부터 `403 device_revoked`. 새 기기의 `alias` 는 교체된 기기의 별칭을 **승계**(관리자가 붙인 이름이 재설치마다
+사라지지 않게), 없으면 슬롯 이름. 교체는 `slot` 으로 찾는다 — **슬롯 이름은 기기의 정체성**이라 config 에서 이름을 바꾸면 옛 이름의
+기기는 교체 대상에서 빠져 계속 올린다(기동 경고 + `stats.devices_orphaned`; 옛 기기를 `revoke` 하거나 이름을 되돌린다). 슬롯 없이 만든
+행(수동 삽입)도 마찬가지로 교체되지 않는다. 조회~삽입~제거는 `BEGIN IMMEDIATE` 한 트랜잭션(동시 `devices.py unrevoke` 와 안 엇갈린다).
 
 검사 순서(고정): ① IP 속도제한 — 성공·실패 모두 센다(코드 비교 전에 무차별 대입 상한) → ② 본문 크기(파싱 전) → ③ 등록 닫힘 →
-④ 본문 → ⑤ 코드(앞뒤 공백을 벗긴 뒤 슬롯 수만큼 상수 시간 비교, 조기 종료 없음) → ⑥ 발급 + 같은 슬롯 교체. 정원 검사는 없다.
+④ 본문 → ⑤ 코드(앞뒤 공백을 벗긴 뒤 슬롯 수만큼 상수 시간 비교, 조기 종료 없음) → ⑥ 슬롯당 속도제한(`429 rate_limited`) → ⑦ 발급 +
+같은 슬롯 교체. 정원 검사는 없다.
 
 | 응답 | 조건 |
 |---|---|
@@ -241,8 +246,9 @@ CREATE TABLE devices (                  -- 초대 코드로 자기등록한 관�
  "fresh_listings":210,"fresh_sec":86400.0,"latest_recv_ts":1758500055.2,
  "devices":[{"device_id":"d-3f9a1c7e2b","label":"DESKTOP-ABC","alias":"소가","slot":"slot3","observations":300,"last_recv_ts":…},
             {"device_id":"DEV-2","label":null,"alias":null,"slot":null,"observations":112,"last_recv_ts":…}],
- "devices_registered":5,"devices_revoked":1,"devices_max":7}      // label·alias·slot: 등록 기기만, 관리 시크릿 업로드는 null
-                                                                 // 집계: 등록(미제거) / 제거 / 정원 = 설정 invite_codes 의 슬롯 수
+ "devices_registered":5,"devices_revoked":1,"devices_orphaned":0,"devices_max":7}   // label·alias·slot: 등록 기기만, 관리 시크릿 업로드는 null
+                                          // 집계: 등록(미제거) / 제거 / 등록됐지만 설정 슬롯에 없는 기기(이름 변경·수동 삽입) / 정원 = 슬롯 수
+                                          // 아직 안 들어온 사람 = devices_max − (devices_registered − devices_orphaned)
 ```
 
 ### 3-5. `GET /` — 무인증 상태 줄
@@ -252,7 +258,7 @@ CREATE TABLE devices (                  -- 초대 코드로 자기등록한 관�
 ### 3-6. 기기 관리 — `hub/devices.py` (HTTP 아님, Pi 에서)
 
 ```bash
-docker compose exec yuktracker-hub python devices.py list                      # device_id slot alias label created last_seen uploads revoked note
+docker compose exec yuktracker-hub python devices.py list [--active]           # device_id slot alias label created last_seen uploads revoked note; --active = 미제거만
 docker compose exec yuktracker-hub python devices.py revoke <device_id> --note "사유"   # 명단에서 제거(분실·남용 — 재설치는 재등록 교체가 알아서 한다)
 docker compose exec yuktracker-hub python devices.py unrevoke <device_id>
 docker compose exec yuktracker-hub python devices.py alias <device_id> "<별칭>"        # 빈 문자열이면 해제
@@ -318,7 +324,7 @@ HTTP 관리 라우트를 두지 않는 이유: 공개 표면을 늘리지 않고
 코드}` 객체; 없음·null·빈 객체 = 등록 닫힘. 슬롯 이름 = 인쇄 가능 문자 1~64자·공백 벗김·중복 금지, 초기 별칭이 된다. 코드 = 공백을
 벗긴 뒤 **8자 이상**, 예시값(`CHANGE-ME…`)·`secret` 과 같은 값·**슬롯 간 중복**은 기동 거부 — 코드는 지인 한 사람에게 주는 반공개 값,
 정원 = 슬롯 수) `admin_public`(false) `proxy_header`(`Tailscale-Funnel-Request`; Cloudflare Tunnel 로 바꾸면 `CF-Connecting-IP`)
-`register_limit_per_hour`(10) `upload_limit_per_min`(120) `auth_fail_limit_per_min`(30). 설정은 기동 때 읽는다 — 코드 교체·슬롯 추가는
+`register_limit_per_hour`(10) `register_slot_limit_per_hour`(5) `upload_limit_per_min`(120) `auth_fail_limit_per_min`(30). 설정은 기동 때 읽는다 — 코드 교체·슬롯 추가는
 `config.json` 수정 뒤 `docker compose restart`. 구 `invite_code`·`max_devices` 키가 있으면 이관 안내와 함께 기동 거부.
 
 관측기 쪽 키(PR-Y1b, `%APPDATA%\YukTracker\config.json`): `hub_url`(공개 Funnel 주소; exe 내장 기본값) · `hub_device_id` · `hub_token`
@@ -331,6 +337,10 @@ HTTP 관리 라우트를 두지 않는 이유: 공개 표면을 늘리지 않고
   → `invite_codes = {슬롯: 코드}`(정원 = 슬롯 수, 코드 슬롯 간 중복 금지, 구 키는 기동 거부), §1 `devices.slot`(기존 DB 는 ADD COLUMN —
   무마이그레이션 규칙의 유일한 additive 예외) + 초기 `alias` = 슬롯 이름, §3-0 응답 `slot`·`replaced` + 같은 슬롯 재등록은 옛 기기를
   같은 트랜잭션에서 제거(`registration_full` 폐지), §3-4 `devices[].slot`·`devices_max` = 슬롯 수, §3-6 표에 `slot` 열.
+  `/code-review 15 high` 10건 반영: 슬롯당 등록 상한 `register_slot_limit_per_hour`(정원 폐지의 보완), 교체 때 별칭 승계·메모 덧붙임,
+  `_tx` 는 `BEGIN IMMEDIATE`(조회부터 같은 트랜잭션), ADD COLUMN 은 검사 없이 시도 + 중복만 삼킴(동시 첫 열기 경쟁 제거), 슬롯 이름
+  변경의 고아 기기 = 기동 경고 + `stats.devices_orphaned`, `devices.py list --active`, 슬롯 이름·label 검사 한 함수(`printable_name`),
+  예시값 규칙 하나(`CHANGE-ME` 접두), '정원 자리' 문구 정리.
 - 2026-09-22 v1 — 최초. SEAssist `dashboard/` 확장(구 PR-Y3 계획) 대신 이 레포의 독립 서버로(사용자 결정: SEAssist 레포 머지 중단).
 - 2026-09-22 v1 리뷰 반영(PR #6, additive): §3-3 복합 keyset 커서(`since_key`·`next_since_key`·행 `listing_key`), §3-1 i64 범위·
   문자열 상한·`agent_ts_out_of_range`·`500 storage_error`·payload 행은 미지 키만, §3-2 `item_id` 400, §1 이름 upsert 규칙,

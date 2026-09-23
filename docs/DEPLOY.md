@@ -94,7 +94,8 @@ curl -s -H "Authorization: Bearer <관리 시크릿>" "http://<pi-tailnet-ip>:88
 
 ## 5. G7 2차 — 운영 확인
 
-- `GET /api/market/stats` 의 `observations`·`devices_registered` 가 는다(`devices_max` = 슬롯 수와 비교해 아직 안 들어온 사람).
+- `GET /api/market/stats` 의 `observations`·`devices_registered` 가 는다(아직 안 들어온 사람 = `devices_max` − (`devices_registered` −
+  `devices_orphaned`); `devices_orphaned` ≠ 0 이면 설정 슬롯 이름과 안 맞는 기기가 있다 — hub/README 운영 메모).
 - `docker compose logs --tail 50` 에 `market 관측 수신: d-… (별칭) 신규 N / 중복 M / 행 K` 줄.
 - 기기가 하나도 안 올라오면: 그 PC 에서 `--selftest` → `기기 토큰` 줄이 401/403 인지, `패킷 흐름` 줄이 X 인지로 갈린다.
 - 결과는 `SESSION_STATE.md` 에 날짜와 함께 한 줄 기록(기기명·주소는 자리표시자로).

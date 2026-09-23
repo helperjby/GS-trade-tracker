@@ -39,12 +39,16 @@ def test_register_happy_path_no_bearer_and_token_hashed(tmp_path):
             assert stored == hashlib.sha256(data["token"].encode()).hexdigest()
             # 같은 슬롯 코드로 재등록(재설치·토큰 분실) = 새 기기가 슬롯을 받고 옛 기기는 같은 트랜잭션에서 제거
             app_db(app).set_device_alias(data["device_id"], "소가")           # 관리자가 별칭을 바꿔도 slot 으로 찾는다
+            app_db(app).set_device_note(data["device_id"], "분실 신고")
             st2, data2 = await register(client, label="DESKTOP-ABC")
             assert st2 == 200 and data2["device_id"] != data["device_id"]
             assert data2["replaced"] == [data["device_id"]]
             old = app_db(app).get_device(data["device_id"])
-            assert old["revoked_ts"] is not None and old["note"] == f"재등록 교체 → {data2['device_id']}"
+            assert old["revoked_ts"] is not None
+            assert old["note"] == f"분실 신고 / 재등록 교체 → {data2['device_id']}"   # 관리자 메모는 덧붙여 보존
+            assert app_db(app).get_device(data2["device_id"])["alias"] == "소가"      # 별칭 승계
             assert app_db(app).count_active_devices() == 1
+            assert [d["device_id"] for d in app_db(app).list_devices(active_only=True)] == [data2["device_id"]]
             # label 생략·null 은 빈 문자열, 직접 접속의 created_ip 는 소켓 peer; 초대 코드 앞뒤 공백은 벗긴다(콘솔 붙여넣기)
             st3, data3 = await register(client, invite=f"  {INVITE} ", label=None)
             assert st3 == 200 and data3["replaced"] == [data2["device_id"]]
@@ -88,8 +92,8 @@ def test_register_bad_invite_validation_stats_and_closed(tmp_path):
             st, second = await register(client)                        # slot1 재등록 → first 교체, orphan 은 그대로
             assert st == 200 and second["replaced"] == [first["device_id"]]
             st, s = await get(client, "/api/market/stats")
-            # registered = orphan + second / revoked = first, devices_max = 슬롯 수(설정 표 크기)
-            assert (s["devices_registered"], s["devices_revoked"], s["devices_max"]) == (2, 1, 2)
+            # registered = orphan + second / revoked = first, devices_max = 슬롯 수(설정 표 크기), orphaned = 슬롯 없는 orphan
+            assert (s["devices_registered"], s["devices_revoked"], s["devices_max"], s["devices_orphaned"]) == (2, 1, 2, 1)
             assert orphan in [d["device_id"] for d in app_db(app).list_devices()]
             st, data = await register(client, invite="wrong-code")
             assert (st, data["error"]) == (401, "bad_invite")
@@ -101,6 +105,41 @@ def test_register_bad_invite_validation_stats_and_closed(tmp_path):
             assert (st, data["error"]) == (403, "registration_closed")
             st, data = await register(client2, invite="")             # 닫힘이 본문 검사보다 먼저
             assert (st, data["error"]) == (403, "registration_closed")
+        finally:
+            await client2.close()
+    _run(scn())
+
+
+def test_register_per_slot_rate_limit_and_slot_rename_warning(tmp_path, caplog):
+    """코드가 새도 한 슬롯을 시간당 상한 넘게 교체하지 못한다(정원 검사 폐지의 보완). 슬롯 이름을 바꾸면 옛 이름의 기기는
+    교체 대상에서 빠지므로 기동 때 경고 + stats.devices_orphaned."""
+    async def scn():
+        app, client = await start_client(make_cfg(tmp_path, register_slot_limit_per_hour=2, register_limit_per_hour=100))
+        try:
+            st, a = await register(client, headers={**PROXY, "X-Forwarded-For": "203.0.113.1"})
+            st, b = await register(client, headers={**PROXY, "X-Forwarded-For": "203.0.113.2"})
+            assert st == 200 and b["replaced"] == [a["device_id"]]
+            resp = await client.post("/api/market/register", json={"v": 1, "invite_code": INVITE},
+                                     headers={**PROXY, "X-Forwarded-For": "203.0.113.3"})   # IP 는 새것 — 슬롯 버킷이 막는다
+            assert resp.status == 429 and (await resp.json())["error"] == "rate_limited"
+            assert app_db(app).count_active_devices() == 1
+            st, c = await register(client, invite=INVITE2, headers={**PROXY, "X-Forwarded-For": "203.0.113.4"})
+            assert st == 200                                                    # 다른 슬롯은 별개 버킷
+        finally:
+            await client.close()
+        # 슬롯 이름 변경: slot1 → 철수 (같은 코드). 옛 slot1 기기는 활성인 채 어느 슬롯에도 안 속한다.
+        cfg2 = make_cfg(tmp_path, invite_codes={"철수": INVITE, "slot2": INVITE2})
+        caplog.clear()
+        app2, client2 = await start_client(cfg2)
+        try:
+            assert any("설정 슬롯에 없는 등록 기기 1개" in r.getMessage() and b["device_id"] in r.getMessage()
+                       for r in caplog.records)
+            st, s = await get(client2, "/api/market/stats")
+            assert (s["devices_registered"], s["devices_orphaned"], s["devices_max"]) == (2, 1, 2)
+            st, d = await register(client2, headers=PROXY)                      # 철수 로 등록 — slot1 기기는 교체되지 않는다
+            assert st == 200 and (d["slot"], d["replaced"]) == ("철수", [])
+            st, s = await get(client2, "/api/market/stats")
+            assert (s["devices_registered"], s["devices_orphaned"]) == (3, 1)
         finally:
             await client2.close()
     _run(scn())
@@ -138,11 +177,11 @@ def test_register_rate_limited_per_ip_uses_last_xff_entry(tmp_path):
             spoof = {**PROXY, "X-Forwarded-For": "198.51.100.9, 203.0.113.7"}
             st, data = await register(client, headers=spoof)
             assert (st, data["error"]) == (429, "rate_limited")
-            # 다른 원 IP 는 다른 버킷
-            st, data = await register(client, headers={**PROXY, "X-Forwarded-For": "198.51.100.9"})
+            # 다른 원 IP 는 다른 버킷 (slot1 은 위에서 슬롯당 상한 2 를 채웠으므로 slot2 코드로 — 슬롯 버킷은 별도 테스트)
+            st, data = await register(client, invite=INVITE2, headers={**PROXY, "X-Forwarded-For": "198.51.100.9"})
             assert st == 200
             # 직접 접속(프록시 헤더 없음)은 소켓 peer 버킷 — X-Forwarded-For 를 스스로 붙여도 무시된다
-            st, data = await register(client, headers={"X-Forwarded-For": "203.0.113.7"})
+            st, data = await register(client, invite=INVITE2, headers={"X-Forwarded-For": "203.0.113.7"})
             assert st == 200
             assert app_db(app).list_devices()[-1]["created_ip"] == "127.0.0.1"
             # 공개인데 X-Forwarded-For 가 없으면 'public:?' 한 버킷(브리지 IP 와 섞이지 않는다)

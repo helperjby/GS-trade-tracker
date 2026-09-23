@@ -1,7 +1,7 @@
 """허브 기기 관리 CLI — 초대 코드로 자기등록한 관측기 기기의 목록·제거·복구·별칭·메모. 서버와 같은 SQLite 파일에 직접 쓴다.
 
-    python devices.py [--db PATH] list
-    python devices.py [--db PATH] revoke <device_id> [--note TEXT]        # 명단에서 제거 — 정원 자리가 바로 빈다
+    python devices.py [--db PATH] list [--active]                         # --active = 미제거 기기만(교체로 쌓인 옛 행 제외)
+    python devices.py [--db PATH] revoke <device_id> [--note TEXT]        # 명단에서 제거 — 다음 업로드부터 403
     python devices.py [--db PATH] unrevoke <device_id>
     python devices.py [--db PATH] alias <device_id> <text>                # 관리자 별칭(빈 문자열이면 해제)
     python devices.py [--db PATH] note <device_id> <text>
@@ -76,9 +76,12 @@ def format_table(devices: list) -> str:
     return "\n".join(lines)
 
 
-def cmd_list(db: db_mod.Database, out) -> int:
-    devices = db.list_devices()
+def cmd_list(db: db_mod.Database, out, *, active_only: bool = False) -> int:
+    devices = db.list_devices(active_only=active_only)
     print(format_table(devices), file=out)
+    if active_only:
+        print(f"{len(devices)}행 (등록만 — 제거된 행은 --active 없이)", file=out)
+        return 0
     revoked = sum(1 for d in devices if d["revoked_ts"] is not None)
     # "등록" = 정원이 세는 것과 같은 정의(미제거) — 서버의 count_active_devices 와 어긋나지 않는다.
     # 정원 자체는 config 의 invite_codes 슬롯 수 / stats 의 devices_max 에 있다(여기서 config 를 읽지 않는다).
@@ -120,7 +123,7 @@ def cmd_unrevoke(db: db_mod.Database, device_id: str, out) -> int:
         print(f"이미 등록 상태: {device_id}", file=out)
         return 0
     db.set_device_revoked(device_id, None)
-    print(f"복구됨: {device_id} — 정원 자리 1개를 다시 차지한다", file=out)
+    print(f"복구됨: {device_id} — 다음 업로드부터 다시 받는다(같은 슬롯에 새 기기가 있으면 둘 다 올린다)", file=out)
     return 0
 
 
@@ -137,8 +140,9 @@ def main(argv=None, out=None, env=None, clock=time.time) -> int:
     parser = argparse.ArgumentParser(description="육의전 시세 허브 — 기기 관리")
     parser.add_argument("--db", help="SQLite 경로(기본: HUB_DB_PATH → config.json 의 db_path)")
     sub = parser.add_subparsers(dest="cmd", required=True)
-    sub.add_parser("list", help="기기 목록")
-    p = sub.add_parser("revoke", help="명단에서 제거(soft) — 다음 업로드부터 403, 정원 자리 반환")
+    p = sub.add_parser("list", help="기기 목록")
+    p.add_argument("--active", action="store_true", help="미제거 기기만(재등록 교체로 쌓인 옛 행 제외)")
+    p = sub.add_parser("revoke", help="명단에서 제거(soft) — 다음 업로드부터 403(재설치는 재등록 교체가 알아서 한다)")
     p.add_argument("device_id")
     p.add_argument("--note", help="사유 메모")
     p = sub.add_parser("unrevoke", help="제거 취소")
@@ -158,7 +162,7 @@ def main(argv=None, out=None, env=None, clock=time.time) -> int:
     db = db_mod.Database(path, timeout=DB_TIMEOUT_SEC)
     try:
         if args.cmd == "list":
-            return cmd_list(db, out)
+            return cmd_list(db, out, active_only=args.active)
         if args.cmd == "revoke":
             return cmd_revoke(db, args.device_id, args.note, clock(), out)
         if args.cmd == "unrevoke":

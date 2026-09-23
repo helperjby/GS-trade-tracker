@@ -22,6 +22,12 @@ SEAssist PR #306(PR-Y2) **미머지 → 닫음 예정, 이 레포로 이식(PR-Y
 - 문서: HUB-PROTOCOL §0·§1·§3-0·§3-4·§3-6·§6·§7, hub/README(설정 생성 = python 한 토막으로 슬롯 7개, 운영 메모 재설치 절 교체),
   DEPLOY(§0 이관 행·§1·§3 안내문 "본인 코드"·§5·증상표), PLAN, config.json.example.
 - 검증: hub 테스트(슬롯 교체·다른 슬롯 불간섭·옛 토큰 403·구 DB ADD COLUMN·설정 검증 표) + 루트 전체 통과(아래 커밋 메시지 수치).
+- **`/code-review 15 high` 10건 전부 반영**: ① 슬롯 이름 변경으로 고아가 된 기기 = 기동 경고 + `stats.devices_orphaned` + 문서(이름은
+  정체성), ② 교체 때 관리자 메모는 덧붙임(`… / 재등록 교체 → id`), ③ 별칭 승계, ④ 정원 폐지의 보완 = 슬롯당 등록 상한
+  `register_slot_limit_per_hour`(5, 429) + `devices.py list --active`, ⑤ ADD COLUMN 은 PRAGMA 검사 없이 시도하고 중복만 삼킴(서버·CLI
+  동시 첫 열기 경쟁 제거), ⑥ `_tx` 가 `BEGIN IMMEDIATE` 로 조회부터 잠금(동시 unrevoke 와 안 엇갈림), ⑦ '정원 자리' 문구 4곳 정리,
+  ⑧ 예시값 규칙은 `CHANGE-ME` 접두 하나, ⑨ 슬롯 이름·label 검사 `printable_name` 한 함수, ⑩ `create_device` 는 테스트·수동용임을
+  명시 + 슬롯 없는 행은 `devices_orphaned` 로 드러남.
 - 배포: Pi `config.json` 을 `invite_codes` 7슬롯으로 이관(secret 유지, 기존 단일 코드는 폐기) → hub/ 재복사 → `docker compose up -d
   --build` → 기동 로그 `registration=open(7 slots)` → 게이트(§0 표) → exe 는 무변경(재빌드 불필요).
 

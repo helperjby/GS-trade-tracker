@@ -83,6 +83,9 @@ DEFAULTS = {
     #: 관리 리스너에서 이 헤더가 있으면 공개 요청(tailscaled 가 Funnel 요청에 붙인다). Cloudflare Tunnel 이면 "CF-Connecting-IP".
     "proxy_header": "Tailscale-Funnel-Request",
     "register_limit_per_hour": 10,
+    #: 슬롯당 시간당 등록(교체) 상한 — 코드가 새도 한 슬롯을 계속 갈아치워 명단을 불리지 못한다(정원 검사 폐지의 보완).
+    #: IP 상한과 별개 키: IP 쪽은 실패까지 세는 무차별 대입 상한이고, 이쪽은 성공한 교체만 센다.
+    "register_slot_limit_per_hour": 5,
     "upload_limit_per_min": 120,
     "auth_fail_limit_per_min": 30,
 }
@@ -94,11 +97,8 @@ ENV_DB_PATH = "HUB_DB_PATH"
 MIN_SECRET_LEN = 16
 PLACEHOLDER_SECRETS = frozenset({"CHANGE-ME"})
 MIN_INVITE_LEN = 8
-#: 예시값 — 정확히 이 값이거나 `CHANGE-ME` 로 시작하면(예시 파일의 `CHANGE-ME-INVITE-1` 류) 거부.
-PLACEHOLDER_INVITES = frozenset({"CHANGE-ME", "CHANGE-ME-INVITE"})
+#: 예시값 — `CHANGE-ME` 로 시작하면(`CHANGE-ME`·`CHANGE-ME-INVITE`·예시 파일의 `CHANGE-ME-INVITE-1` 류 전부) 거부. 규칙은 이 하나.
 PLACEHOLDER_PREFIX = "CHANGE-ME"
-#: 슬롯 이름 — 초기 별칭이 되고 devices.py 표에 찍힌다(label 과 같은 규칙).
-MAX_SLOT_LEN = 64
 #: 2026-09-23 폐기 키 — 있으면 이관 안내로 기동 거부(조용히 무시하면 옛 설정이 등록 닫힘으로 보인다).
 LEGACY_KEYS = {"invite_code": "'invite_codes' 표({\"slot1\": \"<코드>\", …})로 옮기세요",
                "max_devices": "정원은 'invite_codes' 의 슬롯 수입니다 — 키를 지우세요"}
@@ -154,7 +154,8 @@ def load_config(path: str, env=None) -> dict:
             raise SystemExit(f"config: '{key}' 는 1~65535 정수여야 합니다")
     if cfg["port"] == cfg["public_port"]:
         raise SystemExit("config: 'public_port' 는 'port' 와 달라야 합니다 — 공개 리스너(Funnel 대상)와 관리 리스너를 나눈다")
-    for key in ("register_limit_per_hour", "upload_limit_per_min", "auth_fail_limit_per_min"):
+    for key in ("register_limit_per_hour", "register_slot_limit_per_hour", "upload_limit_per_min",
+                "auth_fail_limit_per_min"):
         v = cfg.get(key)
         if not _is_int(v) or v < 1:
             raise SystemExit(f"config: '{key}' 는 1 이상의 정수여야 합니다")
@@ -323,6 +324,17 @@ class _Bad(Exception):
         return web.json_response(body, status=400)
 
 
+def printable_name(value, max_len: int = MAX_LABEL_LEN) -> str | None:
+    """터미널에 그대로 찍히는 이름(label·슬롯 이름 = 초기 별칭)의 **한 규칙**: 문자열, strip 뒤 1~``max_len``자, 인쇄 가능 문자만.
+    아니면 None. label 은 빈 값을 허용하므로 호출자가 먼저 처리한다."""
+    if not isinstance(value, str):
+        return None
+    name = value.strip()
+    if not name or len(name) > max_len or not name.isprintable():
+        return None
+    return name
+
+
 def _load_invite_codes(raw, secret: str) -> dict:
     """`invite_codes` 검증 → `{슬롯: 코드}`(둘 다 strip). 없음·null·빈 표 = 등록 닫힘. 슬롯 이름은 label 규칙(인쇄 가능 ≤64,
     공백만 금지), 코드는 8자 이상·예시값 거부·secret 와 다름·**서로 다름**(같은 코드가 두 슬롯이면 어느 슬롯인지 정할 수 없다)."""
@@ -333,15 +345,15 @@ def _load_invite_codes(raw, secret: str) -> dict:
     codes: dict[str, str] = {}
     seen: dict[str, str] = {}
     for slot_raw, code_raw in raw.items():
-        slot = str(slot_raw).strip()
-        if not slot or len(slot) > MAX_SLOT_LEN or not slot.isprintable():
-            raise SystemExit(f"config: 'invite_codes' 의 슬롯 이름 {slot_raw!r} — 인쇄 가능 문자 1~{MAX_SLOT_LEN}자여야 합니다")
+        slot = printable_name(str(slot_raw))
+        if slot is None:
+            raise SystemExit(f"config: 'invite_codes' 의 슬롯 이름 {slot_raw!r} — 인쇄 가능 문자 1~{MAX_LABEL_LEN}자여야 합니다")
         if slot in codes:
             raise SystemExit(f"config: 'invite_codes' 의 슬롯 이름 '{slot}' 이 중복입니다(공백 차이만 다른 이름 포함)")
         if not isinstance(code_raw, str):
             raise SystemExit(f"config: 'invite_codes'['{slot}'] 는 문자열이어야 합니다")
         code = code_raw.strip()      # 손으로 편집한 config 의 앞뒤 공백이 영원한 bad_invite 가 되지 않게
-        if not code or code in PLACEHOLDER_INVITES or code.startswith(PLACEHOLDER_PREFIX):
+        if not code or code.startswith(PLACEHOLDER_PREFIX):
             raise SystemExit(f"config: 'invite_codes'['{slot}'] 가 비었거나 예시값입니다 — 실제 코드로 바꾸거나 슬롯을 지우세요")
         if len(code) < MIN_INVITE_LEN:
             raise SystemExit(f"config: 'invite_codes'['{slot}'] 는 {MIN_INVITE_LEN}자 이상이어야 합니다")
@@ -453,10 +465,12 @@ def validate_register(body) -> tuple:
     if not isinstance(invite, str) or not invite.strip():
         raise _Bad(field="invite_code")
     label = body.get("label")
-    label = "" if label is None else label
-    if not isinstance(label, str) or len(label) > MAX_LABEL_LEN or not label.isprintable():
+    if label is None or (isinstance(label, str) and not label.strip()):
+        return invite.strip(), ""
+    name = printable_name(label)
+    if name is None:
         raise _Bad(field="label")
-    return invite.strip(), label.strip()
+    return invite.strip(), name
 
 
 def _q_num(request: web.Request, key: str, default, cast, lo=None, hi=None):
@@ -523,7 +537,7 @@ async def api_market_ping(request: web.Request) -> web.Response:
 
 async def api_market_register(request: web.Request) -> web.Response:
     """초대 코드 → 기기 토큰. 순서: IP 속도제한(모든 시도를 센다 — 코드 비교 전에 무차별 대입 상한) → 본문 크기 →
-    등록 닫힘 → 본문 검증 → 코드 → 슬롯 매칭 → 발급(+ 같은 슬롯의 옛 기기 교체). 정원 검사는 없다 — 슬롯이 곧 정원.
+    등록 닫힘 → 본문 검증 → 코드 → 슬롯 매칭 → 슬롯당 속도제한 → 발급(+ 같은 슬롯의 옛 기기 교체). 정원 검사는 없다 — 슬롯이 곧 정원.
     토큰 원문은 응답에만, DB 엔 sha256."""
     cfg, limits = request.app[CFG_KEY], request.app[RL_KEY]
     ip = _client_ip(request)
@@ -552,6 +566,10 @@ async def api_market_register(request: web.Request) -> web.Response:
     if slot is None:
         log.info("기기 등록 거부(초대 코드 불일치): label=%r ip=%s", label, ip)
         return web.json_response({"ok": False, "error": "bad_invite"}, status=401)
+    wait = limits["register_slot"].hit("slot:" + slot)
+    if wait:
+        log.warning("기기 등록 거부(슬롯 %s 시간당 상한): label=%r ip=%s — 코드가 샜으면 config 의 그 슬롯 코드를 바꾸세요", slot, label, ip)
+        return _too_many(wait)
     db = request.app[DB_KEY]
     try:
         token = secrets.token_urlsafe(32)
@@ -654,7 +672,7 @@ async def api_market_listings(request: web.Request) -> web.Response:
 async def api_market_stats(request: web.Request) -> web.Response:
     cfg = request.app[CFG_KEY]
     now = time.time()
-    stats = request.app[DB_KEY].market_stats(now, float(cfg["search_max_age_sec"]))
+    stats = request.app[DB_KEY].market_stats(now, float(cfg["search_max_age_sec"]), slots=cfg["invite_codes"].keys())
     return web.json_response({"v": PROTO_V, "server_time": now,
                               "devices_max": len(cfg["invite_codes"]), **stats})
 
@@ -677,8 +695,22 @@ async def _retention_loop(app: web.Application) -> None:
 
 def make_limiters(cfg: dict) -> dict:
     return {"register": RateLimiter(cfg["register_limit_per_hour"], 3600),
+            # 슬롯당 같은 상한 — 코드가 새면 한 슬롯을 시간당 N번 이상 교체해 명단을 불리지 못한다(정원 검사 폐지의 보완).
+            "register_slot": RateLimiter(cfg["register_slot_limit_per_hour"], 3600),
             "upload": RateLimiter(cfg["upload_limit_per_min"], 60),
             "auth_fail": RateLimiter(cfg["auth_fail_limit_per_min"], 60)}
+
+
+def _warn_orphans(database: db_mod.Database, cfg: dict) -> None:
+    """슬롯 이름은 기기의 정체성이다 — config 에서 이름을 바꾸거나 지우면 옛 이름의 등록 기기는 재등록 교체에서 빠져 계속
+    올린다. 기동 때 한 번 알려 준다(`stats.devices_orphaned` 도 같은 수)."""
+    try:
+        orphans = database.orphan_devices(cfg["invite_codes"].keys())
+    except sqlite3.Error:
+        return
+    if orphans:
+        log.warning("설정 슬롯에 없는 등록 기기 %d개: %s — 슬롯 이름을 바꿨으면 옛 기기를 devices.py revoke 하거나 config 이름을 되돌리세요",
+                    len(orphans), ", ".join(f"{d['device_id']}(slot={d['slot'] or '-'})" for d in orphans))
 
 
 def make_app(cfg: dict, database: db_mod.Database | None = None, *, limits: dict | None = None,
@@ -692,6 +724,8 @@ def make_app(cfg: dict, database: db_mod.Database | None = None, *, limits: dict
     app[DB_KEY] = database if database is not None else db_mod.Database(cfg["db_path"])
     app[RL_KEY] = limits if limits is not None else make_limiters(cfg)
     app[PUBLIC_KEY] = bool(public_only)
+    if not public_only:
+        _warn_orphans(app[DB_KEY], cfg)
     app.router.add_get("/", index)
     app.router.add_post("/api/market/register", api_market_register)
     app.router.add_post("/api/market/observations", api_market_observations)

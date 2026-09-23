@@ -145,7 +145,9 @@ INSERT INTO devices (device_id, label, token_hash, created_ts) VALUES ('d-old', 
         assert (old["device_id"], old["slot"]) == ("d-old", "")
         new_id, replaced = d.register_slot_device("slot1", "PC-1", "h-1", 2.0, None)
         assert replaced == [] and d.get_device(new_id)["slot"] == "slot1"
-        d2 = db_mod.Database(path)      # 두 번째 열기 — 열이 이미 있으면 아무것도 안 한다
+        # 두 번째 열기 = 두 프로세스가 같은 순간 처음 여는 경쟁의 진 쪽과 같다 — ALTER 의 'duplicate column' 을 삼키고 지나간다
+        d2 = db_mod.Database(path)
+        assert {r[1] for r in d2._con.execute("PRAGMA table_info(devices)")} >= {"slot", "device_id"}
         d2.close()
     finally:
         d.close()
