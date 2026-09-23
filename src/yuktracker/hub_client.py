@@ -147,13 +147,14 @@ def _describe_transport(resp: Response) -> Optional[str]:
 def describe_register(resp: Response) -> str:
     """등록 실패 사유 한 줄 — 사용자가 다음에 뭘 해야 하는지까지."""
     if resp.ok:
-        return f"등록 완료 — 기기 {resp.body.get('device_id', '?')}"
+        slot = str(resp.body.get("slot") or "")
+        return f"등록 완료 — 기기 {resp.body.get('device_id', '?')}" + (f" (슬롯 {slot})" if slot else "")
     transport = _describe_transport(resp)
     if transport:
         return transport
     if resp.error == "bad_invite":
         return "초대 코드가 맞지 않습니다 — 관리자에게 받은 코드를 다시 확인하세요."
-    if resp.error == "registration_full":
+    if resp.error == "registration_full":       # 2026-09-23 이전 판 허브의 응답 — 호환용
         return "허브 정원이 찼습니다 — 관리자에게 자리 정리를 요청하세요."
     if resp.error == "registration_closed":
         return "허브가 지금 등록을 받지 않습니다 — 관리자에게 문의하세요."

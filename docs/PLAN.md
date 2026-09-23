@@ -143,8 +143,9 @@ python scripts/mine_packet_discovery.py --all --lead-sec 30
   **Tailscale Funnel** 로 공개(관리 리스너 8800 은 직접 접속 전용) + **초대 코드 자기등록**(`POST /api/market/register` → 기기별 토큰·허브
   발급 `device_id`, `devices` 표). 관리 시크릿은 exe 금지·공개 요청 무시(공개 리스너 전부 + 8800 의 `Tailscale-Funnel-Request` 헤더 2차
   방어, 조회 라우트 403 `not_public`), 속도제한 429, `hub/devices.py` CLI(제거 즉시 반영, 별칭). 배포는 **아는 사람 최대 7명**
-  (`max_devices` 7) — 명단은 관리자만 바꾸고 활성 여부에 따른 자동 제외는 두지 않는다. 정본 HUB-PROTOCOL §0·§3-0·§3-6,
-  절차 hub/README "공개 노출".
+  — 명단은 관리자만 바꾸고 활성 여부에 따른 자동 제외는 두지 않는다. **2026-09-23 슬롯별 초대 코드**(사용자 결정): `invite_codes =
+  {슬롯: 코드}`, 정원 = 슬롯 수, 등록 즉시 `slot`·별칭(= 슬롯 이름)이 명단에 보이고 같은 슬롯 재등록은 옛 기기를 자동 교체(재설치에 관리자
+  개입 없음). 정본 HUB-PROTOCOL §0·§3-0·§3-6, 절차 hub/README "공개 노출".
 
 ### PR-Y1b — 이 프로젝트, 관측 모드 (2026-09-22 **완료**)
 - `market_cb(slot_idx, page, observation, *, pid)`(엔진이 이미 파싱한 `MarketPage`) → 행마다 `row_to_dict` + `item_name`

@@ -1,4 +1,4 @@
-"""hub 설정 — secret·invite_code 규칙 · 포트 둘 · 상대 db_path 는 config 폴더 기준 · HUB_DB_PATH 환경변수 우선 · 새 키 검증."""
+"""hub 설정 — secret·invite_codes 규칙 · 포트 둘 · 상대 db_path 는 config 폴더 기준 · HUB_DB_PATH 환경변수 우선 · 새 키 검증."""
 from __future__ import annotations
 
 import json
@@ -54,32 +54,56 @@ def test_bad_secrets_refuse_to_start(tmp_path, secret, hint):
 
 
 @pytest.mark.parametrize("invite, hint", [
-    (123, "문자열"), ("short", "8자"), ("  short  ", "8자"), ("CHANGE-ME-INVITE", "예시값"), ("CHANGE-ME", "예시값"),
+    (123, "문자열"), ("short", "8자"), ("  short  ", "8자"), ("", "예시값"), ("   ", "예시값"),
+    ("CHANGE-ME-INVITE", "예시값"), ("CHANGE-ME", "예시값"), ("CHANGE-ME-INVITE-1", "예시값"),
     (GOOD_SECRET, "secret"), (" " + GOOD_SECRET + " ", "secret"),   # 초대 코드는 반공개 — 관리 시크릿을 그대로 쓰면 시크릿이 새는 것
 ])
 def test_bad_invite_codes_refuse_to_start(tmp_path, invite, hint):
-    p = _write(tmp_path, invite_code=invite)
+    p = _write(tmp_path, invite_codes={"slot1": invite})
     with pytest.raises(SystemExit) as ei:
         server_mod.load_config(str(p), env={})
+    assert hint in str(ei.value) and "slot1" in str(ei.value)
+
+
+@pytest.mark.parametrize("codes, hint", [
+    ("invite-code-1", "객체"), (["invite-code-1"], "객체"),
+    ({"": "invite-code-1"}, "슬롯 이름"), ({"   ": "invite-code-1"}, "슬롯 이름"), ({"a\x1b[31m": "invite-code-1"}, "슬롯 이름"),
+    ({"x" * 65: "invite-code-1"}, "슬롯 이름"),
+    ({"slot1": "invite-code-1", " slot1 ": "invite-code-2"}, "중복"),          # 공백 차이만 다른 슬롯 이름
+    ({"slot1": "invite-code-1", "slot2": " invite-code-1 "}, "같은 코드"),     # 어느 슬롯인지 정할 수 없다
+])
+def test_bad_invite_tables_refuse_to_start(tmp_path, codes, hint):
+    with pytest.raises(SystemExit) as ei:
+        server_mod.load_config(str(_write(tmp_path, invite_codes=codes)), env={})
     assert hint in str(ei.value)
 
 
-def test_invite_code_stripped_empty_means_closed_and_new_defaults(tmp_path):
+@pytest.mark.parametrize("key, value", [("invite_code", "invite-code-1"), ("invite_code", ""), ("max_devices", 7)])
+def test_legacy_keys_refuse_with_migration_hint(tmp_path, key, value):
+    """조용히 무시하면 옛 config 가 '등록 닫힘'으로 보인다 — 이관 안내와 함께 기동 거부."""
+    with pytest.raises(SystemExit) as ei:
+        server_mod.load_config(str(_write(tmp_path, invite_codes={"slot1": "invite-code-1"}, **{key: value})), env={})
+    assert key in str(ei.value) and "폐기" in str(ei.value)
+
+
+def test_invite_codes_missing_or_empty_means_closed_and_new_defaults(tmp_path):
     cfg = server_mod.load_config(str(_write(tmp_path)), env={})
-    assert cfg["invite_code"] == ""                              # 키 없음 = 등록 닫힘
-    assert server_mod.load_config(str(_write(tmp_path / "n", invite_code=None)), env={})["invite_code"] == ""
-    assert server_mod.load_config(str(_write(tmp_path / "w", invite_code="   ")), env={})["invite_code"] == ""
-    assert (cfg["port"], cfg["public_port"], cfg["max_devices"]) == (8800, 8801, 7)   # 정원 = 아는 사람 7명
+    assert cfg["invite_codes"] == {}                             # 키 없음 = 등록 닫힘
+    assert server_mod.load_config(str(_write(tmp_path / "n", invite_codes=None)), env={})["invite_codes"] == {}
+    assert server_mod.load_config(str(_write(tmp_path / "e", invite_codes={})), env={})["invite_codes"] == {}
+    assert "max_devices" not in cfg and "invite_code" not in cfg
+    assert (cfg["port"], cfg["public_port"]) == (8800, 8801)
     assert (cfg["admin_public"], cfg["proxy_header"]) == (False, "Tailscale-Funnel-Request")
     assert (cfg["register_limit_per_hour"], cfg["upload_limit_per_min"], cfg["auth_fail_limit_per_min"]) == (10, 120, 30)
-    cfg = server_mod.load_config(str(_write(tmp_path / "ok", invite_code=" invite-code-1 ", proxy_header=" CF-Connecting-IP ",
-                                           admin_public=True, max_devices=3, public_port=9001)), env={})
-    assert (cfg["invite_code"], cfg["proxy_header"], cfg["admin_public"], cfg["max_devices"], cfg["public_port"]) == (
-        "invite-code-1", "CF-Connecting-IP", True, 3, 9001)   # 손으로 편집한 공백은 벗긴다
+    cfg = server_mod.load_config(str(_write(tmp_path / "ok", invite_codes={" slot1 ": " invite-code-1 ", "철수": "invite-code-2"},
+                                           proxy_header=" CF-Connecting-IP ", admin_public=True, public_port=9001)), env={})
+    assert cfg["invite_codes"] == {"slot1": "invite-code-1", "철수": "invite-code-2"}   # 손으로 편집한 공백은 벗긴다
+    assert (cfg["proxy_header"], cfg["admin_public"], cfg["public_port"]) == ("CF-Connecting-IP", True, 9001)
+    assert server_mod.slot_for_invite(cfg["invite_codes"], "invite-code-2") == "철수"
+    assert server_mod.slot_for_invite(cfg["invite_codes"], "invite-code-3") is None
 
 
 @pytest.mark.parametrize("key, value", [
-    ("max_devices", 0), ("max_devices", True), ("max_devices", "5"),
     ("register_limit_per_hour", "10"), ("upload_limit_per_min", 0), ("auth_fail_limit_per_min", -1),
     ("admin_public", "no"), ("admin_public", 1), ("proxy_header", ""), ("proxy_header", "   "), ("proxy_header", 5),
     ("port", 0), ("port", "8800"), ("public_port", 70000), ("public_port", 8800),   # 두 리스너는 포트가 달라야 한다
@@ -106,7 +130,7 @@ def test_example_config_refuses_to_start_as_is(tmp_path):
     raw["secret"] = GOOD_SECRET
     with pytest.raises(SystemExit) as ei:
         server_mod.load_config(str(_write(tmp_path / "b", **raw)), env={})
-    assert "invite_code" in str(ei.value)
-    raw["invite_code"] = "invite-code-1"
+    assert "invite_codes" in str(ei.value)
+    raw["invite_codes"] = {"slot1": "invite-code-1", "slot2": "invite-code-2"}
     cfg = server_mod.load_config(str(_write(tmp_path / "c", **raw)), env={})
     assert (cfg["port"], cfg["public_port"]) == (8800, 8801)

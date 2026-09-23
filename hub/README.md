@@ -19,7 +19,7 @@
 ## 로컬 개발 (Windows)
 
 ```powershell
-copy config.json.example config.json        # secret(16자↑)·invite_code(8자↑, 비우면 등록 닫힘) — 예시값이면 기동 거부. 상대 db_path 는 이 폴더(config 위치) 기준 —
+copy config.json.example config.json        # secret(16자↑)·invite_codes({슬롯: 코드}, 코드 8자↑·서로 다름, 비우면 등록 닫힘) — 예시값이면 기동 거부. 상대 db_path 는 이 폴더(config 위치) 기준 —
                                             # 레포가 OneDrive 안이면 db_path 를 OneDrive 밖 절대 경로로(WAL 과 동기화 충돌)
 pip install -r requirements.txt
 python server.py --config config.json
@@ -31,7 +31,7 @@ python -X utf8 -m pytest tests -q            # repo 루트에서는: python -X u
 ```bash
 curl -s http://127.0.0.1:8800/
 curl -s -X POST http://127.0.0.1:8800/api/market/register -H "Content-Type: application/json" \
-  -d '{"v":1,"invite_code":"<invite_code>","label":"DEV-1"}'          # → device_id·token — 기기 토큰 업로드는 device_id 를 이 값으로
+  -d '{"v":1,"invite_code":"<slot1 의 코드>","label":"DEV-1"}'        # → device_id·token·slot — 기기 토큰 업로드는 device_id 를 이 값으로
 curl -s -X POST http://127.0.0.1:8800/api/market/observations \
   -H "Authorization: Bearer <secret>" -H "Content-Type: application/json" \
   -d '{"v":1,"device_id":"DEV-1","observations":[{"obs_id":"DEV-1:1758500000000:0123456789ab","agent_ts":1758500000.0,"opcode":12831,"page":null,"total_pages":1,"hdr4":0,"anomalies":[],"rows":[{"listing_id":700001,"item_id":853,"item_name":"봉인의돌","quantity":10,"quantity_hi":0,"price":45000000,"price_hi":0,"seller":"판매자A","unknown40":"00000000","flag45":2,"flag46":0}]}]}'
@@ -56,10 +56,14 @@ tar -C "$REPO" -czf - --exclude=hub/data --exclude=hub/config.json hub \
 
 # 2) 파이에서 1회 설정
 cd ~/yuktracker-hub
-S=$(python3 -c 'import secrets;print(secrets.token_urlsafe(24))'); I=$(python3 -c 'import secrets;print(secrets.token_urlsafe(9))')
-sed -e "s/CHANGE-ME-INVITE/$I/" -e "s/CHANGE-ME/$S/" config.json.example > config.json; chmod 600 config.json
-                                        # secret 32자(관리 — 봇·제작자만) · invite_code 12자(지인 공유; 비우면 등록 닫힘). INVITE 치환이 먼저여야 한다.
-                                        # db_path 는 손대지 않아도 된다 — 컨테이너는 HUB_DB_PATH=/data/hub.db
+python3 - <<'PY'                        # secret 32자(관리 — 봇·제작자만) · 슬롯 7개에 12자 코드 하나씩(지인 한 사람 = 슬롯 하나; 이름은 나중에 바꿔도 된다)
+import json, secrets
+cfg = json.load(open("config.json.example"))
+cfg["secret"] = secrets.token_urlsafe(24)
+cfg["invite_codes"] = {f"slot{i}": secrets.token_urlsafe(9) for i in range(1, 8)}
+json.dump(cfg, open("config.json", "w"), indent=2, ensure_ascii=False)
+PY
+chmod 600 config.json                   # db_path 는 손대지 않아도 된다 — 컨테이너는 HUB_DB_PATH=/data/hub.db
 # (선택) 데이터를 다른 폴더에 두려면: echo "HUB_DATA_DIR=$HOME/yuktracker-hub/data" > .env   — 기본은 ./data
 #        .env 는 셸이 읽지 않는다 — `~` 는 확장되지 않으니 반드시 절대 경로를 쓴다(위처럼 $HOME 을 셸에서 펼쳐 넣는다).
 
@@ -83,7 +87,7 @@ curl -s -H "Authorization: Bearer <시크릿>" http://127.0.0.1:8800/api/market/
   (TLS 는 Funnel 이 맡고, 그 밖의 경로는 신뢰망 안이라는 전제).
   **실주소는 시크릿과 같이 레포·문서에 적지 않는다** — Pi 에서 `tailscale ip -4`(tailnet) · `hostname -I`(LAN) 로 그때그때 확인하고,
   관측기·봇에는 `hub_url`/`MIRUBOT_MARKET_API_ORIGIN` 설정값으로만 넣는다.
-- 자격: `secret`(관리 — 봇·제작자 조회, 직접 접속 전용, exe 에 넣지 않는다) / `invite_code`(지인 공유 — 기기 등록) / 기기 토큰
+- 자격: `secret`(관리 — 봇·제작자 조회, 직접 접속 전용, exe 에 넣지 않는다) / `invite_codes`(슬롯별 — 지인 한 사람에게 그 슬롯 코드) / 기기 토큰
   (등록 응답, 관측기 `hub_token`). 레포엔 `.example` 만 커밋.
 - 판매자명 등 실데이터가 DB 에 쌓인다 — 볼륨은 Pi 로컬(OneDrive 밖), 덤프·DB 를 레포에 넣지 않는다.
 
@@ -107,27 +111,24 @@ H=https://<pi-node>.<tailnet>.ts.net:10000
 curl -s $H/                                                                   # 200 상태 줄 (첫 요청은 인증서 발급으로 수 초)
 curl -s -H "Authorization: Bearer x" $H/api/market/stats                      # 403 {"ok":false,"error":"not_public"} — 공개 리스너는 자격을 보지도 않는다
 curl -s -X POST $H/api/market/register -H "Content-Type: application/json" \
-  -d '{"v":1,"invite_code":"<invite_code>","label":"GATE"}'                   # 200 device_id·token
+  -d '{"v":1,"invite_code":"<어느 슬롯의 코드>","label":"GATE"}'              # 200 device_id·token·slot — 그 슬롯의 지인이 등록하면 GATE 는 자동 교체된다
 curl -s -X POST $H/api/market/register -H "Content-Type: application/json" \
   -d '{"v":1,"invite_code":"nope"}'                                           # 401 bad_invite
 curl -s -H "Authorization: Bearer <위 200 응답의 token>" $H/api/market/ping               # 200 device_id — 지인 PC 의 자가진단이 쓰는 라우트(§3-7)
-docker compose exec yuktracker-hub python devices.py list                     # GATE 가 보인다 → revoke <device_id> --note gate
-docker compose exec yuktracker-hub python devices.py alias <device_id> "친구1"  # 관리자 별칭(목록·로그에 이 이름이 먼저)
+docker compose exec yuktracker-hub python devices.py list                     # GATE 가 slot 열과 함께 보인다 → revoke <device_id> --note gate
+docker compose exec yuktracker-hub python devices.py alias <device_id> "친구1"  # 별칭은 등록 때 슬롯 이름으로 자동 — 바꾸고 싶을 때만
 ```
 
 운영 메모:
-- **명단은 관리자가 관리한다**(2026-09-22 결정): 배포 대상은 아는 사람 **최대 7명**이라 `max_devices` 기본이 **7** 이고,
-  정원이 세는 것은 **미제거 기기 전부**다 — 업로드를 한 번도 안 한 기기도 자리를 차지하며 시간이 지나 저절로 빠지는 일은 없다.
-  새 사람에게 자리를 내주려면 `devices.py revoke <device_id>` 로 하나를 뺀다(제거는 **soft** — 행은 감사용으로 남고 같은 초대
-  코드로 재등록하면 새 기기가 된다). 남용은 `invite_code` 교체 → `docker compose restart`(기존 토큰 유지, 신규 등록만 막힘).
-- 별칭: `devices.py alias <device_id> "소가"` — 등록 때 기기가 스스로 적은 `label` 과 별개로 관리자가 붙이는 이름이고,
-  목록·서버 로그는 별칭을 앞세운다. 빈 문자열이면 해제. 자리 현황은 `stats` 의 `devices_registered`/`devices_max`.
-  지인 1명 = 별칭 1개로 두면 `devices.py list` 와 `stats.devices[]` 가 그대로 접속 현황판이 된다.
-- **재설치 주의**: `device_id` 는 허브가 등록 때마다 새로 발급한다(호스트명·하드웨어에서 뽑지 않는다). 그래서 지인이
-  프로그램을 지웠다 다시 깔고 등록하면 **거부(409)도, 기존 행 갱신도 아니고 새 행이 하나 더 생긴다** — 옛 행이 자리를
-  계속 차지한다. 재설치 당시엔 아무 오류도 안 나고, 나중에 다른 사람이 등록할 때 `registration_full` 로 터진다.
-  → 지인들에게 "재설치할 일 있으면 말해줘"라고 안내하고, 관리자는 `devices.py list` 에서 같은 별칭 두 줄을 보면
-  옛 `device_id` 를 `revoke` 한다. (여유 슬롯 = `max_devices` − 사람 수 만큼은 말없이 흡수된다.)
+- **슬롯 = 지인 한 사람**(2026-09-23 결정): `invite_codes` 의 슬롯마다 코드 하나, 정원 = 슬롯 수(예시 7). 지인에게는 **본인 슬롯의
+  코드만** 준다. 등록되면 `slot` 열과 초기 별칭(= 슬롯 이름)이 바로 찍혀 `devices.py list`·`stats.devices[]` 가 그대로 접속
+  현황판이다. 업로드를 한 번도 안 한 기기도 명단에 남고 시간이 지나 저절로 빠지는 일은 없다(2026-09-22 결정 유지).
+- **재설치·PC 교체는 그냥 같은 코드로 다시 등록**하면 된다: 새 기기가 슬롯을 받고 옛 기기는 같은 트랜잭션에서 제거된다
+  (`revoked_ts` + note `재등록 교체 → <새 id>`; 옛 exe 가 남아 있어도 다음 업로드부터 403). 관리자가 할 일이 없다.
+- `devices.py revoke <device_id>` 는 그 밖의 경우(분실·남용) — 제거는 **soft** 라 행은 감사용으로 남는다. 남용은 그 슬롯의 코드
+  교체 → `docker compose restart`(기존 토큰 유지, 신규 등록만 막힘). 슬롯 추가도 같은 방법(표에 한 줄 + restart).
+- 별칭: `devices.py alias <device_id> "소가"` — 슬롯 이름이 자동으로 들어가므로 보통은 손댈 일이 없다. 바꿔도 재등록 교체는
+  `slot` 으로 찾는다. 빈 문자열이면 해제. 자리 현황은 `stats` 의 `devices_registered`/`devices_max`.
 - 관리 시크릿은 Funnel 을 타지 않는다(`admin_public` false) — 봇은 127.0.0.1:8800, 제작자는 tailnet/LAN 의 8800 직접. 공개 리스너는
   자격을 보지 않고 403 을 주며, 8800 에 실수로 Funnel 을 걸어도 `Tailscale-Funnel-Request` 헤더로 한 번 더 막는다(2차 방어).
 - 속도제한: 등록 IP 10/h, 업로드 기기 120/min(취소된 기기의 폭주도), 인증 실패 공개 IP 30/min — 토큰 검사 뒤 실패에만(공유 NAT 의

@@ -23,9 +23,10 @@ tolerant reader: 미지 키는 무시(관측 봉투는 payload_json 에 보존 �
 ``devices.last_seen_ts/upload_count`` 도 쓴다). 정수는 SQLite 의 signed 64bit 범위 안이어야 한다 — 검증을 통과한 값이
 저장에서 터지면(500) 관측기가 그 배치를 영원히 재시도한다.
 
-설정(``load_config``): ``secret`` 는 16자 이상 문자열이고 예시값(``CHANGE-ME``)이면 기동을 거부한다. ``invite_code`` 는
-공백을 벗긴 뒤 비어 있으면 등록 닫힘, 있으면 8자 이상·예시값 거부·``secret`` 와 같으면 거부(초대 코드는 커뮤니티에 공유하는
-반공개 값). 상대 ``db_path`` 는 CWD 가 아니라 **config 파일 폴더** 기준(레포 루트에서 띄워도 ``<repo>/data/hub.db`` 가 생기지
+설정(``load_config``): ``secret`` 는 16자 이상 문자열이고 예시값(``CHANGE-ME``)이면 기동을 거부한다. ``invite_codes`` 는
+``{슬롯 이름: 초대 코드}`` 표 — 비어 있으면 등록 닫힘, 코드는 공백을 벗긴 뒤 8자 이상·예시값 거부·``secret`` 와 같으면 거부·
+서로 달라야 한다(코드는 지인 한 사람에게 주는 반공개 값, 슬롯 이름이 곧 그 사람의 초기 별칭). 구 ``invite_code``·
+``max_devices`` 키는 이관 안내와 함께 거부한다(2026-09-23). 상대 ``db_path`` 는 CWD 가 아니라 **config 파일 폴더** 기준(레포 루트에서 띄워도 ``<repo>/data/hub.db`` 가 생기지
 않는다). 환경변수 ``HUB_DB_PATH`` 가 있으면 그것이 이긴다 — 컨테이너는 Dockerfile 이 ``/data/hub.db`` 로 고정해
 운영자가 config 를 안 고쳐도 볼륨에 쓴다.
 """
@@ -73,12 +74,10 @@ DEFAULTS = {
     "max_rows_per_observation": 64,
     #: 관측기 시계가 서버보다 이만큼 넘게 앞서면 400 — 그 안이면 recv_ts 로 깎는다(§4).
     "max_agent_ts_ahead_sec": 86400,
-    #: 초대 코드 — 빈 문자열이면 등록 닫힘(§3-0). 8자 이상, 예시값·secret 와 같은 값은 기동 거부.
-    "invite_code": "",
-    #: 기기 정원 — 넘으면 403 registration_full. 세는 대상은 **미제거 기기 전부**(업로드 여부 무관).
-    #: 2026-09-22 사용자 결정: 아는 사람에게 직접 배포(최대 7명), 활성 여부에 따른 자동 제외는 두지 않는다 —
-    #: 자리를 비우는 것은 관리자의 `devices.py revoke` 뿐이다.
-    "max_devices": 7,
+    #: 슬롯별 초대 코드 `{슬롯 이름: 코드}` — 빈 표면 등록 닫힘(§3-0). 슬롯 = 지인 한 사람(정원 = 표 크기). 코드는 8자 이상,
+    #: 예시값·secret 와 같은 값·중복은 기동 거부. 같은 슬롯으로 다시 등록하면 옛 기기는 자동 제거(2026-09-23 사용자 결정) —
+    #: 활성 여부에 따른 자동 제외는 여전히 없고, 그 밖의 제거는 관리자의 `devices.py revoke` 뿐이다.
+    "invite_codes": {},
     #: true 면 공개 요청에서도 관리 시크릿을 받는다. 기본 false — 조회 라우트는 직접 접속 전용.
     "admin_public": False,
     #: 관리 리스너에서 이 헤더가 있으면 공개 요청(tailscaled 가 Funnel 요청에 붙인다). Cloudflare Tunnel 이면 "CF-Connecting-IP".
@@ -95,7 +94,14 @@ ENV_DB_PATH = "HUB_DB_PATH"
 MIN_SECRET_LEN = 16
 PLACEHOLDER_SECRETS = frozenset({"CHANGE-ME"})
 MIN_INVITE_LEN = 8
+#: 예시값 — 정확히 이 값이거나 `CHANGE-ME` 로 시작하면(예시 파일의 `CHANGE-ME-INVITE-1` 류) 거부.
 PLACEHOLDER_INVITES = frozenset({"CHANGE-ME", "CHANGE-ME-INVITE"})
+PLACEHOLDER_PREFIX = "CHANGE-ME"
+#: 슬롯 이름 — 초기 별칭이 되고 devices.py 표에 찍힌다(label 과 같은 규칙).
+MAX_SLOT_LEN = 64
+#: 2026-09-23 폐기 키 — 있으면 이관 안내로 기동 거부(조용히 무시하면 옛 설정이 등록 닫힘으로 보인다).
+LEGACY_KEYS = {"invite_code": "'invite_codes' 표({\"slot1\": \"<코드>\", …})로 옮기세요",
+               "max_devices": "정원은 'invite_codes' 의 슬롯 수입니다 — 키를 지우세요"}
 #: SQLite INTEGER 범위 — 밖이면 sqlite3 가 OverflowError 를 던진다.
 I64_MIN, I64_MAX = -(1 << 63), (1 << 63) - 1
 #: 문자열 상한 — seller 는 listing_key(PK)에 들어가고 item_name 은 학습 표·정규화 키로 복사된다.
@@ -138,27 +144,17 @@ def load_config(path: str, env=None) -> dict:
         raise SystemExit("config: 'secret' 가 예시값입니다 — config.json.example 을 복사했으면 실제 값으로 바꾸세요")
     if len(secret) < MIN_SECRET_LEN:
         raise SystemExit(f"config: 'secret' 는 {MIN_SECRET_LEN}자 이상이어야 합니다")
-    invite = cfg.get("invite_code")
-    invite = "" if invite is None else invite
-    if not isinstance(invite, str):
-        raise SystemExit("config: 'invite_code' 는 문자열이어야 합니다(빈 문자열 = 등록 닫힘)")
-    invite = invite.strip()      # 손으로 편집한 config 의 앞뒤 공백이 영원한 bad_invite 가 되지 않게
-    if invite:
-        if invite in PLACEHOLDER_INVITES:
-            raise SystemExit("config: 'invite_code' 가 예시값입니다 — 실제 값으로 바꾸거나 비워 두세요(등록 닫힘)")
-        if len(invite) < MIN_INVITE_LEN:
-            raise SystemExit(f"config: 'invite_code' 는 {MIN_INVITE_LEN}자 이상이어야 합니다")
-        if invite == secret:
-            raise SystemExit("config: 'invite_code' 가 'secret' 와 같습니다 — 초대 코드는 반공개라 관리 시크릿과 달라야 합니다")
-    cfg["invite_code"] = invite
+    for key, hint in LEGACY_KEYS.items():
+        if key in raw:
+            raise SystemExit(f"config: '{key}' 는 2026-09-23 에 폐기됐습니다 — {hint}")
+    cfg["invite_codes"] = _load_invite_codes(cfg.get("invite_codes"), secret)
     for key in ("port", "public_port"):
         v = cfg.get(key)
         if not _is_int(v) or not 1 <= v <= 65535:
             raise SystemExit(f"config: '{key}' 는 1~65535 정수여야 합니다")
     if cfg["port"] == cfg["public_port"]:
         raise SystemExit("config: 'public_port' 는 'port' 와 달라야 합니다 — 공개 리스너(Funnel 대상)와 관리 리스너를 나눈다")
-    for key in ("max_devices", "register_limit_per_hour", "upload_limit_per_min",
-                "auth_fail_limit_per_min"):
+    for key in ("register_limit_per_hour", "upload_limit_per_min", "auth_fail_limit_per_min"):
         v = cfg.get(key)
         if not _is_int(v) or v < 1:
             raise SystemExit(f"config: '{key}' 는 1 이상의 정수여야 합니다")
@@ -327,6 +323,46 @@ class _Bad(Exception):
         return web.json_response(body, status=400)
 
 
+def _load_invite_codes(raw, secret: str) -> dict:
+    """`invite_codes` 검증 → `{슬롯: 코드}`(둘 다 strip). 없음·null·빈 표 = 등록 닫힘. 슬롯 이름은 label 규칙(인쇄 가능 ≤64,
+    공백만 금지), 코드는 8자 이상·예시값 거부·secret 와 다름·**서로 다름**(같은 코드가 두 슬롯이면 어느 슬롯인지 정할 수 없다)."""
+    if raw is None:
+        return {}
+    if not isinstance(raw, dict):
+        raise SystemExit("config: 'invite_codes' 는 {\"슬롯 이름\": \"초대 코드\"} 객체여야 합니다(빈 객체 = 등록 닫힘)")
+    codes: dict[str, str] = {}
+    seen: dict[str, str] = {}
+    for slot_raw, code_raw in raw.items():
+        slot = str(slot_raw).strip()
+        if not slot or len(slot) > MAX_SLOT_LEN or not slot.isprintable():
+            raise SystemExit(f"config: 'invite_codes' 의 슬롯 이름 {slot_raw!r} — 인쇄 가능 문자 1~{MAX_SLOT_LEN}자여야 합니다")
+        if slot in codes:
+            raise SystemExit(f"config: 'invite_codes' 의 슬롯 이름 '{slot}' 이 중복입니다(공백 차이만 다른 이름 포함)")
+        if not isinstance(code_raw, str):
+            raise SystemExit(f"config: 'invite_codes'['{slot}'] 는 문자열이어야 합니다")
+        code = code_raw.strip()      # 손으로 편집한 config 의 앞뒤 공백이 영원한 bad_invite 가 되지 않게
+        if not code or code in PLACEHOLDER_INVITES or code.startswith(PLACEHOLDER_PREFIX):
+            raise SystemExit(f"config: 'invite_codes'['{slot}'] 가 비었거나 예시값입니다 — 실제 코드로 바꾸거나 슬롯을 지우세요")
+        if len(code) < MIN_INVITE_LEN:
+            raise SystemExit(f"config: 'invite_codes'['{slot}'] 는 {MIN_INVITE_LEN}자 이상이어야 합니다")
+        if code == secret:
+            raise SystemExit(f"config: 'invite_codes'['{slot}'] 가 'secret' 와 같습니다 — 초대 코드는 반공개라 관리 시크릿과 달라야 합니다")
+        if code in seen:
+            raise SystemExit(f"config: 'invite_codes' 의 '{slot}' 과 '{seen[code]}' 이 같은 코드입니다 — 슬롯마다 달라야 합니다")
+        seen[code] = slot
+        codes[slot] = code
+    return codes
+
+
+def slot_for_invite(codes: dict, invite: str) -> str | None:
+    """초대 코드 → 슬롯 이름(없으면 None). 슬롯 수만큼 상수 시간 비교 — 조기 종료로 어느 슬롯이 맞았는지 새지 않게 끝까지 돈다."""
+    found = None
+    for slot, code in codes.items():
+        if _secret_eq(invite, code):
+            found = slot
+    return found
+
+
 def _is_int(v) -> bool:
     # bool 은 int 서브클래스 — true/false 를 수량·가격으로 오인하지 않는다. 범위는 SQLite INTEGER(i64).
     return isinstance(v, int) and not isinstance(v, bool) and I64_MIN <= v <= I64_MAX
@@ -487,7 +523,8 @@ async def api_market_ping(request: web.Request) -> web.Response:
 
 async def api_market_register(request: web.Request) -> web.Response:
     """초대 코드 → 기기 토큰. 순서: IP 속도제한(모든 시도를 센다 — 코드 비교 전에 무차별 대입 상한) → 본문 크기 →
-    등록 닫힘 → 본문 검증 → 코드 비교 → 정원 → 발급. 토큰 원문은 응답에만, DB 엔 sha256."""
+    등록 닫힘 → 본문 검증 → 코드 → 슬롯 매칭 → 발급(+ 같은 슬롯의 옛 기기 교체). 정원 검사는 없다 — 슬롯이 곧 정원.
+    토큰 원문은 응답에만, DB 엔 sha256."""
     cfg, limits = request.app[CFG_KEY], request.app[RL_KEY]
     ip = _client_ip(request)
     wait = limits["register"].hit(ip)
@@ -498,7 +535,7 @@ async def api_market_register(request: web.Request) -> web.Response:
         return web.json_response({"ok": False, "error": "length_required"}, status=411)
     if request.content_length > MAX_REGISTER_BODY:
         return web.json_response({"ok": False, "error": "too_large"}, status=413)   # 파싱 전에 자른다(무인증 라우트)
-    if not cfg["invite_code"]:
+    if not cfg["invite_codes"]:
         return web.json_response({"ok": False, "error": "registration_closed"}, status=403)
     try:
         body = await request.json()
@@ -511,23 +548,23 @@ async def api_market_register(request: web.Request) -> web.Response:
         invite, label = validate_register(body)
     except _Bad as e:
         return e.response()
-    if not _secret_eq(invite, cfg["invite_code"]):
+    slot = slot_for_invite(cfg["invite_codes"], invite)
+    if slot is None:
         log.info("기기 등록 거부(초대 코드 불일치): label=%r ip=%s", label, ip)
         return web.json_response({"ok": False, "error": "bad_invite"}, status=401)
     db = request.app[DB_KEY]
     try:
-        registered = db.count_active_devices()
-        if registered >= int(cfg["max_devices"]):
-            log.warning("기기 등록 거부(정원 %d, 등록 %d): label=%r ip=%s — 자리를 비우려면 devices.py revoke",
-                        int(cfg["max_devices"]), registered, label, ip)
-            return web.json_response({"ok": False, "error": "registration_full"}, status=403)
         token = secrets.token_urlsafe(32)
-        device_id = db.create_device(label, _token_hash(token), now, ip)
+        device_id, replaced = db.register_slot_device(slot, label, _token_hash(token), now, ip)
     except sqlite3.Error:
-        log.exception("기기 등록 저장 실패: label=%r ip=%s", label, ip)
+        log.exception("기기 등록 저장 실패: slot=%s label=%r ip=%s", slot, label, ip)
         return _storage_error(now)
-    log.info("기기 등록: %s label=%r ip=%s", device_id, label, ip)
-    return web.json_response({"ok": True, "v": PROTO_V, "device_id": device_id, "token": token, "server_time": now})
+    if replaced:
+        log.info("기기 등록(슬롯 %s 교체): %s label=%r ip=%s — 옛 기기 %s 제거", slot, device_id, label, ip, ", ".join(replaced))
+    else:
+        log.info("기기 등록(슬롯 %s): %s label=%r ip=%s", slot, device_id, label, ip)
+    return web.json_response({"ok": True, "v": PROTO_V, "device_id": device_id, "token": token, "slot": slot,
+                              "replaced": replaced, "server_time": now})
 
 
 def _device_name(dev) -> str:
@@ -619,7 +656,7 @@ async def api_market_stats(request: web.Request) -> web.Response:
     now = time.time()
     stats = request.app[DB_KEY].market_stats(now, float(cfg["search_max_age_sec"]))
     return web.json_response({"v": PROTO_V, "server_time": now,
-                              "devices_max": int(cfg["max_devices"]), **stats})
+                              "devices_max": len(cfg["invite_codes"]), **stats})
 
 
 # ---------------------------------------------------------------- retention
@@ -719,7 +756,8 @@ def main(argv=None) -> None:
     cfg = load_config(args.config)
     log.info("db_path=%s host=%s port=%s public_port=%s registration=%s admin_public=%s proxy_header=%s",
              cfg["db_path"], cfg["host"], cfg["port"], cfg["public_port"],
-             "open" if cfg["invite_code"] else "closed", cfg["admin_public"], cfg["proxy_header"])
+             f"open({len(cfg['invite_codes'])} slots)" if cfg["invite_codes"] else "closed",
+             cfg["admin_public"], cfg["proxy_header"])
     try:
         asyncio.run(serve(cfg))
     except KeyboardInterrupt:

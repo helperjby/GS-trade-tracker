@@ -15,7 +15,10 @@ import server as server_mod
 
 SECRET = "test-secret"
 AUTH = {"Authorization": "Bearer " + SECRET}
+#: 슬롯별 초대 코드(2026-09-23) — `INVITE` 는 slot1 의 코드.
 INVITE = "test-invite-code"
+INVITE2 = "test-invite-code-2"
+INVITES = {"slot1": INVITE, "slot2": INVITE2}
 #: Funnel 경유 흉내 — tailscaled 가 붙이는 두 헤더(HUB-PROTOCOL §0). 값은 무관, 존재만 본다.
 PROXY = {"Tailscale-Funnel-Request": "?1", "X-Forwarded-For": "203.0.113.7"}
 
@@ -30,7 +33,7 @@ ROW_DEFAULTS = {
 def make_cfg(tmp_path, **over) -> dict:
     cfg = copy.deepcopy(server_mod.DEFAULTS)
     cfg["secret"] = SECRET
-    cfg["invite_code"] = INVITE
+    cfg["invite_codes"] = dict(INVITES)
     cfg["db_path"] = str(tmp_path / "hub.db")
     cfg.update(over)
     return cfg

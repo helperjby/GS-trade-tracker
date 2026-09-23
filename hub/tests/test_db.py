@@ -126,11 +126,36 @@ def test_insert_rolls_back_whole_batch_on_error(tmp_path):
 
 # ---- 기기 표 ----
 
+def test_existing_devices_table_gets_slot_column_added(tmp_path):
+    """PR #10 판이 만든 DB(slot 열 없음)를 열면 ALTER 로 열이 붙고 기존 행은 slot='' 로 남는다 — 배포 DB 무마이그레이션 규칙의
+    유일한 예외(additive ADD COLUMN)."""
+    import sqlite3
+    path = str(tmp_path / "old.db")
+    con = sqlite3.connect(path)
+    con.executescript("""
+CREATE TABLE devices (device_id TEXT PRIMARY KEY, label TEXT NOT NULL DEFAULT '', alias TEXT NOT NULL DEFAULT '',
+  token_hash TEXT NOT NULL UNIQUE, created_ts REAL NOT NULL, created_ip TEXT, last_seen_ts REAL,
+  upload_count INTEGER NOT NULL DEFAULT 0, revoked_ts REAL, note TEXT NOT NULL DEFAULT '');
+INSERT INTO devices (device_id, label, token_hash, created_ts) VALUES ('d-old', 'PC-OLD', 'h-old', 1.0);
+""")
+    con.commit(); con.close()
+    d = db_mod.Database(path)
+    try:
+        (old,) = d.list_devices()
+        assert (old["device_id"], old["slot"]) == ("d-old", "")
+        new_id, replaced = d.register_slot_device("slot1", "PC-1", "h-1", 2.0, None)
+        assert replaced == [] and d.get_device(new_id)["slot"] == "slot1"
+        d2 = db_mod.Database(path)      # 두 번째 열기 — 열이 이미 있으면 아무것도 안 한다
+        d2.close()
+    finally:
+        d.close()
+
+
 def test_devices_create_lookup_record_revoke_note(tmp_path):
     d = _open(tmp_path)
     a = d.create_device("PC-A", "h1", 100.0, "203.0.113.7")
     assert re.fullmatch(r"d-[0-9a-f]{10}", a)
-    assert d.get_device_by_token_hash("h1") == {"device_id": a, "label": "PC-A", "alias": "", "revoked_ts": None,
+    assert d.get_device_by_token_hash("h1") == {"device_id": a, "label": "PC-A", "alias": "", "slot": "", "revoked_ts": None,
                                                  "upload_count": 0, "last_seen_ts": None}
     assert d.get_device_by_token_hash("nope") is None
     assert d.get_device("d-0000000000") is None
@@ -145,7 +170,7 @@ def test_devices_create_lookup_record_revoke_note(tmp_path):
     assert d.set_device_revoked("d-0000000000", 200.0) is False
     assert d.set_device_note(a, "메모") is True and d.set_device_note("d-0000000000", "x") is False
     assert d.set_device_revoked(a, None) is True and d.count_active_devices() == 1
-    assert d.get_device(a) == {"device_id": a, "label": "PC-A", "alias": "", "created_ts": 100.0,
+    assert d.get_device(a) == {"device_id": a, "label": "PC-A", "alias": "", "slot": "", "created_ts": 100.0,
                                "created_ip": "203.0.113.7", "last_seen_ts": 160.0, "upload_count": 1,
                                "revoked_ts": None, "note": "메모"}
     assert d.list_devices() == [d.get_device(a)]

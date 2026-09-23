@@ -29,7 +29,7 @@ def test_ping_device_token_ok_and_does_not_touch_db(tmp_path):
             dev_id, token = await _registered(client)
             st, data = await get(client, "/api/market/ping", headers=device_auth(token))
             assert st == 200 and data["ok"] is True and data["v"] == 1
-            assert (data["device_id"], data["label"]) == (dev_id, "PC-1")
+            assert (data["device_id"], data["label"]) == (dev_id, "slot1")   # 초기 별칭 = 슬롯 이름이 label 보다 앞선다
             assert data["server_time"] > 0
             # ping 은 기기 행을 쓰지 않는다 — 업로드가 있었는지는 last_seen_ts 로만 읽힌다
             (d,) = app_db(app).list_devices()

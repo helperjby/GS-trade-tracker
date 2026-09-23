@@ -1,12 +1,29 @@
 # Session State
 
-Updated: 2026-09-23 (Asia/Seoul) — **PR-Y5 배포 준비 완료(아래 절) · Pi 판 확인 = 옛 판(재배포 필요) · Funnel 공개 포트 10000 결정 — 다음은 재배포 → exe → 실기기 G7** ·
+Updated: 2026-09-23 (Asia/Seoul) — **슬롯별 초대 코드(아래 절, PR #15) · Pi 재배포·Funnel 10000·exe 빌드 완료 — 다음은 Pi 슬롯 판 재배포 → exe 전달 → 실기기 G7** ·
 PR-Y2' 이식 + PR-Y1b 관측·업로드 완료(아래 두 절) ·
 허브 공개 업로드 PR #10 **머지 완료** ·
 **방향 전환(사용자 결정 2026-09-22): SEAssist 레포에는 더 이상 머지하지 않는다.**
 **PR #5(PR-Y2b 아이템 표)·PR #6(PR-Y3 허브) 머지 완료**(https://github.com/helperjby/GS-trade-tracker/pull/5 840d8d3 · https://github.com/helperjby/GS-trade-tracker/pull/6 1ed43ef,
 각 `/code-review high` 15건·14건 전부 반영) · **허브 Pi 배포 완료(2026-09-22 11:24, `~/yuktracker-hub`, :8800, G7 `stats` 응답 확인 — 아래 "허브 배포")** ·
 SEAssist PR #306(PR-Y2) **미머지 → 닫음 예정, 이 레포로 이식(PR-Y2')** · Step 1 = SEAssist #304·#305(머지, 동결 시점 참조)
+
+## 슬롯별 초대 코드 (2026-09-23, PR #15)
+
+- 배경: 사용자 제안 "invite_code 를 slot 별로 지정하는 게 인식·관리가 편할 것" — 코드 하나·임의 `device_id`·사후 별칭 구조는 등록
+  즉시 누구인지 안 보이고, 재설치는 `registration_full` 로 뒤늦게 터졌다(hub/README 재설치 주의). 결정 2건(AskUserQuestion):
+  ① 같은 슬롯 재등록 = **옛 기기 자동 교체**(거부 아님), ② 단일 `invite_code` **폐기**(`invite_codes` 만, 구 키는 이관 안내로 기동 거부).
+- 허브: `invite_codes = {슬롯 이름: 코드}`(슬롯 이름 = label 규칙·중복 금지, 코드 = 8자↑·예시값/secret 거부·**슬롯 간 중복 금지**,
+  `slot_for_invite` 는 조기 종료 없이 전부 상수 시간 비교), `max_devices` 폐기(정원 = 슬롯 수 → `stats.devices_max`), `devices.slot`
+  열(기존 DB 는 기동 때 `PRAGMA table_info` → `ADD COLUMN` — 무마이그레이션 규칙의 유일한 additive 예외), `register_slot_device` 가
+  삽입 + 같은 슬롯 활성 기기 제거(note `재등록 교체 → <새 id>`)를 한 트랜잭션에서, 응답에 `slot`·`replaced`, 초기 `alias` = 슬롯 이름,
+  `registration_full` 폐지, `devices.py list` 에 `slot` 열, `stats.devices[].slot`. 관측기는 응답의 `slot` 을 등록 완료 줄에 덧붙일 뿐
+  (코드 무변경에 가깝다).
+- 문서: HUB-PROTOCOL §0·§1·§3-0·§3-4·§3-6·§6·§7, hub/README(설정 생성 = python 한 토막으로 슬롯 7개, 운영 메모 재설치 절 교체),
+  DEPLOY(§0 이관 행·§1·§3 안내문 "본인 코드"·§5·증상표), PLAN, config.json.example.
+- 검증: hub 테스트(슬롯 교체·다른 슬롯 불간섭·옛 토큰 403·구 DB ADD COLUMN·설정 검증 표) + 루트 전체 통과(아래 커밋 메시지 수치).
+- 배포: Pi `config.json` 을 `invite_codes` 7슬롯으로 이관(secret 유지, 기존 단일 코드는 폐기) → hub/ 재복사 → `docker compose up -d
+  --build` → 기동 로그 `registration=open(7 slots)` → 게이트(§0 표) → exe 는 무변경(재빌드 불필요).
 
 ## 허브 공개 업로드 — Tailscale Funnel + 초대 코드 자기등록 (2026-09-22 오후, PR #10)
 
