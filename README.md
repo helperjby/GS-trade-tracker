@@ -29,6 +29,7 @@
 run_dev.bat                               # 관측기 소스 실행(관리자 승격) — 관측·업로드
 run_dev.bat --invite-code CODE            # 첫 실행: 초대 코드로 기기 등록(코드는 저장하지 않는다)
 run_dev.bat --capture 5                   # 관측 + 5분 발굴 수집 창
+run_dev.bat --selftest                    # 자가진단(권한·Npcap·거상·아이템 표·허브·토큰·스풀) — 안 될 때 이 화면을 보낸다
 build.bat                                 # 출처 선언 검사 → 테스트 → PyInstaller → dist\YukTracker.exe
 python tools\dump_item_names.py --check   # 클라이언트의 아이템 id→이름 표 추출 확인
 python tools\market_probe.py --root DIR   # 수집한 창을 재생해 육의전 페이지 판독(읽기 전용)
@@ -43,6 +44,7 @@ build.bat
 
 받는 사람은 `YukTracker.exe` 를 관리자 권한으로 실행하고 **초대 코드만** 입력하면 된다 —
 기기 토큰·기기 id 는 `%APPDATA%\YukTracker\config.json` 에 저장된다(초대 코드는 저장하지 않는다).
+배포 절차·지인 안내문·G7 게이트는 [docs/DEPLOY.md](docs/DEPLOY.md).
 
 허브 실행·배포(Docker compose)와 API 예시는 [hub/README.md](hub/README.md).
 
@@ -62,9 +64,9 @@ python -X utf8 -m pytest hub/tests -q     # 허브 테스트 (pip install -r hub
 ## 구조
 
 ```
-src/yuktracker/   cli · agent(수집) · game_processes · item_names · paths · seassist/(벤더 사본)
+src/yuktracker/   cli · agent(관측·수집) · selftest · market_observer · spool · hub_client · item_names · seassist/(패킷 코어)
 hub/              server.py · db.py · Dockerfile · docker-compose.yml · tests/
 tools/            dump_item_names.py · market_probe.py · sync_seassist_core.py · console_input_probe.py
 tests/            관측기 테스트
-docs/             PLAN.md · HUB-PROTOCOL.md · PACKET-MARKET.md · SESSION_STATE.md
+docs/             PLAN.md · HUB-PROTOCOL.md · PACKET-MARKET.md · DEPLOY.md · SESSION_STATE.md
 ```

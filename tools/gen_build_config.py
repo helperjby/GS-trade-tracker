@@ -4,7 +4,7 @@
 **빌드할 때** 환경변수에서 받아 모듈 하나를 생성하고, exe 가 그걸 기본값으로 쓴다. 사용자는
 초대 코드만 입력하면 된다.
 
-    set YUKTRACKER_HUB_URL=https://<노드>.<tailnet>.ts.net
+    set YUKTRACKER_HUB_URL=https://<노드>.<tailnet>.ts.net:10000
     python tools\\gen_build_config.py          # → src/yuktracker/_build_config.py
     python tools\\gen_build_config.py --hub-url https://...   # 환경변수 대신 인자로
 

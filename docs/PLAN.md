@@ -171,12 +171,37 @@ python scripts/mine_packet_discovery.py --all --lead-sec 30
 - 종단 스모크(로컬 허브 2리스너, 13/13): 공개 stats 403 → 잘못된 초대 코드 401 → 등록 → 업로드 200 → 중복 → 검색 →
   미해석 null → 401 정지·스풀 유지 → device_mismatch → 400 격리 → 재시작 뒤 스풀 이어 올리기.
 
+### PR-Y5 — 배포 준비: 자가진단 · 관측 가시성 · 허브 ping (2026-09-22 **완료**)
+
+G7 은 exe 를 **지인 최대 7명**의 PC 에 돌리는 단계다. PR-Y1b 까지의 관측기는 종단으로 돌지만, 원격 지원이 성립하지 않았다:
+① 관측 모드는 `is_capturing()` 을 수집 모드에서만 봐서 거상이 꺼져 있든 Npcap 이 다른 어댑터를 잡았든 **콘솔이 조용**했고,
+② 관측기의 자격은 기기 토큰 하나인데 조회 라우트는 공개 리스너에서 403, 빈 배치 업로드는 400 이라 **토큰이 유효한지 물을
+라우트가 없었다**. ③ 지인에게 줄 설치 안내문도 없었다.
+
+- 허브(additive): **`GET /api/market/ping`**(HUB-PROTOCOL §3-7) — 기기 토큰 확인 전용. 인증·속도제한은 업로드와 같은 규칙
+  (`ROUTE_AUTH` 한 줄), 핸들러는 DB 무접촉이라 `devices.last_seen_ts` 는 "마지막 업로드 시도" 의미를 지킨다. 스키마 무변경.
+- 관측기: **`--selftest`** — 권한·Npcap·거상 프로세스·패킷 흐름·아이템 표·허브 설정·허브 도달·기기 토큰·스풀 9줄을
+  `O/!/X/-` 로 내고 rc 0(전부 통과)·1(실패)·2(경고만). 판정부 `selftest.run` 은 순수 함수, 실측은 `Probes` 주입.
+  Npcap 사유는 벤더의 GUI 문구(`화면 감지를 계속 사용합니다`) 대신 이 프로그램의 안내로 바꿔 매핑한다 — `not_elevated` 에
+  "Npcap 을 설치하라"고 하면 지인이 멀쩡한 설치를 다시 깐다. 승격 재기동으로 뜬 새 콘솔이 닫히지 않게 결과 뒤 Enter 대기.
+- 관측기: 관측 모드 상태 줄(`_status_tick`, 순수) — 흐름 전이(잡음·끊김)는 그때 1회, 미개통은 30초마다, 흐름은 잡았는데
+  육의전을 아직 못 본 동안은 10분마다. 첫 관측 뒤에는 멎는다. "흐름" 은 캡처 핸들이 아니라 엔진 헬스의 `tracked_flows`
+  (핸들은 거상을 꺼도 열린 채라 끊김을 못 본다, 리뷰 반영) — "캡처 시작" 문구는 엔진 상태 줄 것이고 틱은 다음 행동만 말한다.
+- 문서: **`docs/DEPLOY.md` 신규**(0단계 Pi 판 확인 → Funnel → exe 빌드 → **지인 복붙 안내문** → G7 게이트 6 → 운영 확인 →
+  실패 증상표), HUB-PROTOCOL §0 표·§3-7·§7, hub/README 라우트·게이트, README·AGENTS.
+- 검증: 루트 228 passed(신규 29) · hub 87 passed(신규 5) · 진짜 허브 프로세스(관리 8800 + 공개 8801) 상대 종단 스모크 12/12
+  (공개 stats 403 → 잘못된 토큰 401 → 등록 → ping 200 id 일치 → 자가진단 rc 0 → `devices.py revoke` → ping 403 → 자가진단
+  rc 1 → 관리 시크릿 ping) · 실기기 비승격 `--selftest`(거상 3개·아이템 표 4,001행 검출, 권한·Npcap 줄이 X).
+
 ### 배포·실기기 게이트(G7)
+절차 정본은 **`docs/DEPLOY.md`**(지인 안내문·실패 증상표 포함). 요약:
+0. Pi 에 떠 있는 허브가 PR #10 이후 판인지 먼저 확인한다(`register` 가 404 면 옛 판 — 재배포).
 1. 이 프로젝트 `build.bat` → 각 PC 에 `YukTracker.exe`(SEAssist 머지·배포 불필요).
 2. Pi: `hub/` 복사 → `config.json` 에 `invite_code` → `docker compose up -d --build`(별도 컨테이너, 8800) → `curl …:8800/api/market/stats`
-   → `sudo tailscale funnel --bg 8801`(공개 리스너) → 외부망 게이트(hub/README "공개 노출": `GET /` 200 · stats 403 `not_public` · register 200/401 · `devices.py list`).
+   → `sudo tailscale funnel --bg --https=10000 8801`(공개 리스너; 443·8443 은 이 Pi 의 다른 서비스가 쓴다, 2026-09-23) → 외부망 게이트(hub/README "공개 노출": `GET /` 200 · stats 403 `not_public` · register 200/401 · `devices.py list`).
 3. 사용자 1명이 육의전을 연다 → 관측기 상태 줄 → 허브 `search?q=<아이템>` 에 그 목록(≥1건 실발화).
-   게이트: 승격·Npcap·캡처 시작 줄 / 육의전 열람 1회 = 관측 ≥1 / 허브 반영 ≤10s / 스풀 재시도 / 음성 0건.
+   게이트: 승격·Npcap·캡처 시작 줄 / 육의전 열람 1회 = 관측 ≥1 / 허브 반영 ≤10s / 스풀 재시도 / 음성 0건 /
+   `devices.py list` 의 `uploads` ≥1. 막히면 그 PC 에서 `YukTracker.exe --selftest`(PR-Y5) 한 화면으로 지점을 찾는다.
 
 ### PR-Y4 — 미루봇-IRIS GS-01 (별도 레포·Codex 절차)
 - `docs/GS-01_SOURCE_CONTRACT.md` 원본 정정: 이 레포 허브 market API(`http://127.0.0.1:8800`, Bearer, `docs/HUB-PROTOCOL.md`).
@@ -197,4 +222,4 @@ python scripts/mine_packet_discovery.py --all --lead-sec 30
 
 ## 5. 순서 요약
 Step 0 수집 ∥ PR-Y1(완료) → Step 1 분석(완료) → PR-Y2(SEAssist #306, 미머지) → PR-Y2b(#5) → PR-Y3 허브(#6·#10) →
-PR-Y2' 이식(완료) → PR-Y1b(완료) → **배포·G7** → PR-Y4.
+PR-Y2' 이식(완료) → PR-Y1b(완료) → PR-Y5 배포 준비(완료) → **배포·G7** → PR-Y4.

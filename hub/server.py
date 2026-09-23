@@ -2,6 +2,7 @@
 
 라우팅: ``GET /``(무인증 상태 줄) · ``POST /api/market/register``(초대 코드 → 기기 토큰, 무 Bearer) ·
 ``POST /api/market/observations``(관측기 업로드 — 기기 토큰, 직접 접속이면 관리 시크릿도) ·
+``GET /api/market/ping``(기기 토큰 확인 — 관측기 ``--selftest``) ·
 ``GET /api/market/search`` · ``GET /api/market/listings`` · ``GET /api/market/stats``(관리 시크릿, **직접 접속 전용**).
 계약 정본은 docs/HUB-PROTOCOL.md.
 
@@ -118,7 +119,8 @@ PUBLIC_KEY = web.AppKey("public_only", bool)
 #: request[DEVICE_KEY] — 기기 토큰 인증이면 기기 dict(device_id·label·…), 관리 시크릿이면 None.
 DEVICE_KEY = "device"
 #: 라우트별 인증 모드 — 없는 경로는 "admin"(관리 시크릿, 직접 접속 전용).
-ROUTE_AUTH = {"/api/market/register": "open", "/api/market/observations": "device_or_admin"}
+ROUTE_AUTH = {"/api/market/register": "open", "/api/market/observations": "device_or_admin",
+              "/api/market/ping": "device_or_admin"}
 
 
 def load_config(path: str, env=None) -> dict:
@@ -467,6 +469,22 @@ async def index(request: web.Request) -> web.Response:
     return web.json_response({"service": SERVICE, "v": PROTO_V, "server_time": time.time()})
 
 
+async def api_market_ping(request: web.Request) -> web.Response:
+    """기기 토큰이 아직 쓸 만한지 확인한다 — 관측기 ``--selftest`` 의 유일한 자격 확인 수단.
+
+    관측기가 가진 자격은 기기 토큰 하나뿐이고 조회 라우트는 공개 리스너에서 403 ``not_public`` 이라,
+    이 라우트가 없으면 "내 토큰이 유효한가"를 업로드를 만들어 보내기 전에는 물을 수 없다(빈 배치는 400).
+
+    판정은 전부 인증 미들웨어가 이미 했다 — 여기 도달했다는 것이 곧 200 이고, 무효 토큰은 401,
+    취소된 기기는 403 ``device_revoked``, 분당 상한(업로드 버킷 공유)을 넘으면 429 다. **DB 를 건드리지
+    않는다** — ``devices.last_seen_ts`` 는 "마지막 업로드 시도" 의미를 유지한다(§3-7).
+    """
+    dev = request.get(DEVICE_KEY)
+    return web.json_response({"ok": True, "v": PROTO_V, "server_time": time.time(),
+                              "device_id": dev["device_id"] if dev else "admin",
+                              "label": _device_name(dev)})
+
+
 async def api_market_register(request: web.Request) -> web.Response:
     """초대 코드 → 기기 토큰. 순서: IP 속도제한(모든 시도를 센다 — 코드 비교 전에 무차별 대입 상한) → 본문 크기 →
     등록 닫힘 → 본문 검증 → 코드 비교 → 정원 → 발급. 토큰 원문은 응답에만, DB 엔 sha256."""
@@ -640,6 +658,7 @@ def make_app(cfg: dict, database: db_mod.Database | None = None, *, limits: dict
     app.router.add_get("/", index)
     app.router.add_post("/api/market/register", api_market_register)
     app.router.add_post("/api/market/observations", api_market_observations)
+    app.router.add_get("/api/market/ping", api_market_ping)
     app.router.add_get("/api/market/search", api_market_search)
     app.router.add_get("/api/market/listings", api_market_listings)
     app.router.add_get("/api/market/stats", api_market_stats)

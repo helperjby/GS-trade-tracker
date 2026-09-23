@@ -7,10 +7,11 @@
 - 의존성: `aiohttp` 하나 + stdlib sqlite3. **`src/` import 금지** — 관측기 exe 와 별개 배포 단위(빌드 컨텍스트 = 이 폴더).
   관측기의 "런타임 의존성 0" 규칙은 `src/yuktracker/` 에만 적용된다.
 - 라우팅: `GET /`(무인증 상태 줄) · `POST /api/market/register`(초대 코드 → 기기 토큰, 무 Bearer) · `POST /api/market/observations`
-  (기기 토큰; 직접 접속이면 관리 시크릿도) · `GET /api/market/search` · `GET /api/market/listings` · `GET /api/market/stats`(관리 시크릿,
+  (기기 토큰; 직접 접속이면 관리 시크릿도) · `GET /api/market/ping`(기기 토큰 확인 — 관측기 `--selftest`) ·
+  `GET /api/market/search` · `GET /api/market/listings` · `GET /api/market/stats`(관리 시크릿,
   **직접 접속 전용** — Funnel 경유는 403 `not_public`). 규칙은 HUB-PROTOCOL §0.
 - 공개: 리스너 둘 — 관리 **8800**(봇·제작자 직접 접속, Funnel 금지) / 공개 **8801**(Pi 의 **Tailscale Funnel** 이
-  `https://<pi-node>.<tailnet>.ts.net/` 로 낸다, 아래 "공개 노출"). 일반 사용자 PC 에는 Npcap + 관측기 exe 만 있고 VPN 이 없기 때문.
+  `https://<pi-node>.<tailnet>.ts.net:10000/` 로 낸다, 아래 "공개 노출"). 일반 사용자 PC 에는 Npcap + 관측기 exe 만 있고 VPN 이 없기 때문.
   공개 리스너로 온 요청은 헤더와 무관하게 전부 공개 취급(관리 시크릿 무시·조회 403). 관리 시크릿은 exe 에 넣지 않는다.
 - 보존: 관측·목록 30일(`retention_market_days`), 일 1회 자동 프루닝. 학습 표(아이템 id→이름)는 유지.
 - SEAssist 대시보드(Pi:8799)와 무관 — 별도 컨테이너, 포트 **8800**(2026-09-22 결정: SEAssist 레포엔 더 이상 머지하지 않는다).
@@ -77,7 +78,7 @@ curl -s -H "Authorization: Bearer <시크릿>" http://127.0.0.1:8800/api/market/
 - 공개 리스너 8801 은 compose 가 **`127.0.0.1:8801:8801`** 로 루프백에만 낸다 — tailscaled 가 같은 호스트에서
   프록시하므로 Funnel 은 그대로 되고, LAN·게스트 와이파이에서 Funnel 을 건너뛰고 평문으로 찌르는 경로는 막힌다.
   관리 리스너 8800 은 봇(같은 Pi)과 제작자(Tailscale VPN)가 직접 붙어야 해서 전 인터페이스에 남긴다.
-- 접속 주소: 일반 사용자 관측기 = 공개 `https://<pi-node>.<tailnet>.ts.net`(Funnel, 아래) / 제작자 PC = tailnet `http://<pi-tailnet-ip>:8800`
+- 접속 주소: 일반 사용자 관측기 = 공개 `https://<pi-node>.<tailnet>.ts.net:10000`(Funnel, 아래) / 제작자 PC = tailnet `http://<pi-tailnet-ip>:8800`
   / LAN `http://<pi-lan-ip>:8800` / 미루봇(같은 Pi) `http://127.0.0.1:8800`. 직접 접속은 평문 HTTP — **공유기 포트포워딩은 여전히 금지**
   (TLS 는 Funnel 이 맡고, 그 밖의 경로는 신뢰망 안이라는 전제).
   **실주소는 시크릿과 같이 레포·문서에 적지 않는다** — Pi 에서 `tailscale ip -4`(tailnet) · `hostname -I`(LAN) 로 그때그때 확인하고,
@@ -93,21 +94,23 @@ Pi 쪽에서만 한다 — 사용자 PC 는 그대로. 전제: Tailscale ≥1.38
 대역폭 제한이 있다(수치 미공개 — JSON 배치엔 충분).
 
 ```bash
-sudo tailscale funnel --bg 8801                  # https://<pi-node>.<tailnet>.ts.net/ → 127.0.0.1:8801(공개 리스너), 재부팅 뒤에도 유지(--bg)
-tailscale funnel status                          # 설치판 구문은 `tailscale funnel --help` 로 확인. 8800 에는 걸지 않는다
-# 끄기: sudo tailscale funnel --https=443 off   (또는 sudo tailscale funnel reset)
+tailscale funnel status                          # 먼저: 443·8443 이 이미 다른 서비스에 걸려 있으면 그대로 두고 10000 을 쓴다(이 Pi 가 그 경우, 2026-09-23)
+sudo tailscale funnel --bg --https=10000 8801    # https://<pi-node>.<tailnet>.ts.net:10000/ → 127.0.0.1:8801(공개 리스너), 재부팅 뒤에도 유지(--bg)
+tailscale funnel status                          # 설치판 구문은 `tailscale funnel --help` 로 확인. 8800 에는 걸지 않는다. 443 이 비어 있다면 `--https` 없이 `--bg 8801` 도 된다
+# 끄기: sudo tailscale funnel --https=10000 off  (`reset` 은 같은 Pi 의 다른 Funnel 까지 지우니 쓰지 않는다)
 ```
 
 외부망(폰 LTE) 게이트 — 아래가 전부 맞아야 공개 상태가 설계대로다(진짜 시크릿은 공개망에 보내지 않는다 — 더미로 충분):
 
 ```bash
-H=https://<pi-node>.<tailnet>.ts.net
+H=https://<pi-node>.<tailnet>.ts.net:10000
 curl -s $H/                                                                   # 200 상태 줄 (첫 요청은 인증서 발급으로 수 초)
 curl -s -H "Authorization: Bearer x" $H/api/market/stats                      # 403 {"ok":false,"error":"not_public"} — 공개 리스너는 자격을 보지도 않는다
 curl -s -X POST $H/api/market/register -H "Content-Type: application/json" \
   -d '{"v":1,"invite_code":"<invite_code>","label":"GATE"}'                   # 200 device_id·token
 curl -s -X POST $H/api/market/register -H "Content-Type: application/json" \
   -d '{"v":1,"invite_code":"nope"}'                                           # 401 bad_invite
+curl -s -H "Authorization: Bearer <위 200 응답의 token>" $H/api/market/ping               # 200 device_id — 지인 PC 의 자가진단이 쓰는 라우트(§3-7)
 docker compose exec yuktracker-hub python devices.py list                     # GATE 가 보인다 → revoke <device_id> --note gate
 docker compose exec yuktracker-hub python devices.py alias <device_id> "친구1"  # 관리자 별칭(목록·로그에 이 이름이 먼저)
 ```
@@ -135,7 +138,7 @@ docker compose exec yuktracker-hub python devices.py alias <device_id> "친구1"
 ## 구조
 
 ```
-server.py   aiohttp — 리스너 둘(관리 8800 / 공개 8801, DB·속도제한 공유) · 공개/직접 구분 · Bearer(관리 시크릿/기기 토큰) 미들웨어 · RateLimiter · 업로드 전건 검증 · register · 5 라우트 · 일 1회 retention
+server.py   aiohttp — 리스너 둘(관리 8800 / 공개 8801, DB·속도제한 공유) · 공개/직접 구분 · Bearer(관리 시크릿/기기 토큰) 미들웨어 · RateLimiter · 업로드 전건 검증 · register · 6 라우트 · 일 1회 retention
 db.py       SQLite — market_observations / market_listings / market_item_names / devices(등록 정의 하나 = 미제거) · 정규화 한 정의 · upsert · prune
 devices.py  관리 CLI — 기기 list / revoke / unrevoke / alias / note (서버와 같은 DB 파일, 시크릿 불필요)
 tests/      pytest — 인증·공개/직접 · 등록·기기 토큰·취소 · 속도제한 · 검증(전건 거부) · dedup · upsert · 이름 학습 · 정규화 · 신선도 · 증분 목록 · 통계 · prune · CLI

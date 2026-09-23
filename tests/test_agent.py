@@ -338,6 +338,17 @@ class CliTest(unittest.TestCase):
         a = p.parse_args(["--capture", "2", "--no-elevate", "--no-pause", "--wait", "9"])
         self.assertEqual((a.capture, a.no_elevate, a.no_pause, a.wait), (2.0, True, True, 9.0))
 
+    def test_selftest_rejects_register_and_capture_options(self) -> None:
+        """자가진단은 등록·수집을 하지 않는다 — 조용히 무시하면 안내를 따라온 사람이 같은 경고를 또 본다."""
+        from yuktracker import cli
+        for argv in (["--selftest", "--invite-code", "abc"], ["--selftest", "--capture"],
+                     ["--selftest", "--device-label", "x"]):
+            with self.subTest(argv=argv), mock.patch("sys.stderr", new=io.StringIO()) as err:
+                with self.assertRaises(SystemExit) as cm:
+                    cli.main(argv)
+                self.assertEqual(cm.exception.code, 2)
+                self.assertIn("--selftest 없이", err.getvalue())
+
     def test_main_relaunches_with_module(self) -> None:
         from yuktracker import cli
         from yuktracker.seassist import admin
@@ -361,6 +372,103 @@ class CliTest(unittest.TestCase):
                 mock.patch.object(admin.sys, "argv", ["x", "--capture", "5"]):
             _exe, params, _cwd = admin._build_relaunch_args("yuktracker")
         self.assertIn("-m yuktracker --capture 5", params)
+
+
+class StatusTickTest(unittest.TestCase):
+    """관측 모드 상태 줄 — 지인 PC 의 콘솔이 "되고 있는지"를 말해 주는 유일한 수단(PR-Y5)."""
+
+    def test_first_capture_announces_once(self) -> None:
+        state = {}
+        first = A._status_tick(state, capturing=True, pages=0, now=0.0)
+        self.assertIn("육의전을 한 번 열면", first)
+        self.assertNotIn("캡처 시작", first)   # 그 문구는 엔진 상태 줄이 이미 찍는다 — 되풀이하지 않는다
+        self.assertIsNone(A._status_tick(state, capturing=True, pages=0, now=1.0))
+
+    def test_waiting_for_flow_reminds_on_the_interval(self) -> None:
+        state = {}
+        # 시작 직후의 미개통은 조용하다 — 게임이 켜져 있으면 곧 잡힌다
+        self.assertIsNone(A._status_tick(state, capturing=False, pages=0, now=0.0))
+        self.assertIsNone(A._status_tick(state, capturing=False, pages=0,
+                                         now=A.FLOW_REMIND_SEC - 1))
+        line = A._status_tick(state, capturing=False, pages=0, now=A.FLOW_REMIND_SEC)
+        self.assertIn("대기 중", line)
+        self.assertIsNone(A._status_tick(state, capturing=False, pages=0,
+                                         now=A.FLOW_REMIND_SEC + 1))
+        self.assertIsNotNone(A._status_tick(state, capturing=False, pages=0,
+                                            now=2 * A.FLOW_REMIND_SEC))
+
+    def test_flow_loss_is_announced_and_recovery_too(self) -> None:
+        state = {}
+        A._status_tick(state, capturing=True, pages=0, now=0.0)
+        lost = A._status_tick(state, capturing=False, pages=0, now=5.0)
+        self.assertIn("끊겼습니다", lost)
+        back = A._status_tick(state, capturing=True, pages=0, now=6.0)
+        self.assertIn("다시 잡았습니다", back)
+
+    def test_idle_reminder_stops_after_the_first_page(self) -> None:
+        state = {}
+        A._status_tick(state, capturing=True, pages=0, now=0.0)
+        self.assertIsNone(A._status_tick(state, capturing=True, pages=0,
+                                         now=A.IDLE_REMIND_SEC - 1))
+        line = A._status_tick(state, capturing=True, pages=0, now=A.IDLE_REMIND_SEC)
+        self.assertIn("육의전 창을 열어", line)
+        # 한 번이라도 목록을 보면 조용해진다(목록 줄이 대신 찍힌다)
+        self.assertIsNone(A._status_tick(state, capturing=True, pages=1,
+                                         now=10 * A.IDLE_REMIND_SEC))
+
+    def test_engine_without_the_method_is_treated_as_not_capturing(self) -> None:
+        self.assertFalse(A._capturing(object()))
+
+    def test_capturing_means_a_tracked_flow_not_just_an_open_handle(self) -> None:
+        """거상을 끄면 핸들은 열린 채 남고 `tracked_flows` 만 0 이 된다 — 그때 '끊겼습니다' 가 떠야 한다."""
+        engine = SimpleNamespace(is_capturing=lambda: True,
+                                 health_snapshot=lambda: {"tracked_flows": 1})
+        self.assertTrue(A._capturing(engine))
+        engine.health_snapshot = lambda: {"tracked_flows": 0}
+        self.assertFalse(A._capturing(engine))
+        engine.is_capturing = lambda: False
+        engine.health_snapshot = lambda: {"tracked_flows": 1}
+        self.assertFalse(A._capturing(engine))
+
+
+class ObserveModeStatusTest(_Base):
+    """배선 — 관측 모드(수집 창 없음)에서도 흐름 대기 줄이 실제로 콘솔에 찍힌다."""
+
+    def test_waiting_line_reaches_the_console(self) -> None:
+        clock = [0.0]
+
+        def fake_clock():
+            return clock[0]
+
+        def fake_sleep(s):
+            # 틱을 10초씩 건너뛰고, 안내가 두 번 날 만큼 지나면 Ctrl+C 로 빠져나온다
+            clock[0] += max(s, 10.0)
+            if clock[0] > 3 * A.FLOW_REMIND_SEC:
+                raise KeyboardInterrupt
+
+        opts = A.RunOptions(capture_min=None, pause_on_exit=False, attach_log=False)
+        rc = self._run(opts, "", factory=_factory(capturing=False), sleep=fake_sleep,
+                       clock=fake_clock)
+        self.assertEqual(rc, A.RC_OK)
+        self.assertIn("대기 중", self.out.getvalue())
+
+    def test_already_capturing_at_loop_start_is_not_announced_again(self) -> None:
+        """엔진이 이미 흐름을 잡은 채 루프에 들어오면(수집 모드가 그렇다) 틱이 시작을 다시 알리지 않는다."""
+        clock = [0.0]
+
+        def fake_clock():
+            return clock[0]
+
+        def fake_sleep(s):
+            clock[0] += max(s, 1.0)
+            if clock[0] > 5.0:
+                raise KeyboardInterrupt
+
+        opts = A.RunOptions(capture_min=None, pause_on_exit=False, attach_log=False)
+        rc = self._run(opts, "", factory=_factory(capturing=True), sleep=fake_sleep,
+                       clock=fake_clock)
+        self.assertEqual(rc, A.RC_OK)
+        self.assertNotIn("육의전을 한 번 열면", self.out.getvalue())
 
 
 if __name__ == "__main__":

@@ -1,6 +1,7 @@
 # Session State
 
-Updated: 2026-09-22 저녁 (Asia/Seoul) — **PR-Y2' 이식 + PR-Y1b 관측·업로드 완료(아래 두 절) — 다음은 실기기 G7** ·
+Updated: 2026-09-23 (Asia/Seoul) — **PR-Y5 배포 준비 완료(아래 절) · Pi 판 확인 = 옛 판(재배포 필요) · Funnel 공개 포트 10000 결정 — 다음은 재배포 → exe → 실기기 G7** ·
+PR-Y2' 이식 + PR-Y1b 관측·업로드 완료(아래 두 절) ·
 허브 공개 업로드 PR #10 **머지 완료** ·
 **방향 전환(사용자 결정 2026-09-22): SEAssist 레포에는 더 이상 머지하지 않는다.**
 **PR #5(PR-Y2b 아이템 표)·PR #6(PR-Y3 허브) 머지 완료**(https://github.com/helperjby/GS-trade-tracker/pull/5 840d8d3 · https://github.com/helperjby/GS-trade-tracker/pull/6 1ed43ef,
@@ -101,6 +102,45 @@ SEAssist PR #306(PR-Y2) **미머지 → 닫음 예정, 이 레포로 이식(PR-Y
   1,234,000원` → 미해석 행 null 저장 → 잘못된 토큰 401 정지·스풀 유지 → device_mismatch → 400 격리 →
   재시작 뒤 남은 스풀 자동 업로드 → stats 관측 2·기기 1).
 - 남은 것: 실기기 G7 — exe 배포 → 초대 코드 등록 → 육의전 1회 열람 → 허브 `search` 반영 ≤10s · 음성 0건.
+
+## PR-Y5 배포 준비 — 자가진단 · 관측 가시성 · 허브 ping (2026-09-22 밤, 이 레포)
+
+- 동기: G7 은 지인 최대 7명의 PC 에서 도는 단계인데 원격 지원 수단이 없었다. ① 관측 모드는 `is_capturing()` 을 수집 모드에서만
+  봐서(`_open_window` 안) 거상이 꺼져 있든 Npcap 이 다른 어댑터를 잡았든 **콘솔이 조용**했다. ② 관측기 자격은 기기 토큰 하나인데
+  조회 라우트는 공개 리스너에서 403 `not_public`, 빈 배치 업로드는 400 이라 **토큰 유효성을 물을 라우트가 없었다**.
+  ③ 지인에게 줄 설치 안내문이 없었다.
+- 허브(additive, HUB-PROTOCOL §3-7): `GET /api/market/ping` — `ROUTE_AUTH` 한 줄 + 핸들러(DB 무접촉) + `add_get`. 인증·429 는
+  기존 미들웨어 그대로(업로드 버킷 공유), 공개 리스너 통과, 취소 기기는 403 `device_revoked`. 스키마·기존 라우트 무변경.
+- 관측기 `--selftest`(`src/yuktracker/selftest.py`): 9줄(관리자 권한·거상 실행·Npcap·패킷 흐름·아이템 표·허브 설정·허브 도달·
+  기기 토큰·업로드 대기) × `O/!/X/-`, rc 0/1/2. 판정부는 순수 함수 + `Probes` 주입(테스트가 Npcap·네트워크·`%APPDATA%` 무접촉).
+  `hub_client` 에 `get_json`·`status`·`ping`·`describe_status`·`describe_ping` 추가. **옛 판 허브**(404 / 403 `not_public`)를
+  "허브가 옛 판입니다"로 묶어 안내한다 — Pi 재배포 전에 지인이 받으면 바로 이 줄이 뜬다.
+- 실기기에서 드러나 고친 것: 비승격 실행의 Npcap 줄이 벤더 문구(`관리자 권한이 아닙니다 — 화면 감지를 계속 사용합니다`)에
+  "npcap.com 에서 설치하세요"를 붙여 **멀쩡한 설치를 다시 깔라고** 말했다 → 사유 토큰별 안내(`NPCAP_HINTS`)로 교체
+  (`not_elevated` 는 "관리자 권한으로 다시 실행").
+- 관측 모드 상태 줄(`agent._status_tick`, 순수): 흐름 전이 1회(`흐름을 잡았습니다` / `끊겼습니다` / `다시 잡았습니다`), 미개통
+  30초마다, 흐름은 잡았는데 육의전 무관측이면 10분마다. 첫 관측 뒤 멎는다. 5분 SEAssist 헬스 INFO 줄은 그대로(개발자용).
+- 문서: `docs/DEPLOY.md` **신규** — 0단계 Pi 판 확인, Funnel(=hub/README 링크), exe 빌드, **지인 복붙 안내문**, G7 게이트 6개,
+  운영 확인(G7 2차), 실패 증상표. HUB-PROTOCOL §0 표·§3-7·§7, hub/README(라우트·게이트 ping), README·AGENTS·PLAN(PR-Y5 절).
+- 검증: 루트 **228 passed**(신규 29: selftest 18 · ping/status 해석 5 · 상태 줄 6) · hub **87 passed**(신규 5) ·
+  진짜 허브 프로세스 2리스너 상대 **종단 스모크 12/12**(공개 stats 403 → 잘못된 토큰 401 → 등록 → ping 200 id 일치 →
+  자가진단 rc 0 → `devices.py revoke` → ping 403 → 자가진단 rc 1 + 사유 → 관리 시크릿 ping 200) ·
+  실기기 비승격 `--selftest`(거상 3개 검출·아이템 표 4,001행·권한/Npcap X·허브 미설정 경고, rc 1) · `--check` rc 0(벤더 무변경).
+- **`/code-review 13 high` 8건 전부 반영(2026-09-23)**: ① `_capturing` = 핸들 + 엔진 헬스 `tracked_flows > 0` — 핸들은 거상을
+  꺼도 `stop()`·읽기 오류에서만 닫혀 "끊겼습니다" 가 영영 안 떴다(하우스키핑은 FLOW_MISS_LIMIT 뒤 흐름을 0 으로), ② `Probes.env`
+  기본 **None = os.environ**, `{}` = 격리 — 빌드 PC 에 `YUKTRACKER_HUB_URL` 이 있으면 `build.bat` 의 테스트 단계가 깨지던 것,
+  `_url_origin` 도 같은 표를 본다, ③ "허브 도달" 은 200 이 아니라 `is_hub`(`service == yuktracker-hub`) — 오타 주소·포털 HTML 의
+  200 이 "옛 판" 안내로 이어져 관리자가 Pi 를 재배포하러 가던 경로 차단(`허브가 아닙니다` 줄), ④ 거상 프로세스 0 이면
+  `probe_capture` 가 15초를 기다리지 않는다, ⑤ 틱의 첫 줄에서 "캡처 시작" 문구 제거(엔진 상태 줄과 중복) + 루프 진입 때 이미
+  흐름이면 seed 해서 수집 모드에서 재알림 없음, ⑥ `--selftest` 에 `--invite-code`/`--device-label`/`--capture` 를 주면 parser
+  error(안내문도 "--selftest 없이"), ⑦ 인증서·미도달 문장은 `_describe_transport` 한 곳, ⑧ 엔진 시작 실패는 Npcap 사유 토큰
+  없이(빈 토큰) 돌려주고 모르는 사유의 fallback 도 "Npcap 을 설치하라" 가 아니다. 루트 **240 passed**(신규 12) · hub 87.
+- **Pi 판 확인 결과(2026-09-23)**: 떠 있는 컨테이너는 09-22 11:23 빌드 = **PR #10 이전 판**(compose 8800 만, `devices.py` 없음,
+  `invite_code` 없음, `register`·`ping` 이 `401 unauthorized` — 옛 전역 Bearer 미들웨어). DEPLOY §0 표에 이 응답 행을 추가했다.
+  **Funnel 은 443·8443 이 이미 같은 Pi 의 다른 서비스에 걸려 있다** → 사용자 결정: 공개 리스너는 **10000 번**
+  (`sudo tailscale funnel --bg --https=10000 8801`, 주소 `https://<pi-node>.<tailnet>.ts.net:10000`). hub/README·DEPLOY·HUB-PROTOCOL·
+  PLAN·`gen_build_config.py` 의 443 전제를 이 형태로 고쳤다(관측기는 주소를 통째로 받으므로 코드 무변경).
+- 남은 것: 재배포·Funnel(10000) → 폰 LTE 게이트 → `build.bat`(`:10000` 주소 주입) → exe 전달 → 실기기 G7.
 
 ## 현재 상태
 
@@ -205,6 +245,7 @@ SEAssist PR #306(PR-Y2) **미머지 → 닫음 예정, 이 레포로 이식(PR-Y
 1. PR #5·#6 머지 · Pi 배포 — **완료(2026-09-22)**. SEAssist PR #306 은 **닫는다**(머지 안 함). 2. 허브 운영 확인: 첫 실업로드(PR-Y1b) 뒤
    `stats.devices` 에 기기가 보이고 `docker compose logs` 에 `market 관측 수신` 줄이 찍히는지(G7 2차).
 3. ~~PR-Y2' 이식~~ — **완료(2026-09-22, 위 절)**. SEAssist PR #306 은 닫는다(이식 원본 worktree 는 PR-Y1b 까지 보존).
-4. ~~PR-Y1b~~ — **완료(2026-09-22, 위 절)**. 남은 것은 실기기 G7: `set YUKTRACKER_HUB_URL=…` → `build.bat` → exe 전달 →
-   각 PC 에서 초대 코드로 등록 → 육의전 1회 열람 → 허브 `search` 반영 확인. 5. 실기기: Step 0 잔여 캡처 2창(라벨 5열 `@45` 검정 · 용병 탭 열람 · 수량 ≥65,536·타 PC 세션) ·
+4. ~~PR-Y1b~~ · ~~PR-Y5 배포 준비~~ — **완료(2026-09-22, 위 절)**. 남은 것은 실기기 G7이고 절차 정본은 **`docs/DEPLOY.md`**:
+   §0 Pi 판 확인(`register` 404 면 옛 판 → 재배포·Funnel) → `set YUKTRACKER_HUB_URL=…` → `build.bat` → `--selftest` 로 주소 주입 확인 →
+   exe 전달(안내문 복붙) → 각 PC 에서 초대 코드로 등록 → 육의전 1회 열람 → 허브 `search` 반영 ≤10s · `devices.py list` uploads ≥1. 5. 실기기: Step 0 잔여 캡처 2창(라벨 5열 `@45` 검정 · 용병 탭 열람 · 수량 ≥65,536·타 PC 세션) ·
    `python tools\console_input_probe.py` 진단 → `_Console` 수정 PR. 6. PR-Y4 미루봇: `http://127.0.0.1:8800`, HUB-PROTOCOL §3-2/§3-3(`Lv.` 표시 보류).

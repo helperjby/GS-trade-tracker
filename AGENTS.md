@@ -17,7 +17,8 @@
 2. `docs/PLAN.md` — 전체 설계와 PR 순서(Step 0/1 → Y1 → Y2(SEAssist, 미머지) → Y2b → **Y3 허브** → Y2' 이식 → Y1b → Y4)
 3. `docs/SESSION_STATE.md` — 현재 상태·다음 행동
 4. `docs/HUB-PROTOCOL.md` — 관측기 ↔ 허브 ↔ 미루봇 계약(엔드포인트·필드·정규화·신선도)의 정본
-5. `docs/PACKET-MARKET.md` — 육의전 프로토콜 판정의 정본(필드 표·가설 레지스트리 H-2609-07~11·재현·PATCH-RECHECK).
+5. `docs/DEPLOY.md` — 배포·실기기 게이트(G7) 런북(Pi 판 확인 → Funnel → exe 빌드 → 지인 안내문 → 게이트)
+6. `docs/PACKET-MARKET.md` — 육의전 프로토콜 판정의 정본(필드 표·가설 레지스트리 H-2609-07~11·재현·PATCH-RECHECK).
    게이트 사다리·등급 정의 자체는 SEAssist `docs/PACKET-PROCESS.md` §1~§3 **동결 시점(main b54cb73) 참조**.
 
 ## 진실의 원천 순서
@@ -56,6 +57,7 @@ python -X utf8 -m pytest hub/tests -q              # 허브 테스트 (aiohttp �
 python tools\sync_seassist_core.py --check         # 출처 대비 차이 == VENDOR.json diverged 선언 ? (rc 1 = 불일치)
 python tools\sync_seassist_core.py --upstream      # 상류 체크아웃과 파일별 비교(정보용, %SEASSIST_REPO% 없으면 rc 2)
 run_dev.bat [--invite-code CODE] [--capture N]     # 관측·업로드(+ 발굴 수집 창)
+run_dev.bat --selftest                             # 자가진단 — 권한·Npcap·흐름·아이템 표·허브·토큰·스풀 (rc 0/1/2)
 python tools\market_probe.py --root <패킷 루트>     # 수집 창 오프라인 재생(라이브 vs 프로브 대조)
 build.bat                                          # %YUKTRACKER_HUB_URL% 이 있으면 exe 에 주소를 주입
 python hub\server.py --config hub\config.json      # 허브 로컬 실행 (배포는 hub/README.md)
