@@ -24,13 +24,14 @@
   | 라우트 | 공개 요청 | 자격 |
   |---|---|---|
   | `GET /` | 허용 | 없음 |
-  | `POST /api/market/register` | 허용 | 초대 코드(본문) + IP 속도제한 |
+  | `POST /api/market/register` | 허용 | 슬롯 초대 코드(본문) + IP 속도제한 |
   | `POST /api/market/observations` | 허용 | 기기 토큰 `Authorization: Bearer <token>`; 직접 접속이면 관리 시크릿도 |
   | `GET /api/market/ping` | 허용 | 위와 같음 — 토큰 확인 전용(§3-7), 자가진단이 쓴다 |
   | `GET /api/market/search` `listings` `stats` | **`403 {"ok":false,"error":"not_public"}`**(자격 검사 전) | 관리 시크릿 `Authorization: Bearer <secret>` |
 
   자격 없음·불일치·범위 밖(기기 토큰으로 조회, 공개 요청의 관리 시크릿)은 전부 `401 {"error":"unauthorized"}`.
-- 속도제한(프로세스 메모리, 재기동이면 리셋; 두 리스너가 버킷을 공유): 등록 IP 당 `register_limit_per_hour`(10), 업로드 기기 당
+- 속도제한(프로세스 메모리, 재기동이면 리셋; 두 리스너가 버킷을 공유): 등록 IP 당 `register_limit_per_hour`(10)·등록 **슬롯당**
+  `register_slot_limit_per_hour`(5, 성공한 교체만 — 새어 나간 코드로 한 슬롯을 계속 갈아치우지 못하게), 업로드 기기 당
   `upload_limit_per_min`(120 — 관리 시크릿은 무제한; 취소 검사보다 먼저라 취소된 클라의 폭주도 기기 단위로 429), 인증 실패 **공개
   요청** IP 당 `auth_fail_limit_per_min`(30) — 토큰 검사 **뒤** 실패에만 센다(공유 NAT 뒤의 고장난 클라 하나가 같은 IP 의 정상
   기기를 막지 않게; 직접 접속은 브리지 IP 를 봇과 공유하므로 세지 않는다). 초과는 `429 {"ok":false,"error":"rate_limited",
@@ -67,7 +68,8 @@ CREATE TABLE market_item_names (        -- 학습 표: 관측기가 보낸 id→
 CREATE TABLE devices (                  -- 초대 코드로 자기등록한 관측기 기기 (§3-0); prune 대상 아님
   device_id TEXT PRIMARY KEY,           -- 허브 발급 "d-"+10hex — 사용자 PC 이름은 다른 사용자와 겹칠 수 있어 식별자로 안 쓴다
   label TEXT NOT NULL DEFAULT '',       -- 기기가 등록 때 스스로 적은 표시명, 인쇄 가능 문자 ≤64 (신뢰하지 않는다)
-  alias TEXT NOT NULL DEFAULT '',       -- 관리자가 붙이는 별칭(§3-6 devices.py alias) — 표시는 이쪽을 앞세운다
+  alias TEXT NOT NULL DEFAULT '',       -- 관리자가 붙이는 별칭(§3-6 devices.py alias) — 표시는 이쪽을 앞세운다; 초기값 = 슬롯 이름
+  slot TEXT NOT NULL DEFAULT '',        -- 등록에 쓴 초대 코드의 슬롯 이름(설정 invite_codes 의 키, 2026-09-23) — 기존 DB 엔 ADD COLUMN
   token_hash TEXT NOT NULL UNIQUE,      -- sha256(token) hex — 토큰 원문은 등록 응답 1회만, 저장하지 않는다
   created_ts REAL NOT NULL, created_ip TEXT,
   last_seen_ts REAL, upload_count INTEGER NOT NULL DEFAULT 0,   -- 인증된 업로드마다 last_seen, 저장 성공이면 +1
@@ -85,9 +87,11 @@ CREATE TABLE devices (                  -- 초대 코드로 자기등록한 관�
   보충한다(`COALESCE`) — 표가 없는 PC 의 관측도 다른 PC 가 한 번이라도 이름을 보냈으면 검색된다.
 - 기기 표: market 표는 서버 이벤트루프만 쓰지만 `devices` 는 관리 CLI `hub/devices.py`(별도 프로세스, §3-6)가 드물게 한 행 UPDATE 를
   넣는다 — WAL + busy timeout. 제거된 기기·재등록으로 버려진 옛 행은 지우지 않는다(`stats` 에 남아 추적). **"등록"의 정의는 하나**
-  (`_ACTIVE_WHERE`, 정원 §3-0 과 `stats.devices_registered`): `revoked_ts IS NULL`. **업로드 여부·마지막 업로드 시각은 정원에 영향을
-  주지 않는다** — 2026-09-22 사용자 결정으로 활성 여부에 따른 자동 제외는 두지 않는다(아는 사람 최대 7명에게 직접 배포하므로 명단은
-  관리자가 관리한다). 한 번도 안 올린 기기도 자리를 차지하고, 자리를 비우는 유일한 길은 `devices.py revoke`(§3-6).
+  (`_ACTIVE_WHERE`, `stats.devices_registered`): `revoked_ts IS NULL`. **업로드 여부·마지막 업로드 시각은 명단에 영향을 주지 않는다**
+  — 2026-09-22 사용자 결정으로 활성 여부에 따른 자동 제외는 두지 않는다(아는 사람 최대 7명에게 직접 배포). 명단에서 빠지는 길은
+  둘뿐이다: 관리자의 `devices.py revoke`(§3-6)와 **같은 슬롯 코드의 재등록 교체**(§3-0, 2026-09-23) — 정원은 슬롯 수다.
+- 스키마 변경 규칙의 유일한 예외: `devices.slot` 은 기동 때 `PRAGMA table_info` 로 없으면 `ALTER TABLE … ADD COLUMN`(DEFAULT '')
+  한다(additive). 열을 지우거나 바꾸는 마이그레이션은 여전히 없다.
 
 ## 2. 정규화 한 정의
 
@@ -98,34 +102,44 @@ CREATE TABLE devices (                  -- 초대 코드로 자기등록한 관�
 
 ## 3. REST
 
-### 3-0. `POST /api/market/register` — 초대 코드 → 기기 토큰 (무 Bearer, 공개)
+### 3-0. `POST /api/market/register` — 슬롯 초대 코드 → 기기 토큰 (무 Bearer, 공개)
 
 ```jsonc
 // → 요청
-{"v":1, "invite_code":"<커뮤니티에 공유된 초대 코드>", "label":"DESKTOP-ABC"}   // label 선택(표시용, 인쇄 가능 문자 ≤64, 없음·null = "")
+{"v":1, "invite_code":"<그 사람의 슬롯 초대 코드>", "label":"DESKTOP-ABC"}   // label 선택(표시용, 인쇄 가능 문자 ≤64, 없음·null = "")
 // ← 200
-{"ok":true,"v":1,"device_id":"d-3f9a1c7e2b","token":"<43자 urlsafe>","server_time":1758500000.5}
+{"ok":true,"v":1,"device_id":"d-3f9a1c7e2b","token":"<43자 urlsafe>","slot":"slot3","replaced":["d-0a1b2c3d4e"],"server_time":1758500000.5}
 ```
 
+초대 코드는 **슬롯별**이다(2026-09-23 사용자 결정 — 설정 `invite_codes = {슬롯 이름: 코드}`, 슬롯 = 지인 한 사람, 정원 = 슬롯 수):
+코드가 어느 슬롯인지 정하고, 기기 행에 `slot` 과 초기 `alias`(= 슬롯 이름)가 들어가 등록 즉시 명단에서 누구인지 보인다. **같은 슬롯
+코드로 다시 등록하면**(재설치·PC 교체) 새 기기가 슬롯을 받고 그 슬롯의 등록(미제거) 기기는 **같은 트랜잭션에서 제거**된다
+(`revoked_ts`, note 는 관리자 메모 뒤에 `/ 재등록 교체 → <새 id>` 를 **덧붙임**, 응답 `replaced` 에 id) — 관리자 개입 없이 끝나고 옛 exe 가
+남아 있어도 다음 업로드부터 `403 device_revoked`. 새 기기의 `alias` 는 교체된 기기의 별칭을 **승계**(관리자가 붙인 이름이 재설치마다
+사라지지 않게), 없으면 슬롯 이름. 교체는 `slot` 으로 찾는다 — **슬롯 이름은 기기의 정체성**이라 config 에서 이름을 바꾸면 옛 이름의
+기기는 교체 대상에서 빠져 계속 올린다(기동 경고 + `stats.devices_orphaned`; 옛 기기를 `revoke` 하거나 이름을 되돌린다). 슬롯 없이 만든
+행(수동 삽입)도 마찬가지로 교체되지 않는다. 조회~삽입~제거는 `BEGIN IMMEDIATE` 한 트랜잭션(동시 `devices.py unrevoke` 와 안 엇갈린다).
+
 검사 순서(고정): ① IP 속도제한 — 성공·실패 모두 센다(코드 비교 전에 무차별 대입 상한) → ② 본문 크기(파싱 전) → ③ 등록 닫힘 →
-④ 본문 → ⑤ 코드(앞뒤 공백을 벗긴 뒤 상수 시간 비교) → ⑥ 정원 → ⑦ 발급.
+④ 본문 → ⑤ 코드(앞뒤 공백을 벗긴 뒤 슬롯 수만큼 상수 시간 비교, 조기 종료 없음) → ⑥ 슬롯당 속도제한(`429 rate_limited`) → ⑦ 발급 +
+같은 슬롯 교체. 정원 검사는 없다.
 
 | 응답 | 조건 |
 |---|---|
 | `429 rate_limited` + `Retry-After` | IP 당 `register_limit_per_hour` 초과 |
 | `411 {"ok":false,"error":"length_required"}` / `413 … "too_large"` | `Content-Length` 없음 / 4KiB 초과 — 무인증 라우트라 큰 본문은 읽지 않는다 |
-| `403 {"ok":false,"error":"registration_closed"}` | 설정 `invite_code` 가 비어 있음 |
+| `403 {"ok":false,"error":"registration_closed"}` | 설정 `invite_codes` 가 비어 있음 |
 | `400 {"ok":false,"error":"bad_request","field"?}` | 비 JSON·dict 아님 / `invite_code` 가 문자열 아님·공백뿐 / `label` 이 문자열 아님·64자 초과·제어 문자 |
-| `401 {"ok":false,"error":"bad_invite"}` | 코드 불일치 |
-| `403 {"ok":false,"error":"registration_full"}` | **등록된**(미제거) 기기 수 ≥ `max_devices`(7) — 업로드 여부와 무관하다(§1). 관리자가 `devices.py revoke` 로 한 자리를 비워야 새 기기가 들어온다. 5xx 가 아닌 이유: 관측기가 조용히 재시도하지 않게 |
+| `401 {"ok":false,"error":"bad_invite"}` | 어느 슬롯의 코드와도 불일치 |
+| ~~`403 registration_full`~~ | 2026-09-23 폐지 — 정원은 슬롯 수이고 같은 슬롯은 교체된다. 관측기의 안내 문장은 옛 판 허브 호환용으로 남아 있다 |
 | `500 {"ok":false,"error":"storage_error","server_time"}` | DB 오류 |
 
 - `device_id` 는 허브가 발급한다. 관측기는 `device_id`·`token` 을 저장하고 이후 업로드의 `device_id` 에 **그 값**을 쓴다(§3-1) —
   초대 코드는 저장하지 않는다(재등록은 명시적 `--invite-code` 실행에서만).
-- 등록은 비멱등: 재등록(재설치·토큰 분실)은 새 기기이고 옛 행은 남는다. 200 뒤 저장 실패 같은 고아 행은 `last_seen_ts` null 로 보이고
-  취소하면 된다.
-- 취소(§3-6)는 **soft** — 같은 초대 코드로 다시 등록할 수 있다. 남용은 `invite_code` 교체(설정 + 재기동): 기존 토큰은 살고 신규 등록만
-  막힌다.
+- 등록은 비멱등: 재등록(재설치·토큰 분실)은 새 기기이고 옛 행은 제거된 채 남는다(감사용). 200 뒤 저장 실패 같은 고아 행은
+  `last_seen_ts` null 로 보이고 취소하면 된다.
+- 취소(§3-6)는 **soft** — 같은 슬롯 코드로 다시 등록할 수 있다. 남용은 그 슬롯의 코드 교체(설정 + 재기동): 기존 토큰은 살고 신규
+  등록만 막힌다. 슬롯을 표에서 지우면 그 코드로는 등록이 안 되지만 이미 발급된 토큰은 산다(`revoke` 로 끊는다).
 
 ### 3-1. `POST /api/market/observations` — 관측기 업로드 (at-least-once, 배치)
 
@@ -230,10 +244,11 @@ CREATE TABLE devices (                  -- 초대 코드로 자기등록한 관�
 ```jsonc
 {"v":1,"server_time":…,"observations":412,"listings":1380,"items":97,"item_names":95,
  "fresh_listings":210,"fresh_sec":86400.0,"latest_recv_ts":1758500055.2,
- "devices":[{"device_id":"d-3f9a1c7e2b","label":"DESKTOP-ABC","alias":"소가","observations":300,"last_recv_ts":…},
-            {"device_id":"DEV-2","label":null,"alias":null,"observations":112,"last_recv_ts":…}],
- "devices_registered":5,"devices_revoked":1,"devices_max":7}      // label·alias: 등록 기기만, 관리 시크릿 업로드는 null
-                                                                 // 집계: 등록(미제거 = 정원이 세는 수) / 제거 / 정원
+ "devices":[{"device_id":"d-3f9a1c7e2b","label":"DESKTOP-ABC","alias":"소가","slot":"slot3","observations":300,"last_recv_ts":…},
+            {"device_id":"DEV-2","label":null,"alias":null,"slot":null,"observations":112,"last_recv_ts":…}],
+ "devices_registered":5,"devices_revoked":1,"devices_orphaned":0,"devices_max":7}   // label·alias·slot: 등록 기기만, 관리 시크릿 업로드는 null
+                                          // 집계: 등록(미제거) / 제거 / 등록됐지만 설정 슬롯에 없는 기기(이름 변경·수동 삽입) / 정원 = 슬롯 수
+                                          // 아직 안 들어온 사람 = devices_max − (devices_registered − devices_orphaned)
 ```
 
 ### 3-5. `GET /` — 무인증 상태 줄
@@ -243,16 +258,16 @@ CREATE TABLE devices (                  -- 초대 코드로 자기등록한 관�
 ### 3-6. 기기 관리 — `hub/devices.py` (HTTP 아님, Pi 에서)
 
 ```bash
-docker compose exec yuktracker-hub python devices.py list                      # device_id alias label created last_seen uploads revoked note
-docker compose exec yuktracker-hub python devices.py revoke <device_id> --note "사유"   # 명단에서 제거 — 정원 자리 1개 반환
+docker compose exec yuktracker-hub python devices.py list [--active]           # device_id slot alias label created last_seen uploads revoked note; --active = 미제거만
+docker compose exec yuktracker-hub python devices.py revoke <device_id> --note "사유"   # 명단에서 제거(분실·남용 — 재설치는 재등록 교체가 알아서 한다)
 docker compose exec yuktracker-hub python devices.py unrevoke <device_id>
 docker compose exec yuktracker-hub python devices.py alias <device_id> "<별칭>"        # 빈 문자열이면 해제
 docker compose exec yuktracker-hub python devices.py note <device_id> "메모"
 ```
 
 서버와 같은 SQLite 파일(`HUB_DB_PATH`)에 직접 쓴다 — 서버는 요청마다 토큰을 조회하므로 제거는 다음 업로드부터 `403 device_revoked`.
-HTTP 관리 라우트를 두지 않는 이유: 공개 표면을 늘리지 않고 셸에 시크릿이 필요 없다. 명단을 바꾸는 것은 **관리자뿐**이다 — 시간이 지나
-저절로 빠지는 기기는 없다(§1). 이미 제거된 기기를 다시 제거해도 원래 `revoked_ts` 는 보존(메모만 갱신), 등록 상태인 기기의 `unrevoke`
+HTTP 관리 라우트를 두지 않는 이유: 공개 표면을 늘리지 않고 셸에 시크릿이 필요 없다. 명단을 바꾸는 것은 관리자와 같은 슬롯의 재등록
+교체(§3-0)뿐이다 — 시간이 지나 저절로 빠지는 기기는 없다(§1). 이미 제거된 기기를 다시 제거해도 원래 `revoked_ts` 는 보존(메모만 갱신), 등록 상태인 기기의 `unrevoke`
 는 "이미 등록 상태" 안내. `alias` 는 관리자가 붙이는 별칭이고 `label` 은 기기가 스스로 적은 값이라 서로 덮지 않는다. 토큰 해시는
 출력하지 않고, alias·label·note 의 제어 문자는 `?`, 전각 문자는 표시 폭 2 로 정렬한다. 없는 DB 경로는 만들지 않는다(exit 1).
 
@@ -305,11 +320,12 @@ HTTP 관리 라우트를 두지 않는 이유: 공개 표면을 늘리지 않고
 `search_limit_default`(20) `search_limit_max`(100) `listings_limit_default`(500) `listings_limit_max`(2000)
 `max_observations_per_request`(100) `max_rows_per_observation`(64) `max_agent_ts_ahead_sec`(86400).
 
-공개·등록(2026-09-22): `public_port`(8801 — 공개 리스너, `port` 와 달라야 기동) `invite_code`(앞뒤 공백을 벗긴 뒤 비어 있으면 등록
-닫힘; 있으면 **8자 이상**, 예시값 `CHANGE-ME-INVITE`·`secret` 과 같은 값은 기동 거부 — 초대 코드는 커뮤니티에 공유하는 반공개 값)
-`max_devices`(7, §1 등록 기준 — 아는 사람에게 직접 배포) `admin_public`(false) `proxy_header`(`Tailscale-Funnel-Request`; Cloudflare
-Tunnel 로 바꾸면 `CF-Connecting-IP`) `register_limit_per_hour`(10) `upload_limit_per_min`(120) `auth_fail_limit_per_min`(30). 설정은
-기동 때 읽는다 — 초대 코드 교체는 `config.json` 수정 뒤 `docker compose restart`.
+공개·등록(2026-09-22, 슬롯 2026-09-23): `public_port`(8801 — 공개 리스너, `port` 와 달라야 기동) **`invite_codes`**(`{슬롯 이름: 초대
+코드}` 객체; 없음·null·빈 객체 = 등록 닫힘. 슬롯 이름 = 인쇄 가능 문자 1~64자·공백 벗김·중복 금지, 초기 별칭이 된다. 코드 = 공백을
+벗긴 뒤 **8자 이상**, 예시값(`CHANGE-ME…`)·`secret` 과 같은 값·**슬롯 간 중복**은 기동 거부 — 코드는 지인 한 사람에게 주는 반공개 값,
+정원 = 슬롯 수) `admin_public`(false) `proxy_header`(`Tailscale-Funnel-Request`; Cloudflare Tunnel 로 바꾸면 `CF-Connecting-IP`)
+`register_limit_per_hour`(10) `register_slot_limit_per_hour`(5) `upload_limit_per_min`(120) `auth_fail_limit_per_min`(30). 설정은 기동 때 읽는다 — 코드 교체·슬롯 추가는
+`config.json` 수정 뒤 `docker compose restart`. 구 `invite_code`·`max_devices` 키가 있으면 이관 안내와 함께 기동 거부.
 
 관측기 쪽 키(PR-Y1b, `%APPDATA%\YukTracker\config.json`): `hub_url`(공개 Funnel 주소; exe 내장 기본값) · `hub_device_id` · `hub_token`
 (§3-0 응답 저장). 초대 코드는 `--invite-code` 인자/첫 실행 프롬프트로만 받고 저장하지 않는다. 구 `hub_secret` 키는 폐기 — 관리
@@ -317,6 +333,14 @@ Tunnel 로 바꾸면 `CF-Connecting-IP`) `register_limit_per_hour`(10) `upload_l
 
 ## 7. 변경 이력
 
+- 2026-09-23 v1 **슬롯별 초대 코드**(사용자 결정 — 등록 즉시 누구인지 보이게, 재설치에 관리자 개입 없이): §6 `invite_code`·`max_devices`
+  → `invite_codes = {슬롯: 코드}`(정원 = 슬롯 수, 코드 슬롯 간 중복 금지, 구 키는 기동 거부), §1 `devices.slot`(기존 DB 는 ADD COLUMN —
+  무마이그레이션 규칙의 유일한 additive 예외) + 초기 `alias` = 슬롯 이름, §3-0 응답 `slot`·`replaced` + 같은 슬롯 재등록은 옛 기기를
+  같은 트랜잭션에서 제거(`registration_full` 폐지), §3-4 `devices[].slot`·`devices_max` = 슬롯 수, §3-6 표에 `slot` 열.
+  `/code-review 15 high` 10건 반영: 슬롯당 등록 상한 `register_slot_limit_per_hour`(정원 폐지의 보완), 교체 때 별칭 승계·메모 덧붙임,
+  `_tx` 는 `BEGIN IMMEDIATE`(조회부터 같은 트랜잭션), ADD COLUMN 은 검사 없이 시도 + 중복만 삼킴(동시 첫 열기 경쟁 제거), 슬롯 이름
+  변경의 고아 기기 = 기동 경고 + `stats.devices_orphaned`, `devices.py list --active`, 슬롯 이름·label 검사 한 함수(`printable_name`),
+  예시값 규칙 하나(`CHANGE-ME` 접두), '정원 자리' 문구 정리.
 - 2026-09-22 v1 — 최초. SEAssist `dashboard/` 확장(구 PR-Y3 계획) 대신 이 레포의 독립 서버로(사용자 결정: SEAssist 레포 머지 중단).
 - 2026-09-22 v1 리뷰 반영(PR #6, additive): §3-3 복합 keyset 커서(`since_key`·`next_since_key`·행 `listing_key`), §3-1 i64 범위·
   문자열 상한·`agent_ts_out_of_range`·`500 storage_error`·payload 행은 미지 키만, §3-2 `item_id` 400, §1 이름 upsert 규칙,

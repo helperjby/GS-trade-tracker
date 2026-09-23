@@ -8,7 +8,8 @@ Pi 운영(재배포·Funnel·기기 관리)은 [../hub/README.md](../hub/README.
 
 ## 0. Pi 에 떠 있는 허브가 어느 판인지 먼저 본다
 
-초대 코드 자기등록(`POST /api/market/register`)·공개 리스너 8801·`devices` 표는 **PR #10 이후 판**에만 있다.
+초대 코드 자기등록(`POST /api/market/register`)·공개 리스너 8801·`devices` 표는 **PR #10 이후 판**에만 있고, 슬롯별 코드
+(`invite_codes`)는 2026-09-23 판부터다.
 그 전 판이 떠 있으면 지인 PC 의 첫 실행 등록이 실패한다(옛 판은 `/api/*` 전부에 관리 시크릿을 요구해 `401 unauthorized`).
 실측 2026-09-23: 09-22 11:24 배포본이 정확히 이 상태였다.
 
@@ -20,7 +21,8 @@ curl -s -X POST http://127.0.0.1:8800/api/market/register -H "Content-Type: appl
 | 응답 | 뜻 | 할 일 |
 |---|---|---|
 | `401 bad_invite` | 최신 판 + 초대 코드 설정됨 | 1번으로 |
-| `403 registration_closed` | 최신 판인데 `invite_code` 가 비었다 | `config.json` 에 `invite_code` 추가 → `docker compose restart` |
+| `403 registration_closed` | 최신 판인데 `invite_codes` 가 비었다 | `config.json` 에 `invite_codes` 표 추가(hub/README 2) → `docker compose restart` |
+| 기동 로그에 `'invite_code' 는 … 폐기` | 슬롯 판 허브에 구 config | `invite_code`·`max_devices` 를 지우고 `invite_codes` 표로(hub/README 2) |
 | `401 unauthorized` (본문에 `bad_invite` 가 **없다**) | **옛 판** — PR #10 이전의 전역 Bearer 미들웨어 | hub/README "파이 배포" 1)~3) 으로 재복사·재기동 |
 | `404` (또는 라우트 없음) | **옛 판** | 위와 같음 |
 
@@ -33,7 +35,8 @@ curl -s -X POST http://127.0.0.1:8800/api/market/register -H "Content-Type: appl
 hub/README "파이 배포" → "공개 노출(Tailscale Funnel)" 순서대로. 이 Pi 는 Funnel 443·8443 을 다른 서비스가 이미 쓰고 있어
 공개 리스너는 **10000 번**(`--https=10000`, 주소 `https://<pi-node>.<tailnet>.ts.net:10000`)으로 낸다(2026-09-23 결정). 끝나면 **외부망(폰 LTE)** 에서 게이트가 전부 맞아야 한다:
 `GET /` 200 · `stats` 403 `not_public`(더미 Bearer) · `register` 200/401 · `ping` 200 · `devices.py list` 에 그 기기.
-게이트용으로 만든 기기는 `devices.py revoke <device_id> --note gate` 로 자리를 돌려놓는다(정원 7).
+게이트용 기기는 어느 슬롯 코드로 만들어도 그 슬롯의 지인이 등록하면 자동 교체되지만, 명단을 깨끗이 두려면 `devices.py revoke <device_id>
+--note gate` 로 지운다.
 
 ## 2. exe 빌드 — 허브 주소는 빌드 때 주입한다
 
@@ -60,7 +63,7 @@ dist\YukTracker.exe --selftest
 > 1. **Npcap 설치**: https://npcap.com → `Npcap ... installer` 내려받아 기본값으로 설치(이미 있으면 건너뜀).
 > 2. 보낸 `YukTracker.exe` 를 아무 폴더에나 두고 **오른쪽 클릭 → 관리자 권한으로 실행**.
 >    (패킷을 읽으려면 관리자 권한이 필요합니다. 게임에 뭔가를 입력하거나 보내지는 않습니다 — 받는 패킷만 읽습니다.)
-> 3. 처음 한 번만 **초대 코드**를 물어봅니다 → `<초대코드>` 를 붙여넣고 Enter.
+> 3. 처음 한 번만 **초대 코드**를 물어봅니다 → `<본인 초대코드>` 를 붙여넣고 Enter. (코드는 사람마다 다릅니다 — 남에게 넘기지 마세요.)
 > 4. 거상을 켜고 접속하면 `캡처 시작` 줄이 뜹니다. 그 뒤 **육의전을 열고 목록을 몇 페이지 넘겨 주세요** —
 >    창에 `[육의전] … 목록 N행` 이 찍히면 올라간 겁니다. 그냥 켜 두면 육의전을 열 때마다 자동으로 모입니다.
 > 5. 끄려면 창에 `q` + Enter (또는 창 닫기).
@@ -68,10 +71,10 @@ dist\YukTracker.exe --selftest
 > **안 될 때**: 같은 창에서 `q` 로 끈 뒤, `YukTracker.exe --selftest` 를 관리자 권한으로 실행해서 나온 화면을 그대로 보내 주세요.
 > 어디서 막혔는지 한 줄씩 나옵니다.
 >
-> 프로그램을 지웠다가 다시 깔면 **알려 주세요** — 허브 명단에서 옛 기기를 빼야 자리가 납니다.
+> 프로그램을 지웠다가 다시 깔거나 PC 를 바꿔도 **같은 코드**로 다시 등록하면 됩니다(옛 기기는 자동으로 빠집니다).
 
-보내는 쪽 메모: 초대 코드는 지인에게만, 관리 시크릿은 절대 보내지 않는다(exe 에도 없다). 등록되면
-`devices.py alias <device_id> "<이름>"` 으로 별칭을 붙여 두면 `devices.py list`·`stats.devices[]` 가 그대로 접속 현황판이 된다.
+보내는 쪽 메모: 지인마다 **본인 슬롯의 코드**(`config.json` 의 `invite_codes`) 하나씩, 관리 시크릿은 절대 보내지 않는다(exe 에도 없다).
+등록되면 `devices.py list` 에 슬롯 이름이 별칭으로 바로 찍힌다 — 이름을 바꾸고 싶을 때만 `devices.py alias <device_id> "<이름>"`.
 
 ## 4. G7 게이트 — 이게 맞으면 통과
 
@@ -91,7 +94,8 @@ curl -s -H "Authorization: Bearer <관리 시크릿>" "http://<pi-tailnet-ip>:88
 
 ## 5. G7 2차 — 운영 확인
 
-- `GET /api/market/stats` 의 `observations`·`devices_registered` 가 는다(`devices_max` 7 과 비교해 남은 자리).
+- `GET /api/market/stats` 의 `observations`·`devices_registered` 가 는다(아직 안 들어온 사람 = `devices_max` − (`devices_registered` −
+  `devices_orphaned`); `devices_orphaned` ≠ 0 이면 설정 슬롯 이름과 안 맞는 기기가 있다 — hub/README 운영 메모).
 - `docker compose logs --tail 50` 에 `market 관측 수신: d-… (별칭) 신규 N / 중복 M / 행 K` 줄.
 - 기기가 하나도 안 올라오면: 그 PC 에서 `--selftest` → `기기 토큰` 줄이 401/403 인지, `패킷 흐름` 줄이 X 인지로 갈린다.
 - 결과는 `SESSION_STATE.md` 에 날짜와 함께 한 줄 기록(기기명·주소는 자리표시자로).
@@ -103,8 +107,8 @@ curl -s -H "Authorization: Bearer <관리 시크릿>" "http://<pi-tailnet-ip>:88
 | `X Npcap — 관리자 권한이 아니라…` | 승격 안 됨 | 오른쪽 클릭 → 관리자 권한으로 실행 |
 | `X 패킷 흐름 — 거상은 떠 있는데…` | 다른 어댑터·미접속 | 서버 접속 확인, VPN/가상 어댑터 끄고 재시도 |
 | `! 아이템 표 — 못 읽었습니다` | 클라 폴더가 기본 경로 밖 | `--client-dir "<거상 폴더>"` (이름 없이도 관측·업로드는 된다) |
-| `X 기기 토큰 — 401` | 토큰 무효(허브 DB 교체 등) | `--invite-code <코드>` 로 재등록 |
-| `X 기기 토큰 — 403 제거됨` | 관리자가 명단에서 뺌 | 관리자에게 문의 |
+| `X 기기 토큰 — 401` | 토큰 무효(허브 DB 교체 등) | 본인 코드로 `--invite-code <코드>` 재등록 |
+| `X 기기 토큰 — 403 제거됨` | 관리자가 명단에서 뺌, 또는 같은 코드로 다른 PC 가 등록해 교체됨 | 본인 PC 가 맞으면 같은 코드로 재등록(상대가 교체됨), 아니면 관리자에게 문의 |
 | `X 기기 토큰 — 옛 판입니다` | 허브가 PR-Y5 이전 | Pi 재배포(0번) |
 | `X 허브 도달 — 닿지 못했습니다` | 주소 오타(`:10000` 누락)·Funnel 꺼짐 | Pi 에서 `tailscale funnel status` |
 | `! 업로드 대기 N배치` 가 안 줄어듦 | 401/403 로 업로더 정지 | 같은 화면의 `기기 토큰` 줄을 본다 |

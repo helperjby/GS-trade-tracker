@@ -11,7 +11,7 @@ import time
 import aiohttp
 
 import server as server_mod
-from helpers import (AUTH, INVITE, PROXY, SECRET, app_db, body, device_auth, get, make_cfg, obs, post, register,
+from helpers import (AUTH, INVITE, INVITE2, PROXY, SECRET, app_db, body, device_auth, get, make_cfg, obs, post, register,
                      start_client)
 
 READ_ROUTES = ("/api/market/search?q=x", "/api/market/listings", "/api/market/stats")
@@ -29,30 +29,49 @@ def test_register_happy_path_no_bearer_and_token_hashed(tmp_path):
             assert st == 200 and data["ok"] is True and data["v"] == 1 and "server_time" in data
             assert re.fullmatch(r"d-[0-9a-f]{10}", data["device_id"])
             assert len(data["token"]) >= 40
+            assert (data["slot"], data["replaced"]) == ("slot1", [])       # 코드 → 슬롯, 첫 등록은 교체 없음
             (d,) = app_db(app).list_devices()
             assert (d["device_id"], d["label"], d["created_ip"]) == (data["device_id"], "DESKTOP-ABC", "203.0.113.7")
+            assert (d["slot"], d["alias"]) == ("slot1", "slot1")          # 초기 별칭 = 슬롯 이름
             assert d["revoked_ts"] is None and d["upload_count"] == 0 and d["last_seen_ts"] is None
             assert "token_hash" not in d          # list 는 해시를 싣지 않는다
             stored = app_db(app)._con.execute("SELECT token_hash FROM devices").fetchone()[0]
             assert stored == hashlib.sha256(data["token"].encode()).hexdigest()
-            # 재등록(재설치·토큰 분실) = 새 기기 — id 가 다르고 옛 행은 남는다
+            # 같은 슬롯 코드로 재등록(재설치·토큰 분실) = 새 기기가 슬롯을 받고 옛 기기는 같은 트랜잭션에서 제거
+            app_db(app).set_device_alias(data["device_id"], "소가")           # 관리자가 별칭을 바꿔도 slot 으로 찾는다
+            app_db(app).set_device_note(data["device_id"], "분실 신고")
             st2, data2 = await register(client, label="DESKTOP-ABC")
             assert st2 == 200 and data2["device_id"] != data["device_id"]
+            assert data2["replaced"] == [data["device_id"]]
+            old = app_db(app).get_device(data["device_id"])
+            assert old["revoked_ts"] is not None
+            assert old["note"] == f"분실 신고 / 재등록 교체 → {data2['device_id']}"   # 관리자 메모는 덧붙여 보존
+            assert app_db(app).get_device(data2["device_id"])["alias"] == "소가"      # 별칭 승계
+            assert app_db(app).count_active_devices() == 1
+            assert [d["device_id"] for d in app_db(app).list_devices(active_only=True)] == [data2["device_id"]]
             # label 생략·null 은 빈 문자열, 직접 접속의 created_ip 는 소켓 peer; 초대 코드 앞뒤 공백은 벗긴다(콘솔 붙여넣기)
             st3, data3 = await register(client, invite=f"  {INVITE} ", label=None)
-            assert st3 == 200
+            assert st3 == 200 and data3["replaced"] == [data2["device_id"]]
             d3 = [d for d in app_db(app).list_devices() if d["device_id"] == data3["device_id"]][0]
             assert d3["label"] == "" and d3["created_ip"] == "127.0.0.1"
-            assert app_db(app).count_active_devices() == 3
+            assert app_db(app).count_active_devices() == 1 and len(app_db(app).list_devices()) == 3
+            # 다른 슬롯은 서로 건드리지 않는다
+            st4, data4 = await register(client, invite=INVITE2, label="PC-2")
+            assert st4 == 200 and (data4["slot"], data4["replaced"]) == ("slot2", [])
+            assert app_db(app).count_active_devices() == 2
+            # 옛 토큰은 바로 403 device_revoked — 재설치 전 exe 가 남아 있어도 올리지 못한다
+            st5, data5 = await post(client, body(obs(obs_id="old"), device_id=data["device_id"]),
+                                    headers=device_auth(data["token"]))
+            assert (st5, data5["error"]) == (403, "device_revoked")
         finally:
             await client.close()
     _run(scn())
 
 
-def test_register_bad_invite_validation_full_and_closed(tmp_path):
+def test_register_bad_invite_validation_stats_and_closed(tmp_path):
     async def scn():
         # 시도 12회 — 등록 IP 상한(기본 10/h)은 별도 테스트, 여기선 넉넉히
-        app, client = await start_client(make_cfg(tmp_path, max_devices=1, register_limit_per_hour=100))
+        app, client = await start_client(make_cfg(tmp_path, register_limit_per_hour=100))
         try:
             st, data = await register(client, invite="wrong-code")
             assert (st, data["error"]) == (401, "bad_invite")
@@ -65,34 +84,62 @@ def test_register_bad_invite_validation_full_and_closed(tmp_path):
                 st, data = await register(client, label=bad)
                 assert (st, data["field"]) == (400, "label"), bad
             assert app_db(app).count_active_devices() == 0   # 거부는 아무것도 안 만든다
-            # 3일 전에 등록만 하고 한 번도 안 올린 행도 자리를 차지한다 — 자동 제외가 없다(사용자 결정)
+            # 3일 전에 등록만 하고 한 번도 안 올린 기기도 '등록' 으로 센다 — 활성 여부에 따른 자동 제외가 없다(사용자 결정).
+            # 슬롯 없이 만든 행(관리자 수동 삽입)은 어떤 재등록에도 교체되지 않는다.
             orphan = app_db(app).create_device("orphan", "h-orphan", time.time() - 3 * 86400, None)
-            st, data = await register(client)
-            assert (st, data["error"]) == (403, "registration_full")   # 미업로드 1대만으로 정원이 찬다
-            # 관리자가 빼야 자리가 난다
-            app_db(app).set_device_revoked(orphan, time.time())
             st, first = await register(client)
-            assert st == 200
-            st, data = await register(client)
-            assert (st, data["error"]) == (403, "registration_full")
-            app_db(app).set_device_revoked(first["device_id"], time.time())
-            st, data = await register(client)
-            assert st == 200                                            # 제거된 기기는 정원에서 빠진다
+            assert st == 200 and first["replaced"] == []
+            st, second = await register(client)                        # slot1 재등록 → first 교체, orphan 은 그대로
+            assert st == 200 and second["replaced"] == [first["device_id"]]
             st, s = await get(client, "/api/market/stats")
-            # registered = 미제거(새 기기 1) / revoked = orphan + first, devices_max = 설정된 정원
-            assert (s["devices_registered"], s["devices_revoked"], s["devices_max"]) == (1, 2, 1)
+            # registered = orphan + second / revoked = first, devices_max = 슬롯 수(설정 표 크기), orphaned = 슬롯 없는 orphan
+            assert (s["devices_registered"], s["devices_revoked"], s["devices_max"], s["devices_orphaned"]) == (2, 1, 2, 1)
             assert orphan in [d["device_id"] for d in app_db(app).list_devices()]
-            # 정원 초과 뒤 잘못된 코드 → 코드 검사가 정원보다 먼저(401)
             st, data = await register(client, invite="wrong-code")
             assert (st, data["error"]) == (401, "bad_invite")
         finally:
             await client.close()
-        app2, client2 = await start_client(make_cfg(tmp_path / "closed", invite_code=""))
+        app2, client2 = await start_client(make_cfg(tmp_path / "closed", invite_codes={}))
         try:
             st, data = await register(client2)
             assert (st, data["error"]) == (403, "registration_closed")
             st, data = await register(client2, invite="")             # 닫힘이 본문 검사보다 먼저
             assert (st, data["error"]) == (403, "registration_closed")
+        finally:
+            await client2.close()
+    _run(scn())
+
+
+def test_register_per_slot_rate_limit_and_slot_rename_warning(tmp_path, caplog):
+    """코드가 새도 한 슬롯을 시간당 상한 넘게 교체하지 못한다(정원 검사 폐지의 보완). 슬롯 이름을 바꾸면 옛 이름의 기기는
+    교체 대상에서 빠지므로 기동 때 경고 + stats.devices_orphaned."""
+    async def scn():
+        app, client = await start_client(make_cfg(tmp_path, register_slot_limit_per_hour=2, register_limit_per_hour=100))
+        try:
+            st, a = await register(client, headers={**PROXY, "X-Forwarded-For": "203.0.113.1"})
+            st, b = await register(client, headers={**PROXY, "X-Forwarded-For": "203.0.113.2"})
+            assert st == 200 and b["replaced"] == [a["device_id"]]
+            resp = await client.post("/api/market/register", json={"v": 1, "invite_code": INVITE},
+                                     headers={**PROXY, "X-Forwarded-For": "203.0.113.3"})   # IP 는 새것 — 슬롯 버킷이 막는다
+            assert resp.status == 429 and (await resp.json())["error"] == "rate_limited"
+            assert app_db(app).count_active_devices() == 1
+            st, c = await register(client, invite=INVITE2, headers={**PROXY, "X-Forwarded-For": "203.0.113.4"})
+            assert st == 200                                                    # 다른 슬롯은 별개 버킷
+        finally:
+            await client.close()
+        # 슬롯 이름 변경: slot1 → 철수 (같은 코드). 옛 slot1 기기는 활성인 채 어느 슬롯에도 안 속한다.
+        cfg2 = make_cfg(tmp_path, invite_codes={"철수": INVITE, "slot2": INVITE2})
+        caplog.clear()
+        app2, client2 = await start_client(cfg2)
+        try:
+            assert any("설정 슬롯에 없는 등록 기기 1개" in r.getMessage() and b["device_id"] in r.getMessage()
+                       for r in caplog.records)
+            st, s = await get(client2, "/api/market/stats")
+            assert (s["devices_registered"], s["devices_orphaned"], s["devices_max"]) == (2, 1, 2)
+            st, d = await register(client2, headers=PROXY)                      # 철수 로 등록 — slot1 기기는 교체되지 않는다
+            assert st == 200 and (d["slot"], d["replaced"]) == ("철수", [])
+            st, s = await get(client2, "/api/market/stats")
+            assert (s["devices_registered"], s["devices_orphaned"]) == (3, 1)
         finally:
             await client2.close()
     _run(scn())
@@ -130,11 +177,11 @@ def test_register_rate_limited_per_ip_uses_last_xff_entry(tmp_path):
             spoof = {**PROXY, "X-Forwarded-For": "198.51.100.9, 203.0.113.7"}
             st, data = await register(client, headers=spoof)
             assert (st, data["error"]) == (429, "rate_limited")
-            # 다른 원 IP 는 다른 버킷
-            st, data = await register(client, headers={**PROXY, "X-Forwarded-For": "198.51.100.9"})
+            # 다른 원 IP 는 다른 버킷 (slot1 은 위에서 슬롯당 상한 2 를 채웠으므로 slot2 코드로 — 슬롯 버킷은 별도 테스트)
+            st, data = await register(client, invite=INVITE2, headers={**PROXY, "X-Forwarded-For": "198.51.100.9"})
             assert st == 200
             # 직접 접속(프록시 헤더 없음)은 소켓 peer 버킷 — X-Forwarded-For 를 스스로 붙여도 무시된다
-            st, data = await register(client, headers={"X-Forwarded-For": "203.0.113.7"})
+            st, data = await register(client, invite=INVITE2, headers={"X-Forwarded-For": "203.0.113.7"})
             assert st == 200
             assert app_db(app).list_devices()[-1]["created_ip"] == "127.0.0.1"
             # 공개인데 X-Forwarded-For 가 없으면 'public:?' 한 버킷(브리지 IP 와 섞이지 않는다)
@@ -162,6 +209,7 @@ def test_device_token_upload_ok_counts_and_stats_label(tmp_path):
             st, s = await get(client, "/api/market/stats")
             (entry,) = s["devices"]
             assert (entry["device_id"], entry["label"], entry["observations"]) == (dev_id, "PC-1", 1)
+            assert (entry["slot"], entry["alias"]) == ("slot1", "slot1")
             assert (s["devices_registered"], s["devices_revoked"]) == (1, 0)
             # 관리 시크릿(직접 접속) 업로드는 자유 device_id·label null 그대로
             st, data = await post(client, body(obs(obs_id="k2"), device_id="DEV-9"))
@@ -306,7 +354,7 @@ def test_public_listener_treats_every_request_as_public(tmp_path):
             assert resp.status == 200
             st, reg = await register(client)                                         # XFF 없음 → 'public:?'
             assert st == 200 and app_db(app).list_devices()[0]["created_ip"] == "public:?"
-            st, reg2 = await register(client, headers={"X-Forwarded-For": "203.0.113.7"})   # 프록시 헤더 없이도 XFF 채택
+            st, reg2 = await register(client, invite=INVITE2, headers={"X-Forwarded-For": "203.0.113.7"})   # 프록시 헤더 없이도 XFF 채택
             assert st == 200 and app_db(app).list_devices()[1]["created_ip"] == "203.0.113.7"
             st, data = await post(client, body(obs(obs_id="p1"), device_id=reg["device_id"]), headers=device_auth(reg["token"]))
             assert st == 200
@@ -369,7 +417,7 @@ def test_upload_rate_limit_429_per_device_not_admin(tmp_path):
         app, client = await start_client(make_cfg(tmp_path, upload_limit_per_min=2))
         try:
             st, reg = await register(client, label="A")
-            st, reg2 = await register(client, label="B")
+            st, reg2 = await register(client, invite=INVITE2, label="B")   # 같은 코드면 A 가 교체된다 — 다른 슬롯
             for i in range(2):
                 st, data = await post(client, body(obs(obs_id=f"u{i}"), device_id=reg["device_id"]),
                                       headers=device_auth(reg["token"]))

@@ -10,7 +10,9 @@
 - ``market_listings`` — 등록(판매 건) 1개의 **최신 상태**. 같은 등록을 여러 번 보면 upsert.
 - ``market_item_names`` — 관측기가 함께 보낸 아이템 id→이름 누적(이름을 못 푼 행을 검색 때 보충).
 - ``devices`` — 초대 코드로 자기등록한 관측기 기기: 허브가 발급한 ``device_id`` 와 업로드 토큰의 sha256.
-  토큰 원문은 저장하지 않는다(등록 응답 1회만). 제거(``revoked_ts``)는 다음 요청부터 바로 먹는다 — 서버는
+  토큰 원문은 저장하지 않는다(등록 응답 1회만). ``slot`` 은 등록에 쓴 초대 코드의 이름(설정 ``invite_codes`` 의 키) —
+  같은 슬롯으로 다시 등록하면 새 기기가 슬롯을 받고 옛 기기는 같은 트랜잭션에서 제거된다(``register_slot_device``,
+  2026-09-23 사용자 결정: 재설치에 관리자 개입 없음). 제거(``revoked_ts``)는 다음 요청부터 바로 먹는다 — 서버는
   요청마다 이 표를 본다. prune 대상이 아니다. **"등록됨"의 정의는 하나** (``_ACTIVE_WHERE``): ``revoked_ts IS NULL``.
   업로드 여부·마지막 업로드 시각은 정원에 영향을 주지 않는다 — 명단은 관리자만 바꾼다(2026-09-22 사용자 결정:
   아는 사람 최대 7명에게 직접 배포, 활성 여부에 따른 자동 제외 없음). ``alias`` 는 관리자가 붙이는 별칭
@@ -63,6 +65,7 @@ CREATE TABLE IF NOT EXISTS devices (
   device_id TEXT PRIMARY KEY,
   label TEXT NOT NULL DEFAULT '',
   alias TEXT NOT NULL DEFAULT '',
+  slot TEXT NOT NULL DEFAULT '',
   token_hash TEXT NOT NULL UNIQUE,
   created_ts REAL NOT NULL, created_ip TEXT,
   last_seen_ts REAL, upload_count INTEGER NOT NULL DEFAULT 0,
@@ -164,8 +167,11 @@ ON CONFLICT(item_id) DO UPDATE SET
   last_seen_ts   = MAX(last_seen_ts, excluded.last_seen_ts)
 """
 
-_DEVICE_COLUMNS = ("device_id, label, alias, created_ts, created_ip, last_seen_ts, upload_count, "
+_DEVICE_COLUMNS = ("device_id, label, alias, slot, created_ts, created_ip, last_seen_ts, upload_count, "
                    "revoked_ts, note")
+#: 배포 DB 에 additive 로 더한 열 — ``CREATE TABLE IF NOT EXISTS`` 는 이미 있는 표에 열을 못 더하므로 기동 때 없는 열만
+#: ``ALTER TABLE … ADD COLUMN`` 한다(DEFAULT 가 있어 기존 행은 그대로). 열을 지우거나 바꾸는 마이그레이션은 여전히 없다.
+_DEVICE_ADDED_COLUMNS = (("slot", "TEXT NOT NULL DEFAULT ''"),)
 
 
 class Database:
@@ -179,6 +185,18 @@ class Database:
         self._con.execute("PRAGMA journal_mode=WAL")
         self._con.execute("PRAGMA synchronous=NORMAL")
         self._con.executescript(SCHEMA)
+        self._con.commit()
+        self._add_missing_columns()
+
+    def _add_missing_columns(self) -> None:
+        # 먼저 PRAGMA 로 보고 ALTER 하면 서버와 devices.py 가 같은 순간 처음 열 때 둘 다 '없음'을 보고 진 쪽이 죽는다 —
+        # 검사 없이 ALTER 를 시도하고 '이미 있음'만 삼키면 경쟁 창이 없다(열 7개 표라 비용 없음).
+        for name, decl in _DEVICE_ADDED_COLUMNS:
+            try:
+                self._con.execute(f"ALTER TABLE devices ADD COLUMN {name} {decl}")
+            except sqlite3.OperationalError as e:
+                if "duplicate column" not in str(e).lower():
+                    raise
         self._con.commit()
 
     def close(self) -> None:
@@ -194,6 +212,10 @@ class Database:
         나머지 전원을 멈추게 하는 경로라 모든 쓰기를 여기로 통과시킨다.
         """
         try:
+            if not self._con.in_transaction:
+                # sqlite3 의 암묵 BEGIN 은 첫 DML 에서만 열린다 — 그 앞의 SELECT(슬롯 교체 대상 조회)가 autocommit 으로
+                # 새면 devices.py 의 동시 unrevoke 를 못 본다. 쓰기 락을 먼저 잡아 읽기도 같은 트랜잭션 안에 둔다.
+                self._con.execute("BEGIN IMMEDIATE")
             yield self._con
             self._con.commit()
         except Exception:
@@ -254,27 +276,55 @@ class Database:
 
     # ---- 기기 (POST /api/market/register · 업로드 인증 · devices.py) ----
 
-    def create_device(self, label: str, token_hash: str, now: float, ip: str | None) -> str:
-        """기기 행 생성 → 발급한 ``device_id``. PK 충돌이면 id 를 다시 만든다(``DEVICE_ID_ATTEMPTS`` 회).
-        ``token_hash`` UNIQUE 충돌(32바이트 난수라 사실상 불가)은 재생성으로 못 풀어 IntegrityError 로 나간다."""
+    def create_device(self, label: str, token_hash: str, now: float, ip: str | None, *, slot: str = "") -> str:
+        """기기 행 생성 → 발급한 ``device_id``. **서버는 쓰지 않는다**(등록은 ``register_slot_device``) — 테스트·수동 삽입용.
+        슬롯 없는 행은 어떤 재등록에도 교체되지 않고 ``stats.devices_orphaned`` 에 잡힌다."""
+        device_id, _ = self.register_slot_device(slot, label, token_hash, now, ip, replace=False)
+        return device_id
+
+    def register_slot_device(self, slot: str, label: str, token_hash: str, now: float, ip: str | None,
+                             *, replace: bool = True) -> tuple[str, list[str]]:
+        """슬롯 초대 코드로 등록 → (발급한 ``device_id``, 이 등록이 제거한 옛 기기 id 들).
+
+        ``replace`` 면 같은 ``slot`` 의 등록(미제거) 기기를 **같은 트랜잭션**(``_tx`` 가 BEGIN IMMEDIATE 로 조회부터 잠근다)에서
+        제거한다(``revoked_ts = now``, note 는 덧붙임 ``… / 재등록 교체 → <새 id>``) — 재설치·PC 교체가 관리자 개입 없이 끝난다.
+        ``alias`` 는 교체되는 기기의 별칭을 **승계**하고(관리자가 붙인 이름이 재설치마다 사라지지 않게), 없으면 슬롯 이름.
+        PK 충돌이면 id 를 다시 만든다(``DEVICE_ID_ATTEMPTS`` 회). ``token_hash`` UNIQUE 충돌(32바이트 난수라 사실상 불가)은
+        재생성으로 못 풀어 IntegrityError 로 나간다.
+        """
         last_error: sqlite3.IntegrityError | None = None
         for _ in range(DEVICE_ID_ATTEMPTS):
             device_id = new_device_id()
             try:
-                self._con.execute(
-                    "INSERT INTO devices (device_id, label, token_hash, created_ts, created_ip) VALUES (?, ?, ?, ?, ?)",
-                    (device_id, label, token_hash, now, ip))
+                with self._tx() as con:
+                    olds: list[str] = []
+                    alias = slot
+                    if replace and slot:
+                        rows = con.execute(
+                            f"SELECT device_id, alias FROM devices WHERE slot = ? AND {_ACTIVE_WHERE} ORDER BY created_ts",
+                            (slot,)).fetchall()
+                        olds = [r[0] for r in rows]
+                        inherited = [r[1] for r in rows if (r[1] or "").strip()]
+                        if inherited:
+                            alias = inherited[-1]          # 가장 최근 기기의 별칭
+                    con.execute(
+                        "INSERT INTO devices (device_id, label, alias, slot, token_hash, created_ts, created_ip) "
+                        "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                        (device_id, label, alias, slot, token_hash, now, ip))
+                    tag = f"재등록 교체 → {device_id}"
+                    for old in olds:
+                        con.execute("UPDATE devices SET revoked_ts = ?, "
+                                    "note = CASE WHEN note = '' THEN ? ELSE note || ' / ' || ? END WHERE device_id = ?",
+                                    (now, tag, tag, old))
             except sqlite3.IntegrityError as e:
-                self._con.rollback()
                 last_error = e
                 continue
-            self._con.commit()
-            return device_id
+            return device_id, olds
         raise sqlite3.IntegrityError(f"devices 삽입 {DEVICE_ID_ATTEMPTS}회 충돌") from last_error
 
     def get_device_by_token_hash(self, token_hash: str) -> dict | None:
         r = self._con.execute(
-            "SELECT device_id, label, alias, revoked_ts, upload_count, last_seen_ts FROM devices WHERE token_hash = ?",
+            "SELECT device_id, label, alias, slot, revoked_ts, upload_count, last_seen_ts FROM devices WHERE token_hash = ?",
             (token_hash,)).fetchone()
         return dict(r) if r is not None else None
 
@@ -284,22 +334,31 @@ class Database:
         return dict(r) if r is not None else None
 
     def count_active_devices(self) -> int:
-        """등록된(미제거) 기기 수(``_ACTIVE_WHERE``) — 등록 정원(``max_devices``) 판정용. 업로드를 한 번도 안 한
-        기기도 자리를 차지한다(자동 제외 없음) — 자리를 비우는 것은 관리자의 ``devices.py revoke`` 뿐."""
+        """등록된(미제거) 기기 수(``_ACTIVE_WHERE``) — ``stats.devices_registered``. 업로드를 한 번도 안 한 기기도
+        센다(자동 제외 없음) — 빠지는 것은 관리자의 ``devices.py revoke`` 또는 같은 슬롯의 재등록 교체뿐."""
         return int(self._con.execute(f"SELECT COUNT(*) FROM devices WHERE {_ACTIVE_WHERE}").fetchone()[0])
+
+    def orphan_devices(self, slots) -> list[dict]:
+        """등록(미제거) 기기 중 ``slot`` 이 설정 ``invite_codes`` 에 없는 것 — 슬롯 이름을 바꾸거나 지웠거나(옛 이름의 기기는
+        재등록 교체 대상에서 빠진다), 슬롯 없이 수동 삽입한 행. 기동 경고·``stats.devices_orphaned`` 용."""
+        slots = set(slots)
+        return [dict(r) for r in self._con.execute(
+            f"SELECT {_DEVICE_COLUMNS} FROM devices WHERE {_ACTIVE_WHERE} ORDER BY created_ts, device_id").fetchall()
+            if r["slot"] not in slots]
 
     def touch_device(self, device_id: str, now: float) -> None:
         """인증은 됐지만 거부된 업로드(400·403) — ``last_seen_ts`` 만(운영자가 잘못 설정된 exe 를 찾을 수 있게)."""
         with self._tx() as con:
             con.execute("UPDATE devices SET last_seen_ts = ? WHERE device_id = ?", (now, device_id))
 
-    def list_devices(self) -> list[dict]:
-        """토큰 해시는 싣지 않는다(CLI 출력·로그로 새지 않게)."""
+    def list_devices(self, *, active_only: bool = False) -> list[dict]:
+        """토큰 해시는 싣지 않는다(CLI 출력·로그로 새지 않게). ``active_only`` 면 미제거 기기만(재등록 교체가 쌓은 옛 행 제외)."""
+        where = f"WHERE {_ACTIVE_WHERE} " if active_only else ""
         return [dict(r) for r in self._con.execute(
-            f"SELECT {_DEVICE_COLUMNS} FROM devices ORDER BY created_ts, device_id").fetchall()]
+            f"SELECT {_DEVICE_COLUMNS} FROM devices {where}ORDER BY created_ts, device_id").fetchall()]
 
     def set_device_revoked(self, device_id: str, revoked_ts: float | None) -> bool:
-        """제거(시각) 또는 복구(None) — 제거하면 정원 자리가 바로 빈다. 반환 = 그런 기기가 있었는지."""
+        """제거(시각) 또는 복구(None) — 다음 요청부터 바로 먹는다. 반환 = 그런 기기가 있었는지."""
         with self._tx() as con:
             cur = con.execute("UPDATE devices SET revoked_ts = ? WHERE device_id = ?", (revoked_ts, device_id))
         return cur.rowcount == 1
@@ -362,17 +421,18 @@ class Database:
             (float(since_ts), float(since_ts), str(since_key), int(limit))).fetchall()
         return [self._listing_dict(r) for r in rows]
 
-    def market_stats(self, now: float, fresh_sec: float = 86400.0) -> dict:
+    def market_stats(self, now: float, fresh_sec: float = 86400.0, slots=()) -> dict:
+        """``slots`` = 설정된 슬롯 이름들 — ``devices_orphaned``(등록됐지만 어느 슬롯에도 안 속하는 기기) 계산용."""
         con = self._con
 
         def one(sql: str, *params):
             return con.execute(sql, params).fetchone()[0]
 
         # 관측을 올린 device_id 별 집계 + 등록 기기면 별칭·label(관리 시크릿으로 올린 자유 device_id 는 null).
-        devices = [{"device_id": r["device_id"], "label": r["label"], "alias": r["alias"],
+        devices = [{"device_id": r["device_id"], "label": r["label"], "alias": r["alias"], "slot": r["slot"],
                     "observations": r["c"], "last_recv_ts": r["m"]}
                    for r in con.execute(
-                       "SELECT o.device_id, d.label AS label, d.alias AS alias, COUNT(*) AS c, "
+                       "SELECT o.device_id, d.label AS label, d.alias AS alias, d.slot AS slot, COUNT(*) AS c, "
                        "MAX(o.recv_ts) AS m "
                        "FROM market_observations o LEFT JOIN devices d ON d.device_id = o.device_id "
                        "GROUP BY o.device_id ORDER BY o.device_id").fetchall()]
@@ -389,6 +449,7 @@ class Database:
             # 등록 = 정원을 차지하는 수(미제거). 자동 제외가 없으니 "활성"과 같은 수라 따로 싣지 않는다.
             "devices_registered": self.count_active_devices(),
             "devices_revoked": one("SELECT COUNT(*) FROM devices WHERE revoked_ts IS NOT NULL"),
+            "devices_orphaned": len(self.orphan_devices(slots)),
         }
 
     # ---- 보존 ----

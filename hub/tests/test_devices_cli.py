@@ -63,6 +63,9 @@ def test_cli_list_revoke_unrevoke_note_roundtrip(tmp_path):
     out = io.StringIO()
     assert cli.main(["--db", path, "list"], out=out) == 0
     assert "2행 (등록 1 / 제거 1)" in out.getvalue() and "again" in out.getvalue()
+    out = io.StringIO()
+    assert cli.main(["--db", path, "list", "--active"], out=out) == 0     # 옛 행 제외
+    assert b in out.getvalue() and a not in out.getvalue() and "1행 (등록만" in out.getvalue()
 
     out = io.StringIO()
     assert cli.main(["--db", path, "unrevoke", b], out=out) == 0          # 등록 상태 — 아무것도 안 바꾸고 안내
