@@ -9,7 +9,8 @@ Pi 운영(재배포·Funnel·기기 관리)은 [../hub/README.md](../hub/README.
 ## 0. Pi 에 떠 있는 허브가 어느 판인지 먼저 본다
 
 초대 코드 자기등록(`POST /api/market/register`)·공개 리스너 8801·`devices` 표는 **PR #10 이후 판**에만 있다.
-그 전 판이 떠 있으면 지인 PC 의 첫 실행 등록이 404 로 실패한다.
+그 전 판이 떠 있으면 지인 PC 의 첫 실행 등록이 실패한다(옛 판은 `/api/*` 전부에 관리 시크릿을 요구해 `401 unauthorized`).
+실측 2026-09-23: 09-22 11:24 배포본이 정확히 이 상태였다.
 
 ```bash
 cd ~/yuktracker-hub && docker compose ps && curl -s http://127.0.0.1:8800/ && echo
@@ -20,13 +21,17 @@ curl -s -X POST http://127.0.0.1:8800/api/market/register -H "Content-Type: appl
 |---|---|---|
 | `401 bad_invite` | 최신 판 + 초대 코드 설정됨 | 1번으로 |
 | `403 registration_closed` | 최신 판인데 `invite_code` 가 비었다 | `config.json` 에 `invite_code` 추가 → `docker compose restart` |
-| `404` (또는 라우트 없음) | **옛 판** | hub/README "파이 배포" 1)~3) 으로 재복사·재기동 |
+| `401 unauthorized` (본문에 `bad_invite` 가 **없다**) | **옛 판** — PR #10 이전의 전역 Bearer 미들웨어 | hub/README "파이 배포" 1)~3) 으로 재복사·재기동 |
+| `404` (또는 라우트 없음) | **옛 판** | 위와 같음 |
 
-`GET /api/market/ping` 이 404 면 허브가 PR-Y5 이전 판이다 — 관측기 자가진단의 "기기 토큰" 줄이 "허브가 옛 판입니다"로 뜬다.
+`docker compose ps` 의 포트에 `8801` 이 없거나 `docker compose exec yuktracker-hub ls devices.py` 가 실패해도 옛 판이다.
+
+`GET /api/market/ping` 이 404 면 허브가 PR-Y5 이전 판이다(옛 판은 `401 unauthorized`) — 관측기 자가진단의 "기기 토큰" 줄이 "허브가 옛 판입니다"로 뜬다.
 
 ## 1. 허브 — 공개 노출까지
 
-hub/README "파이 배포" → "공개 노출(Tailscale Funnel)" 순서대로. 끝나면 **외부망(폰 LTE)** 에서 게이트가 전부 맞아야 한다:
+hub/README "파이 배포" → "공개 노출(Tailscale Funnel)" 순서대로. 이 Pi 는 Funnel 443·8443 을 다른 서비스가 이미 쓰고 있어
+공개 리스너는 **10000 번**(`--https=10000`, 주소 `https://<pi-node>.<tailnet>.ts.net:10000`)으로 낸다(2026-09-23 결정). 끝나면 **외부망(폰 LTE)** 에서 게이트가 전부 맞아야 한다:
 `GET /` 200 · `stats` 403 `not_public`(더미 Bearer) · `register` 200/401 · `ping` 200 · `devices.py list` 에 그 기기.
 게이트용으로 만든 기기는 `devices.py revoke <device_id> --note gate` 로 자리를 돌려놓는다(정원 7).
 
@@ -35,7 +40,7 @@ hub/README "파이 배포" → "공개 노출(Tailscale Funnel)" 순서대로. �
 공개 레포 소스에 tailnet 주소를 두지 않으므로 주소는 환경변수로 받아 `_build_config.py`(gitignore)로 들어간다.
 
 ```bat
-set YUKTRACKER_HUB_URL=https://<pi-node>.<tailnet>.ts.net
+set YUKTRACKER_HUB_URL=https://<pi-node>.<tailnet>.ts.net:10000
 build.bat
 ```
 
@@ -101,5 +106,5 @@ curl -s -H "Authorization: Bearer <관리 시크릿>" "http://<pi-tailnet-ip>:88
 | `X 기기 토큰 — 401` | 토큰 무효(허브 DB 교체 등) | `--invite-code <코드>` 로 재등록 |
 | `X 기기 토큰 — 403 제거됨` | 관리자가 명단에서 뺌 | 관리자에게 문의 |
 | `X 기기 토큰 — 옛 판입니다` | 허브가 PR-Y5 이전 | Pi 재배포(0번) |
-| `X 허브 도달 — 닿지 못했습니다` | 주소 오타·Funnel 꺼짐 | Pi 에서 `tailscale funnel status` |
+| `X 허브 도달 — 닿지 못했습니다` | 주소 오타(`:10000` 누락)·Funnel 꺼짐 | Pi 에서 `tailscale funnel status` |
 | `! 업로드 대기 N배치` 가 안 줄어듦 | 401/403 로 업로더 정지 | 같은 화면의 `기기 토큰` 줄을 본다 |

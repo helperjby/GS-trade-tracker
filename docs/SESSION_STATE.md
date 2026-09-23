@@ -1,6 +1,6 @@
 # Session State
 
-Updated: 2026-09-22 밤 (Asia/Seoul) — **PR-Y5 배포 준비 완료(아래 절) — 다음은 실기기 G7, 그 전에 Pi 판 확인** ·
+Updated: 2026-09-23 (Asia/Seoul) — **PR-Y5 배포 준비 완료(아래 절) · Pi 판 확인 = 옛 판(재배포 필요) · Funnel 공개 포트 10000 결정 — 다음은 재배포 → exe → 실기기 G7** ·
 PR-Y2' 이식 + PR-Y1b 관측·업로드 완료(아래 두 절) ·
 허브 공개 업로드 PR #10 **머지 완료** ·
 **방향 전환(사용자 결정 2026-09-22): SEAssist 레포에는 더 이상 머지하지 않는다.**
@@ -126,8 +126,12 @@ SEAssist PR #306(PR-Y2) **미머지 → 닫음 예정, 이 레포로 이식(PR-Y
   진짜 허브 프로세스 2리스너 상대 **종단 스모크 12/12**(공개 stats 403 → 잘못된 토큰 401 → 등록 → ping 200 id 일치 →
   자가진단 rc 0 → `devices.py revoke` → ping 403 → 자가진단 rc 1 + 사유 → 관리 시크릿 ping 200) ·
   실기기 비승격 `--selftest`(거상 3개 검출·아이템 표 4,001행·권한/Npcap X·허브 미설정 경고, rc 1) · `--check` rc 0(벤더 무변경).
-- 남은 것: **Pi 판 확인**(DEPLOY §0 — 허브 배포 기록 09-22 11:24 는 PR #10 머지 이전이라 `register`·8801·`devices` 가 없을 수
-  있다) → 재배포·Funnel → `build.bat` → exe 전달 → 실기기 G7.
+- **Pi 판 확인 결과(2026-09-23)**: 떠 있는 컨테이너는 09-22 11:23 빌드 = **PR #10 이전 판**(compose 8800 만, `devices.py` 없음,
+  `invite_code` 없음, `register`·`ping` 이 `401 unauthorized` — 옛 전역 Bearer 미들웨어). DEPLOY §0 표에 이 응답 행을 추가했다.
+  **Funnel 은 443·8443 이 이미 같은 Pi 의 다른 서비스에 걸려 있다** → 사용자 결정: 공개 리스너는 **10000 번**
+  (`sudo tailscale funnel --bg --https=10000 8801`, 주소 `https://<pi-node>.<tailnet>.ts.net:10000`). hub/README·DEPLOY·HUB-PROTOCOL·
+  PLAN·`gen_build_config.py` 의 443 전제를 이 형태로 고쳤다(관측기는 주소를 통째로 받으므로 코드 무변경).
+- 남은 것: 재배포·Funnel(10000) → 폰 LTE 게이트 → `build.bat`(`:10000` 주소 주입) → exe 전달 → 실기기 G7.
 
 ## 현재 상태
 

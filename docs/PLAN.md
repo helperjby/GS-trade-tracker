@@ -197,7 +197,7 @@ G7 은 exe 를 **지인 최대 7명**의 PC 에 돌리는 단계다. PR-Y1b 까�
 0. Pi 에 떠 있는 허브가 PR #10 이후 판인지 먼저 확인한다(`register` 가 404 면 옛 판 — 재배포).
 1. 이 프로젝트 `build.bat` → 각 PC 에 `YukTracker.exe`(SEAssist 머지·배포 불필요).
 2. Pi: `hub/` 복사 → `config.json` 에 `invite_code` → `docker compose up -d --build`(별도 컨테이너, 8800) → `curl …:8800/api/market/stats`
-   → `sudo tailscale funnel --bg 8801`(공개 리스너) → 외부망 게이트(hub/README "공개 노출": `GET /` 200 · stats 403 `not_public` · register 200/401 · `devices.py list`).
+   → `sudo tailscale funnel --bg --https=10000 8801`(공개 리스너; 443·8443 은 이 Pi 의 다른 서비스가 쓴다, 2026-09-23) → 외부망 게이트(hub/README "공개 노출": `GET /` 200 · stats 403 `not_public` · register 200/401 · `devices.py list`).
 3. 사용자 1명이 육의전을 연다 → 관측기 상태 줄 → 허브 `search?q=<아이템>` 에 그 목록(≥1건 실발화).
    게이트: 승격·Npcap·캡처 시작 줄 / 육의전 열람 1회 = 관측 ≥1 / 허브 반영 ≤10s / 스풀 재시도 / 음성 0건 /
    `devices.py list` 의 `uploads` ≥1. 막히면 그 PC 에서 `YukTracker.exe --selftest`(PR-Y5) 한 화면으로 지점을 찾는다.

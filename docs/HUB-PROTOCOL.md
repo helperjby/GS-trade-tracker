@@ -7,7 +7,8 @@
 
 - 전송: JSON(UTF-8) over HTTP/1.1. 허브는 리스너 둘을 연다 — **관리 리스너** `port`(8800): 전 라우트, Pi 안(봇 127.0.0.1)·LAN·
   tailnet 의 직접 접속용(평문 HTTP, Funnel 을 걸지 않는다). **공개 리스너** `public_port`(8801): **Tailscale Funnel** 이 가리키는
-  포트(`https://<pi-node>.<tailnet>.ts.net/` → Pi 의 127.0.0.1:8801, 공유기 포트포워딩 없음) — 관측기가 **Npcap 만 있는 일반
+  포트(`https://<pi-node>.<tailnet>.ts.net:10000/` → Pi 의 127.0.0.1:8801, 공유기 포트포워딩 없음; Funnel 공개 포트는 443/8443/10000 중
+  하나라 같은 Pi 의 다른 서비스와 겹치지 않는 것을 쓴다 — 관측기는 주소를 통째로 받으므로 포트는 계약이 아니다) — 관측기가 **Npcap 만 있는 일반
   사용자 PC** 에서 올려야 하므로 VPN 은 전제하지 않는다(2026-09-22 결정). 자격은 두 종류:
   - **관리 시크릿** `secret` — 조회(`search`·`listings`·`stats`)와 제작자 업로드. **Funnel 을 타지 않는다**: exe 에 넣지 않고,
     공개 요청에서는 어느 라우트에서도 인정하지 않는다(`admin_public` false).
