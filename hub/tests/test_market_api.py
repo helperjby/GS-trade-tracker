@@ -243,14 +243,23 @@ def test_search_freshness_ordering_and_clock_clamp(tmp_path):
     _run(scn())
 
 
+def _today0() -> float:
+    """오늘 00:00 KST — 자정 직전이면 넘긴 뒤 잰다(테스트의 '오늘'과 서버 호출의 '오늘'이 갈리지 않게)."""
+    now = time.time()
+    left = db_mod.kst_midnight(now, 1) - now
+    if left < 30:
+        time.sleep(left + 1)
+        now = time.time()
+    return db_mod.kst_midnight(now, 0)
+
+
 def test_search_hides_by_expiry_not_by_24h(tmp_path):
     """소멸 규칙(등록일 D → D+2 00:00 KST, 단기 고정): 관측 시각으로 낸 상한이 지나야 숨긴다 — 24h 가 지나도 살아 있는 행은
     보이고, 24h 안이라도 상한이 지난 행은 숨는다. 실제 시계를 쓰되 오늘 KST 자정 기준 오프셋이라 실행 시각과 무관하게 결정적."""
     async def scn():
         app, client = await start_client(make_cfg(tmp_path))
         try:
-            now = time.time()
-            today0 = db_mod.kst_midnight(now, 0)                  # 오늘 00:00 KST
+            today0 = _today0()                                    # 오늘 00:00 KST
             await post(client, body(
                 # 어제 00:00:01 관측 → 등록일 ∈ {그제, 어제} → 상한 = 내일 00:00 (살아 있음, 나이 > 24h)
                 obs(obs_id="y", agent_ts=today0 - 86400 + 1, rows=[row(listing_id=41, price=100)]),
@@ -281,8 +290,7 @@ def test_expiry_days_from_config(tmp_path):
     async def scn():
         app, client = await start_client(make_cfg(tmp_path, listing_expiry_days=3))
         try:
-            now = time.time()
-            today0 = db_mod.kst_midnight(now, 0)
+            today0 = _today0()
             await post(client, body(obs(obs_id="dby", agent_ts=today0 - 86400 - 43200, rows=[row(listing_id=42)])))
             st, data = await get(client, "/api/market/search", {"q": "봉인의돌"})
             assert (data["count"], data["expiry_days"]) == (1, 3)                 # 장기 3일이면 그제 관측도 내일 00:00 까지
@@ -290,6 +298,18 @@ def test_expiry_days_from_config(tmp_path):
         finally:
             await client.close()
     _run(scn())
+
+
+def test_short_max_age_warns_at_startup(tmp_path, caplog):
+    """배포 config 가 예시 파일 복사본이면 옛 기본 86400 이 명시돼 있다 — 만료 전 행을 나이 필터가 먼저 숨기므로 기동 때 경고."""
+    async def scn(cfg):
+        with caplog.at_level("WARNING", logger="hub"):
+            app, client = await start_client(cfg)
+            await client.close()
+    caplog.clear(); _run(scn(make_cfg(tmp_path, search_max_age_sec=86400)))
+    assert any("search_max_age_sec=86400" in r.message and "259200" in r.message for r in caplog.records)
+    caplog.clear(); _run(scn(make_cfg(tmp_path)))
+    assert not any("search_max_age_sec" in r.message for r in caplog.records)
 
 
 def test_listings_keyset_cursor_delivers_every_row_at_the_same_ts(tmp_path):

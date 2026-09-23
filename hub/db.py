@@ -126,9 +126,12 @@ def payload_for_storage(obs: dict) -> dict:
 #: 육의전 소멸 규칙(게임 사실, 2026-09-23 사용자): 등록일 D(KST)에 올린 물품은 팔리지 않으면 단기 = D+2 00:00,
 #: 장기 = D+3 00:00 에 목록에서 사라진다. 등록 시각은 패킷에 없고(PACKET-MARKET §1) 관측 시각만 있으므로
 #: 관측 T 에 살아 있었다 → 등록일 ∈ {date(T)−1, date(T)} 로부터 두 경계를 낸다(HUB-PROTOCOL §4):
-#:   expires_from_ts = date(last_seen)+1 00:00  — 이 시각부터 사라졌을 **수** 있다(하한)
-#:   expires_by_ts   = date(first_seen)+N 00:00 — 이 시각 뒤는 **확실히** 없다(상한)
-#: N = ``listing_expiry_days``. `기간`(@45) 이 검정 전(H-2609-11, D)이라 모든 행을 단기(2)로 본다 — 검정 뒤 행별 일수는 후속.
+#:   expires_from_ts = date(last_seen)+1 00:00                          — 이 시각부터 사라졌을 **수** 있다(하한)
+#:   expires_by_ts   = max(date(first_seen)+N 00:00, expires_from_ts)   — 이 시각 뒤는 없다(상한)
+#: 상한에 하한을 합치는 이유: 마지막 관측 때 살아 있었으므로 그 날 자정 전엔 사라질 수 없다 — 시계가 며칠 느린 기기가 first_seen 을
+#: 과거로 끌어내려도(MIN 은 되돌아오지 않는다) 다른 기기가 계속 보는 행이 숨지 않고, from > by 도 생기지 않는다.
+#: N = ``listing_expiry_days``. `기간`(@45) 이 검정 전(H-2609-11, D)이라 모든 행을 단기(2)로 본다(2026-09-23 사용자 결정) —
+#: 장기 물품은 D+2 하루 동안 재관측이 없으면 하루 일찍 숨는다(수용). 검정 뒤 행별 일수는 후속.
 #: KST 는 DST 가 없어 고정 오프셋(zoneinfo·tzdata 불필요 — Windows 테스트 환경에 tz 데이터가 없다).
 KST_OFFSET_SEC = 9 * 3600
 DEFAULT_LISTING_EXPIRY_DAYS = 2
@@ -139,10 +142,20 @@ def kst_midnight(ts: float, plus_days: int) -> float:
     return float((math.floor((float(ts) + KST_OFFSET_SEC) / 86400) + int(plus_days)) * 86400 - KST_OFFSET_SEC)
 
 
-def _expires_by_sql(days: int) -> str:
-    """``kst_midnight(l.first_seen_ts, days)`` 의 SQL 판 — 필터·집계용. ``CAST(… AS INTEGER)`` 는 0 방향 절삭이지만
-    ``seen_ts`` 는 서버 검증(보존 기간 이전 400)으로 양수라 floor 와 같다. 파이썬 판과의 일치는 테스트가 잡는다."""
-    return f"((CAST((l.first_seen_ts + {KST_OFFSET_SEC}) / 86400 AS INTEGER) + {int(days)}) * 86400 - {KST_OFFSET_SEC})"
+def expiry_bounds(first_seen_ts: float, last_seen_ts: float, days: int) -> tuple[float, float]:
+    """(expires_from_ts, expires_by_ts) — 위 정의. 항상 from ≤ by."""
+    frm = kst_midnight(last_seen_ts, 1)
+    return frm, max(kst_midnight(first_seen_ts, days), frm)
+
+
+#: ``expires_by_ts > now`` 를 열 그대로 비교하는 sargable 필터(SQL 에 날짜 산술 없음 — 정의는 파이썬 하나):
+#:   kst_midnight(first, N) > now  ⟺  first ≥ kst_midnight(now, 1−N)   (N 정수, floor 산술)
+#:   kst_midnight(last, 1)  > now  ⟺  last  ≥ kst_midnight(now, 0)
+_LIVE_WHERE = "(l.first_seen_ts >= ? OR l.last_seen_ts >= ?)"
+
+
+def _live_params(now: float, days: int) -> list:
+    return [kst_midnight(now, 1 - int(days)), kst_midnight(now, 0)]
 
 
 _LISTING_SELECT = """
@@ -203,10 +216,9 @@ class Database:
                  listing_expiry_days: int = DEFAULT_LISTING_EXPIRY_DAYS) -> None:
         """``timeout`` = sqlite busy timeout(초) — 다른 프로세스(devices.py)가 잠근 동안 기다리는 시간.
         ``listing_expiry_days`` = 등록일 자정 기준 소멸 일수(설정 ``listing_expiry_days``, 조회·집계에만 쓴다 — 저장 무관)."""
-        if int(listing_expiry_days) < 1:
-            raise ValueError("listing_expiry_days 는 1 이상")
-        self._expiry_days = int(listing_expiry_days)
-        self._expires_by_sql = _expires_by_sql(self._expiry_days)
+        if isinstance(listing_expiry_days, bool) or not isinstance(listing_expiry_days, int) or listing_expiry_days < 1:
+            raise ValueError("listing_expiry_days 는 1 이상의 정수")
+        self._expiry_days = listing_expiry_days
         if path != ":memory:":
             parent = os.path.dirname(os.path.abspath(path))
             os.makedirs(parent, exist_ok=True)
@@ -413,13 +425,13 @@ class Database:
 
     def _listing_dict(self, r) -> dict:
         # expires_from/by 는 저장하지 않고 조회 때 계산(스키마 무변경) — 정의는 모듈 상단 주석·HUB-PROTOCOL §4.
+        frm, by = expiry_bounds(r["first_seen_ts"], r["last_seen_ts"], self._expiry_days)
         return {"listing_key": r["listing_key"], "listing_id": r["listing_id"], "item_id": r["item_id"],
                 "item_name": r["item_name"], "quantity": r["quantity"], "price": r["price"],
                 "seller": r["seller"], "category": r["category"], "flag45": r["flag45"], "flag46": r["flag46"],
                 "first_seen_ts": r["first_seen_ts"], "last_seen_ts": r["last_seen_ts"],
                 "seen_count": r["seen_count"], "last_device": r["last_device"],
-                "expires_from_ts": kst_midnight(r["last_seen_ts"], 1),
-                "expires_by_ts": kst_midnight(r["first_seen_ts"], self._expiry_days)}
+                "expires_from_ts": frm, "expires_by_ts": by}
 
     def search_market(self, q_norm: str, item_id, limit: int, min_seen_ts: float, now: float | None = None) -> tuple:
         """이름 부분일치(정규화 키 ``instr``)·아이템 id 로 목록 검색. 반환 (살아 있는 행 목록, 신선도 무관 매칭 수).
@@ -444,7 +456,7 @@ class Database:
             "ON n.item_id = l.item_id" + cond, params).fetchone()["c"]
         live, live_params = "", []
         if now is not None:
-            live, live_params = f" AND {self._expires_by_sql} > ?", [float(now)]
+            live, live_params = " AND " + _LIVE_WHERE, _live_params(now, self._expiry_days)
         rows = self._con.execute(
             _LISTING_SELECT + cond + " AND l.last_seen_ts >= ?" + live +
             " ORDER BY l.price ASC, l.last_seen_ts DESC, l.listing_key LIMIT ?",
@@ -486,8 +498,8 @@ class Database:
                                   now - float(fresh_sec)),
             "fresh_sec": float(fresh_sec),
             # 소멸 상한이 아직 안 지난 행 — search 기본 필터와 같은 정의(§3-2). fresh_listings 는 관측 나이 기준(별개).
-            "live_listings": one(f"SELECT COUNT(*) FROM market_listings l WHERE {self._expires_by_sql} > ?",
-                                 float(now)),
+            "live_listings": one("SELECT COUNT(*) FROM market_listings l WHERE " + _LIVE_WHERE,
+                                 *_live_params(now, self._expiry_days)),
             "expiry_days": self._expiry_days,
             "latest_recv_ts": one("SELECT MAX(recv_ts) FROM market_observations"),
             "devices": devices,

@@ -312,10 +312,14 @@ HTTP 관리 라우트를 두지 않는 이유: 공개 표면을 늘리지 않고
   에 목록에서 사라진다(9/23 20:03 등록 → 단기 9/25 00:00). 등록 시각은 패킷에 없고(PACKET-MARKET §1) 관측 시각만 있으므로 허브는
   관측 T 에 살아 있었다 → 등록일 ∈ {date(T)−1, date(T)} 로부터 두 경계를 **조회 때** 계산한다(저장 안 함, 스키마 무변경):
   - `expires_from_ts` = date_kst(`last_seen_ts`)+1 00:00 — 이 시각부터 사라졌을 **수** 있다(하한)
-  - `expires_by_ts` = date_kst(`first_seen_ts`)+`listing_expiry_days` 00:00 — 이 시각 뒤는 **확실히** 없다(상한)
+  - `expires_by_ts` = **max**(date_kst(`first_seen_ts`)+`listing_expiry_days` 00:00, `expires_from_ts`) — 이 시각 뒤는 없다(상한). 항상 from ≤ by.
+    하한을 합치는 이유: 마지막 관측 때 살아 있었으니 그 날 자정 전엔 사라질 수 없다 — 시계가 며칠 느린 기기가 `first_seen_ts`(MIN, 되돌아오지
+    않음)를 과거로 끌어내려도 다른 기기가 계속 보는 행은 숨지 않고, 장기 물품을 D+2 에 다시 봐도 상한이 따라온다.
 
   첫 관측과 마지막 관측이 자정을 걸치면 둘이 같아져 등록일이 확정된다. `기간`(@45) 은 H-2609-11 검정 전(D)이라 **모든 행을 단기(2일)로
-  본다**(사용자 결정 2026-09-23) — 검정 뒤 행별 일수(2=장기 → 3일)는 후속(additive). 등록 id 자정 앵커로 등록일을 확정하는 방법은 보류.
+  본다**(사용자 결정 2026-09-23) — 장기 물품은 D+2 하루 동안 재관측이 없으면 하루 일찍 숨는다(수용). 검정 뒤 행별 일수(2=장기 → 3일)는
+  후속(additive). 등록 id 자정 앵커로 등록일을 확정하는 방법은 보류. SQL 필터는 날짜 산술 없이 열 비교로 같은 조건을 건다
+  (`first_seen_ts ≥ midnight(now)+(1−N)일 OR last_seen_ts ≥ midnight(now)`, `db._LIVE_WHERE`).
   KST 는 DST 가 없어 고정 오프셋 +9h(`db.kst_midnight`, tzdata 불필요). 팔려서 먼저 사라진 것은 알 수 없다(요청 c2s 가 암호화라 조회
   조건을 모른다) — `search` 는 상한이 지난 행만 숨기고 `last_seen_ts` 를 함께 준다. 응답이 총건수·조회조건을 싣게 되면 스냅샷 diff 로
   고도화(FOLLOWUP).
@@ -334,7 +338,8 @@ HTTP 관리 라우트를 두지 않는 이유: 공개 표면을 늘리지 않고
 `host` `port`(8800) `secret`(필수 — **16자 이상 문자열**, 예시값 `CHANGE-ME` 면 기동 거부: 기본 host `0.0.0.0` 이라 공개
 시크릿으로 쓰기 API 가 LAN 에 열린다) `db_path`(상대 경로는 **config 파일 폴더 기준**; 환경변수 `HUB_DB_PATH` 가 있으면 그것이
 이긴다 — 컨테이너는 Dockerfile 이 `/data/hub.db` 로 고정) `retention_market_days`(30) **`listing_expiry_days`**(2 — 소멸 상한 일수, 정수 ≥1,
-§4; `기간` 검정 뒤 장기 3 은 행별로) `search_max_age_sec`(259200 — 2026-09-23 부터 72h)
+§4; `기간` 검정 뒤 장기 3 은 행별로) `search_max_age_sec`(259200 — 2026-09-23 부터 72h; **배포 config 가 예시 복사본이라 옛 86400 이 명시돼
+있으면 값을 고치거나 키를 지운다** — `(listing_expiry_days+1)×86400` 미만이면 기동 경고)
 `search_limit_default`(20) `search_limit_max`(100) `listings_limit_default`(500) `listings_limit_max`(2000)
 `max_observations_per_request`(100) `max_rows_per_observation`(64) `max_agent_ts_ahead_sec`(86400).
 

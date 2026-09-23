@@ -287,14 +287,34 @@ def test_kst_midnight_samples(ts, plus, want):
     assert db_mod.kst_midnight(ts, plus) == want
 
 
-def test_expires_by_sql_matches_python(tmp_path):
-    """필터·집계에 쓰는 SQL 식과 응답 필드를 만드는 파이썬 함수는 같은 값이어야 한다(정의 하나)."""
+def test_expiry_bounds_definition():
+    """from = date(last)+1 · by = max(date(first)+N, from) — 항상 from ≤ by. 등록일 D 에 등록·관측 → 단기 D+2 00:00."""
+    assert db_mod.expiry_bounds(_T_0923_2003, _T_0923_2003, 2) == (_T_0925_0000 - DAY, _T_0925_0000)
+    assert db_mod.expiry_bounds(_T_0923_2003, _T_0923_2003, 3) == (_T_0925_0000 - DAY, _T_0925_0000 + DAY)
+    # 자정 걸침(9/23 23:59:59 → 9/24 00:00:01) → 등록일 9/23 확정 → from == by == 9/25 00:00
+    assert db_mod.expiry_bounds(_T_0925_0000 - DAY - 1, _T_0925_0000 - DAY + 1, 2) == (_T_0925_0000, _T_0925_0000)
+    # 관측이 N 일을 넘게 이어지면(장기 물품 재관측·느린 시계) 상한은 하한까지 올라온다 — from > by 는 없다
+    frm, by = db_mod.expiry_bounds(_T_0923_2003 - 5 * DAY, _T_0923_2003, 2)
+    assert frm == by == _T_0925_0000 - DAY
+
+
+def test_live_filter_equals_python_definition(tmp_path):
+    """SQL 필터(열 그대로 비교)와 파이썬 정의 `expires_by_ts > now` 가 같은 행을 고른다 — 자정 경계·소수 초 표본."""
     d = _open(tmp_path)
-    for days in (1, 2, 3):
-        expr = db_mod._expires_by_sql(days)
-        for ts in (_T_0923_2003, _T_0925_0000, _T_0925_0000 - 1, _T_0925_0000 + 0.5, 1.0, 1_700_000_000.25):
-            (got,) = d._con.execute(f"SELECT {expr} FROM (SELECT ? AS first_seen_ts) l", (ts,)).fetchone()
-            assert float(got) == db_mod.kst_midnight(ts, days), (days, ts)
+    base = _T_0925_0000
+    i = 0
+    for first_off in (-3 * DAY, -2 * DAY - 1, -2 * DAY, -DAY - 0.5, -1, 0, 0.25):
+        for last_off in (0, 1, DAY - 1, DAY, 2 * DAY + 0.5):
+            first, last = base + first_off, base + first_off + last_off
+            i += 1
+            d.insert_market_observations("A", [_obs(f"f{i}", first, [_row(listing_id=i, seller=f"s{i}")])], first)
+            d.insert_market_observations("A", [_obs(f"l{i}", last, [_row(listing_id=i, seller=f"s{i}")])], last)
+    for now in (base - 1, base, base + 1, base + DAY - 1, base + DAY, base + 2 * DAY, base + 3 * DAY + 0.5):
+        rows, _ = d.search_market("봉인의돌", None, 1000, 0.0, now)
+        got = sorted(r["listing_id"] for r in rows)
+        want = sorted(r["listing_id"] for r in d.search_market("봉인의돌", None, 1000, 0.0)[0] if r["expires_by_ts"] > now)
+        assert got == want, now
+        assert d.market_stats(now)["live_listings"] == len(want)
     d.close()
 
 
@@ -320,9 +340,16 @@ def test_search_expiry_bounds_and_live_count(tmp_path):
     # 9/25 00:00 정각 — 상한 '>' 라 1·3 도 사라진 것으로
     rows, total = d.search_market("봉인의돌", None, 10, 0.0, _T_0925_0000)
     assert (rows, total) == ([], 3) and d.market_stats(_T_0925_0000)["live_listings"] == 0
+    # 시계가 3일 느린 기기가 먼저 봤어도(first_seen 과거) 다른 기기가 오늘 다시 보면 살아 있다 — 상한 = 하한 = 내일 00:00
+    t_today = _T_0925_0000 - DAY + 3600
+    d.insert_market_observations("SLOW", [_obs("s1", t_today - 3 * DAY, [_row(listing_id=9, seller="판매자S")])], t_today)
+    d.insert_market_observations("OK", [_obs("s2", t_today, [_row(listing_id=9, seller="판매자S")])], t_today)
+    rows, _ = d.search_market("봉인의돌", None, 10, 0.0, t_today)
+    (r9,) = [r for r in rows if r["listing_id"] == 9]
+    assert r9["first_seen_ts"] == t_today - 3 * DAY and r9["expires_from_ts"] == r9["expires_by_ts"] == _T_0925_0000
     # now 없이 부르면 만료 필터 없음(옛 호출 호환) — 필드는 그대로 실린다
     rows, _ = d.search_market("봉인의돌", None, 10, 0.0)
-    assert len(rows) == 3 and all("expires_by_ts" in r for r in rows)
+    assert len(rows) == 4 and all(r["expires_from_ts"] <= r["expires_by_ts"] for r in rows)
     assert all("expires_by_ts" in r for r in d.list_market_since(0.0, "", 10))
     d.close()
 
@@ -330,5 +357,6 @@ def test_search_expiry_bounds_and_live_count(tmp_path):
     d3.insert_market_observations("A", [_obs("a", t_reg, [_row(listing_id=1)])], t_reg)
     assert d3.search_market("봉인의돌", None, 10, 0.0)[0][0]["expires_by_ts"] == _T_0925_0000 + DAY
     d3.close()
-    with pytest.raises(ValueError):
-        db_mod.Database(":memory:", listing_expiry_days=0)
+    for bad in (0, -1, "2", 2.5, True):
+        with pytest.raises(ValueError):
+            db_mod.Database(":memory:", listing_expiry_days=bad)

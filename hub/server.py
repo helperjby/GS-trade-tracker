@@ -711,6 +711,16 @@ def make_limiters(cfg: dict) -> dict:
             "auth_fail": RateLimiter(cfg["auth_fail_limit_per_min"], 60)}
 
 
+def _warn_short_max_age(cfg: dict) -> None:
+    """`search_max_age_sec` 가 소멸 일수보다 짧으면 만료 전의 행을 나이 필터가 먼저 숨긴다 — 배포 config 는 예시 파일을 복사한 것이라
+    옛 기본 86400 이 명시돼 있을 수 있다(2026-09-23 기본 259200). 기동 때 한 번 알린다(거부는 아님 — 운영자가 일부러 짧게 둘 수 있다)."""
+    need = (int(cfg["listing_expiry_days"]) + 1) * 86400
+    if float(cfg["search_max_age_sec"]) < need:
+        log.warning("search_max_age_sec=%s 가 listing_expiry_days=%s 의 최대 생존(%d초)보다 짧습니다 — 살아 있는 행이 검색에서 숨습니다. "
+                    "config.json 의 값을 %d 이상으로 고치거나 키를 지우세요(기본 %s)",
+                    cfg["search_max_age_sec"], cfg["listing_expiry_days"], need, need, DEFAULTS["search_max_age_sec"])
+
+
 def _warn_orphans(database: db_mod.Database, cfg: dict) -> None:
     """슬롯 이름은 기기의 정체성이다 — config 에서 이름을 바꾸거나 지우면 옛 이름의 등록 기기는 재등록 교체에서 빠져 계속
     올린다. 기동 때 한 번 알려 준다(`stats.devices_orphaned` 도 같은 수)."""
@@ -736,6 +746,7 @@ def make_app(cfg: dict, database: db_mod.Database | None = None, *, limits: dict
     app[PUBLIC_KEY] = bool(public_only)
     if not public_only:
         _warn_orphans(app[DB_KEY], cfg)
+        _warn_short_max_age(cfg)
     app.router.add_get("/", index)
     app.router.add_post("/api/market/register", api_market_register)
     app.router.add_post("/api/market/observations", api_market_observations)

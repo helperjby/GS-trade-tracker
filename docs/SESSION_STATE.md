@@ -14,12 +14,14 @@ SEAssist PR #306(PR-Y2) **미머지 → 닫음 예정, 이 레포로 이식(PR-Y
   단기 9/25 00:00). 등록 시각은 패킷에 없어(PACKET-MARKET §1) 관측 시각으로 추정. 사용자 결정 3건: 허브+봇 계약까지 반영 · 등록일 추정은
   **관측 시각 경계만**(등록 id 자정 앵커 보류) · `기간`(@45, H-2609-11 D) **검정 전엔 모든 행을 단기로**.
 - 종전 24h 나이 필터는 양방향으로 틀렸다(살아 있는 행을 숨기고, 사라진 행을 보였다). 새 규칙(HUB-PROTOCOL §4): 관측 T 에 살아 있었다 →
-  등록일 ∈ {date(T)−1, date(T)} → `expires_from_ts` = date(last_seen)+1 00:00(하한) · `expires_by_ts` = date(first_seen)+2 00:00(상한).
-  자정을 걸쳐 두 번 보면 둘이 같아져 등록일 확정.
+  등록일 ∈ {date(T)−1, date(T)} → `expires_from_ts` = date(last_seen)+1 00:00(하한) · `expires_by_ts` = max(date(first_seen)+2 00:00, 하한)(상한).
+  자정을 걸쳐 두 번 보면 둘이 같아져 등록일 확정. `/code-review 18 high` 7건 중 6건 반영(상한에 하한 합치기 = 느린 시계 기기·from>by·장기
+  재관측 세 건 해결, SQL 날짜 산술 제거(열 비교 `_LIVE_WHERE`), ctor 정수 검증, 자정 경계 테스트 플레이크, 배포 config 의 옛 86400 기동 경고
+  `_warn_short_max_age`); 1건(장기 물품을 단기로 보는 것)은 사용자 결정이라 문서 주석만.
 - 구현(스키마 무변경, API additive): `hub/db.py` `kst_midnight`·`_expires_by_sql`(정의 하나, SQL↔파이썬 일치 테스트) · `Database(listing_expiry_days=)`
   · 행 dict 에 두 필드 · `search_market(..., now)` 는 `expires_by_ts > now` 필터 · `stats.live_listings`·`expiry_days`; `hub/server.py` 설정
   `listing_expiry_days`(2, 정수 ≥1 검증) · `search_max_age_sec` 기본 86400 → **259200**(72h 안전망) · search 응답 `expiry_days`. 봇 표시 형식에
-  소멸 칸(`~M/D 00:00`, 확정이 아니면 `(M/D 부터 가능)`). 허브 테스트 113 passed, 관측기 186 passed, 벤더 체크 일치.
+  소멸 칸(`~M/D 00:00`, 확정이 아니면 `(M/D 부터 가능)`). 허브 테스트 115 passed, 관측기 186 passed, 벤더 체크 일치.
 - 후속: H-2609-11 → B 승격 뒤 행별 일수(2=장기 → 3일, `_expires_by_sql` CASE) · 봇(PR-Y4)은 `expires_from/by_ts` 소비.
 
 ## 실기기 G7 1차 (2026-09-23 오후, F1_JBY) — 업로더 스레드 미기동 결함 발견·수정
@@ -325,7 +327,8 @@ SEAssist PR #306(PR-Y2) **미머지 → 닫음 예정, 이 레포로 이식(PR-Y
 (2026-09-23 저녁 정리 — PR #5·#6·PR-Y2'·PR-Y1b·PR-Y5·실기기 G7·PR #15·#16·#17 은 전부 완료, 위 절들.)
 
 1. **허브 소멸 추정 PR**(`feat/hub-listing-expiry-20260923`, 위 절) → `/code-review` → 머지 → Pi 재배포(`hub/` 재복사 → `docker compose up -d --build`,
-   DB 는 볼륨 유지·스키마 무변경; `config.json` 에 `listing_expiry_days` 는 없어도 기본 2) → `stats` 에 `live_listings`·`expiry_days` 확인.
+   DB 는 볼륨 유지·스키마 무변경; `config.json` 에 `listing_expiry_days` 는 없어도 기본 2, **단 예시 복사본의 `search_max_age_sec: 86400` 은
+   259200 으로 고치거나 키를 지운다** — 안 고치면 기동 경고 + 24h 나이 필터가 살아 있는 행을 먼저 숨긴다) → `stats` 에 `live_listings`·`expiry_days`·`fresh_sec 259200` 확인.
 2. 지인 슬롯 3~7 exe 전달(`docs/DEPLOY.md`, 안내문) · 선택: LTE 밖 경로 재확인.
 3. 실기기 Step 0 잔여 캡처: 라벨 5열 `@45` 검정(H-2609-11 → B 면 허브 행별 일수 후속) · 용병 탭 열람 · 수량 ≥65,536·타 PC 세션.
 4. PR-Y4 미루봇(미루봇-IRIS 레포): `http://127.0.0.1:8800` + 관리 시크릿, HUB-PROTOCOL §3-2/§3-3 — 표시에 소멸 칸(`expires_from/by_ts`), `Lv.` 보류.
