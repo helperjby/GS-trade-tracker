@@ -1,12 +1,26 @@
 # Session State
 
-Updated: 2026-09-23 오후 (Asia/Seoul) — **실기기 G7 통과(F1_JBY, 아래 절; 결함 2건 수정 PR #16) · 슬롯별 초대 코드 PR #15 머지·Pi 7슬롯 재배포 — 다음은 PR #16 머지 → 지인 전달 → PR-Y4 미루봇** ·
+Updated: 2026-09-23 저녁 (Asia/Seoul) — **허브 소멸 추정(아래 절, PR 대기) · 실기기 G7 통과(F1_JBY; 결함 2건 수정 PR #16 머지) · 슬롯별 초대 코드 PR #15 머지·Pi 7슬롯 재배포 — 다음은 소멸 PR 머지·Pi 재배포 → 지인 전달 → PR-Y4 미루봇** ·
 PR-Y2' 이식 + PR-Y1b 관측·업로드 완료(아래 두 절) ·
 허브 공개 업로드 PR #10 **머지 완료** ·
 **방향 전환(사용자 결정 2026-09-22): SEAssist 레포에는 더 이상 머지하지 않는다.**
 **PR #5(PR-Y2b 아이템 표)·PR #6(PR-Y3 허브) 머지 완료**(https://github.com/helperjby/GS-trade-tracker/pull/5 840d8d3 · https://github.com/helperjby/GS-trade-tracker/pull/6 1ed43ef,
 각 `/code-review high` 15건·14건 전부 반영) · **허브 Pi 배포 완료(2026-09-22 11:24, `~/yuktracker-hub`, :8800, G7 `stats` 응답 확인 — 아래 "허브 배포")** ·
 SEAssist PR #306(PR-Y2) **미머지 → 닫음 예정, 이 레포로 이식(PR-Y2')** · Step 1 = SEAssist #304·#305(머지, 동결 시점 참조)
+
+## 허브 소멸 추정 — 관측 시각으로 목록 소멸 경계 계산 (2026-09-23 저녁, 브랜치 `feat/hub-listing-expiry-20260923`)
+
+- 사용자가 준 게임 사실: 등록일 D(KST)에 올린 물품은 팔리지 않으면 **단기 D+2 00:00 · 장기 D+3 00:00** 에 목록에서 사라진다(9/23 20:03 등록 →
+  단기 9/25 00:00). 등록 시각은 패킷에 없어(PACKET-MARKET §1) 관측 시각으로 추정. 사용자 결정 3건: 허브+봇 계약까지 반영 · 등록일 추정은
+  **관측 시각 경계만**(등록 id 자정 앵커 보류) · `기간`(@45, H-2609-11 D) **검정 전엔 모든 행을 단기로**.
+- 종전 24h 나이 필터는 양방향으로 틀렸다(살아 있는 행을 숨기고, 사라진 행을 보였다). 새 규칙(HUB-PROTOCOL §4): 관측 T 에 살아 있었다 →
+  등록일 ∈ {date(T)−1, date(T)} → `expires_from_ts` = date(last_seen)+1 00:00(하한) · `expires_by_ts` = date(first_seen)+2 00:00(상한).
+  자정을 걸쳐 두 번 보면 둘이 같아져 등록일 확정.
+- 구현(스키마 무변경, API additive): `hub/db.py` `kst_midnight`·`_expires_by_sql`(정의 하나, SQL↔파이썬 일치 테스트) · `Database(listing_expiry_days=)`
+  · 행 dict 에 두 필드 · `search_market(..., now)` 는 `expires_by_ts > now` 필터 · `stats.live_listings`·`expiry_days`; `hub/server.py` 설정
+  `listing_expiry_days`(2, 정수 ≥1 검증) · `search_max_age_sec` 기본 86400 → **259200**(72h 안전망) · search 응답 `expiry_days`. 봇 표시 형식에
+  소멸 칸(`~M/D 00:00`, 확정이 아니면 `(M/D 부터 가능)`). 허브 테스트 113 passed, 관측기 186 passed, 벤더 체크 일치.
+- 후속: H-2609-11 → B 승격 뒤 행별 일수(2=장기 → 3일, `_expires_by_sql` CASE) · 봇(PR-Y4)은 `expires_from/by_ts` 소비.
 
 ## 실기기 G7 1차 (2026-09-23 오후, F1_JBY) — 업로더 스레드 미기동 결함 발견·수정
 
@@ -308,10 +322,10 @@ SEAssist PR #306(PR-Y2) **미머지 → 닫음 예정, 이 레포로 이식(PR-Y
 
 ## 다음 행동
 
-1. PR #5·#6 머지 · Pi 배포 — **완료(2026-09-22)**. SEAssist PR #306 은 **닫는다**(머지 안 함). 2. 허브 운영 확인: 첫 실업로드(PR-Y1b) 뒤
-   `stats.devices` 에 기기가 보이고 `docker compose logs` 에 `market 관측 수신` 줄이 찍히는지(G7 2차).
-3. ~~PR-Y2' 이식~~ — **완료(2026-09-22, 위 절)**. SEAssist PR #306 은 닫는다(이식 원본 worktree 는 PR-Y1b 까지 보존).
-4. ~~PR-Y1b~~ · ~~PR-Y5 배포 준비~~ — **완료(2026-09-22, 위 절)**. 남은 것은 실기기 G7이고 절차 정본은 **`docs/DEPLOY.md`**:
-   §0 Pi 판 확인(`register` 404 면 옛 판 → 재배포·Funnel) → `set YUKTRACKER_HUB_URL=…` → `build.bat` → `--selftest` 로 주소 주입 확인 →
-   exe 전달(안내문 복붙) → 각 PC 에서 초대 코드로 등록 → 육의전 1회 열람 → 허브 `search` 반영 ≤10s · `devices.py list` uploads ≥1. 5. 실기기: Step 0 잔여 캡처 2창(라벨 5열 `@45` 검정 · 용병 탭 열람 · 수량 ≥65,536·타 PC 세션) ·
-   `python tools\console_input_probe.py` 진단 → `_Console` 수정 PR. 6. PR-Y4 미루봇: `http://127.0.0.1:8800`, HUB-PROTOCOL §3-2/§3-3(`Lv.` 표시 보류).
+(2026-09-23 저녁 정리 — PR #5·#6·PR-Y2'·PR-Y1b·PR-Y5·실기기 G7·PR #15·#16·#17 은 전부 완료, 위 절들.)
+
+1. **허브 소멸 추정 PR**(`feat/hub-listing-expiry-20260923`, 위 절) → `/code-review` → 머지 → Pi 재배포(`hub/` 재복사 → `docker compose up -d --build`,
+   DB 는 볼륨 유지·스키마 무변경; `config.json` 에 `listing_expiry_days` 는 없어도 기본 2) → `stats` 에 `live_listings`·`expiry_days` 확인.
+2. 지인 슬롯 3~7 exe 전달(`docs/DEPLOY.md`, 안내문) · 선택: LTE 밖 경로 재확인.
+3. 실기기 Step 0 잔여 캡처: 라벨 5열 `@45` 검정(H-2609-11 → B 면 허브 행별 일수 후속) · 용병 탭 열람 · 수량 ≥65,536·타 PC 세션.
+4. PR-Y4 미루봇(미루봇-IRIS 레포): `http://127.0.0.1:8800` + 관리 시크릿, HUB-PROTOCOL §3-2/§3-3 — 표시에 소멸 칸(`expires_from/by_ts`), `Lv.` 보류.

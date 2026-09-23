@@ -267,3 +267,68 @@ def test_stats_joins_label_and_counts(tmp_path):
         ("ADMIN", None, None, 1), (a, "PC-A", "형", 1)]
     assert (s["devices_registered"], s["devices_revoked"]) == (1, 1)
     d.close()
+
+
+# ---- 소멸 추정(HUB-PROTOCOL §4) ----
+
+#: 2026-09-23 20:03 KST = 1790161380 → 단기 상한 2026-09-25 00:00 KST = 1790262000
+_T_0923_2003 = 1790161380.0
+_T_0925_0000 = 1790262000.0
+
+
+@pytest.mark.parametrize("ts, plus, want", [
+    (_T_0923_2003, 2, _T_0925_0000),                       # 사용자 예시: 9/23 20:03 등록 → 9/25 00:00 소멸
+    (_T_0923_2003, 0, _T_0925_0000 - 2 * DAY),              # 그날 자정
+    (_T_0925_0000, 0, _T_0925_0000),                        # 자정 정각은 그날
+    (_T_0925_0000 - 1, 0, _T_0925_0000 - DAY),              # 23:59:59 는 전날
+    (_T_0925_0000 + 1, 1, _T_0925_0000 + DAY),
+])
+def test_kst_midnight_samples(ts, plus, want):
+    assert db_mod.kst_midnight(ts, plus) == want
+
+
+def test_expires_by_sql_matches_python(tmp_path):
+    """필터·집계에 쓰는 SQL 식과 응답 필드를 만드는 파이썬 함수는 같은 값이어야 한다(정의 하나)."""
+    d = _open(tmp_path)
+    for days in (1, 2, 3):
+        expr = db_mod._expires_by_sql(days)
+        for ts in (_T_0923_2003, _T_0925_0000, _T_0925_0000 - 1, _T_0925_0000 + 0.5, 1.0, 1_700_000_000.25):
+            (got,) = d._con.execute(f"SELECT {expr} FROM (SELECT ? AS first_seen_ts) l", (ts,)).fetchone()
+            assert float(got) == db_mod.kst_midnight(ts, days), (days, ts)
+    d.close()
+
+
+def test_search_expiry_bounds_and_live_count(tmp_path):
+    d = _open(tmp_path)                                     # 기본 단기 2일
+    assert d.listing_expiry_days == 2
+    t_reg = _T_0923_2003                                    # 9/23 20:03 관측
+    d.insert_market_observations("A", [_obs("a", t_reg, [_row(listing_id=1)])], t_reg)
+    # 9/22 12:00 관측 행 — 상한 9/24 00:00
+    t_old = _T_0925_0000 - 2 * DAY - 12 * 3600
+    d.insert_market_observations("A", [_obs("b", t_old, [_row(listing_id=2, seller="판매자B")])], t_old)
+    # 자정 걸친 재관측: 9/23 23:59:59 → 9/24 00:00:01 — 등록일 확정(9/23) → from == by == 9/25 00:00
+    d.insert_market_observations("A", [_obs("c1", _T_0925_0000 - DAY - 1, [_row(listing_id=3, seller="판매자C")])], _T_0925_0000 - DAY - 1)
+    d.insert_market_observations("A", [_obs("c2", _T_0925_0000 - DAY + 1, [_row(listing_id=3, seller="판매자C")])], _T_0925_0000 - DAY + 1)
+
+    now = _T_0925_0000 - DAY + 3600                          # 9/24 01:00
+    rows, total = d.search_market("봉인의돌", None, 10, 0.0, now)
+    assert total == 3 and sorted(r["listing_id"] for r in rows) == [1, 3]      # 2 는 9/24 00:00 에 확실히 사라짐
+    by = {r["listing_id"]: r for r in rows}
+    assert by[1]["expires_by_ts"] == _T_0925_0000 and by[1]["expires_from_ts"] == _T_0925_0000 - DAY   # 9/24 00:00 부터 가능
+    assert by[3]["expires_from_ts"] == by[3]["expires_by_ts"] == _T_0925_0000
+    assert d.market_stats(now)["live_listings"] == 2
+    # 9/25 00:00 정각 — 상한 '>' 라 1·3 도 사라진 것으로
+    rows, total = d.search_market("봉인의돌", None, 10, 0.0, _T_0925_0000)
+    assert (rows, total) == ([], 3) and d.market_stats(_T_0925_0000)["live_listings"] == 0
+    # now 없이 부르면 만료 필터 없음(옛 호출 호환) — 필드는 그대로 실린다
+    rows, _ = d.search_market("봉인의돌", None, 10, 0.0)
+    assert len(rows) == 3 and all("expires_by_ts" in r for r in rows)
+    assert all("expires_by_ts" in r for r in d.list_market_since(0.0, "", 10))
+    d.close()
+
+    d3 = db_mod.Database(str(tmp_path / "t3.db"), listing_expiry_days=3)
+    d3.insert_market_observations("A", [_obs("a", t_reg, [_row(listing_id=1)])], t_reg)
+    assert d3.search_market("봉인의돌", None, 10, 0.0)[0][0]["expires_by_ts"] == _T_0925_0000 + DAY
+    d3.close()
+    with pytest.raises(ValueError):
+        db_mod.Database(":memory:", listing_expiry_days=0)

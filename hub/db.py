@@ -23,7 +23,8 @@ writer: market 표는 서버 이벤트루프 하나만 쓴다. ``devices`` 는 `
 최악은 서버 쪽 ``storage_error``(500) 한 번인데 관측기는 5xx 를 재시도한다.
 
 시각 규칙: ``seen_ts = min(agent_ts, recv_ts)`` — 스풀에 묵었다가 늦게 올라온 관측은 관측 시각을,
-관측기 시계가 서버보다 앞서면 서버 시각을 쓴다. 신선도 판정은 전부 ``seen_ts`` 계열(``last_seen_ts``).
+관측기 시계가 서버보다 앞서면 서버 시각을 쓴다. 신선도 판정은 전부 ``seen_ts`` 계열(``last_seen_ts``) —
+소멸 추정(``expires_from_ts``·``expires_by_ts``)도 first/last_seen 에서 조회 때 계산한다(``kst_midnight``, 저장 안 함).
 ``agent_ts`` 의 허용 범위(보존 기간 이전·하루 넘게 미래는 400)는 서버 검증 몫(server.validate_upload).
 
 PRAGMA: ``journal_mode=WAL`` + ``synchronous=NORMAL`` — WAL 에서 문서화된 안전 설정(정전 때 마지막 트랜잭션
@@ -34,6 +35,7 @@ from __future__ import annotations
 
 import contextlib
 import json
+import math
 import os
 import secrets
 import sqlite3
@@ -121,6 +123,28 @@ def payload_for_storage(obs: dict) -> dict:
     return out
 
 
+#: 육의전 소멸 규칙(게임 사실, 2026-09-23 사용자): 등록일 D(KST)에 올린 물품은 팔리지 않으면 단기 = D+2 00:00,
+#: 장기 = D+3 00:00 에 목록에서 사라진다. 등록 시각은 패킷에 없고(PACKET-MARKET §1) 관측 시각만 있으므로
+#: 관측 T 에 살아 있었다 → 등록일 ∈ {date(T)−1, date(T)} 로부터 두 경계를 낸다(HUB-PROTOCOL §4):
+#:   expires_from_ts = date(last_seen)+1 00:00  — 이 시각부터 사라졌을 **수** 있다(하한)
+#:   expires_by_ts   = date(first_seen)+N 00:00 — 이 시각 뒤는 **확실히** 없다(상한)
+#: N = ``listing_expiry_days``. `기간`(@45) 이 검정 전(H-2609-11, D)이라 모든 행을 단기(2)로 본다 — 검정 뒤 행별 일수는 후속.
+#: KST 는 DST 가 없어 고정 오프셋(zoneinfo·tzdata 불필요 — Windows 테스트 환경에 tz 데이터가 없다).
+KST_OFFSET_SEC = 9 * 3600
+DEFAULT_LISTING_EXPIRY_DAYS = 2
+
+
+def kst_midnight(ts: float, plus_days: int) -> float:
+    """``ts``(epoch 초)가 속한 KST 날짜의 자정 + ``plus_days`` 일, epoch 초로."""
+    return float((math.floor((float(ts) + KST_OFFSET_SEC) / 86400) + int(plus_days)) * 86400 - KST_OFFSET_SEC)
+
+
+def _expires_by_sql(days: int) -> str:
+    """``kst_midnight(l.first_seen_ts, days)`` 의 SQL 판 — 필터·집계용. ``CAST(… AS INTEGER)`` 는 0 방향 절삭이지만
+    ``seen_ts`` 는 서버 검증(보존 기간 이전 400)으로 양수라 floor 와 같다. 파이썬 판과의 일치는 테스트가 잡는다."""
+    return f"((CAST((l.first_seen_ts + {KST_OFFSET_SEC}) / 86400 AS INTEGER) + {int(days)}) * 86400 - {KST_OFFSET_SEC})"
+
+
 _LISTING_SELECT = """
 SELECT l.listing_key, l.listing_id, l.item_id, COALESCE(l.item_name, n.item_name) AS item_name,
        l.quantity, l.price, l.seller, l.category, l.flag45, l.flag46,
@@ -175,8 +199,14 @@ _DEVICE_ADDED_COLUMNS = (("slot", "TEXT NOT NULL DEFAULT ''"),)
 
 
 class Database:
-    def __init__(self, path: str, timeout: float = 5.0) -> None:
-        """``timeout`` = sqlite busy timeout(초) — 다른 프로세스(devices.py)가 잠근 동안 기다리는 시간."""
+    def __init__(self, path: str, timeout: float = 5.0, *,
+                 listing_expiry_days: int = DEFAULT_LISTING_EXPIRY_DAYS) -> None:
+        """``timeout`` = sqlite busy timeout(초) — 다른 프로세스(devices.py)가 잠근 동안 기다리는 시간.
+        ``listing_expiry_days`` = 등록일 자정 기준 소멸 일수(설정 ``listing_expiry_days``, 조회·집계에만 쓴다 — 저장 무관)."""
+        if int(listing_expiry_days) < 1:
+            raise ValueError("listing_expiry_days 는 1 이상")
+        self._expiry_days = int(listing_expiry_days)
+        self._expires_by_sql = _expires_by_sql(self._expiry_days)
         if path != ":memory:":
             parent = os.path.dirname(os.path.abspath(path))
             os.makedirs(parent, exist_ok=True)
@@ -377,17 +407,25 @@ class Database:
 
     # ---- 조회 (GET /api/market/*) ----
 
-    @staticmethod
-    def _listing_dict(r) -> dict:
+    @property
+    def listing_expiry_days(self) -> int:
+        return self._expiry_days
+
+    def _listing_dict(self, r) -> dict:
+        # expires_from/by 는 저장하지 않고 조회 때 계산(스키마 무변경) — 정의는 모듈 상단 주석·HUB-PROTOCOL §4.
         return {"listing_key": r["listing_key"], "listing_id": r["listing_id"], "item_id": r["item_id"],
                 "item_name": r["item_name"], "quantity": r["quantity"], "price": r["price"],
                 "seller": r["seller"], "category": r["category"], "flag45": r["flag45"], "flag46": r["flag46"],
                 "first_seen_ts": r["first_seen_ts"], "last_seen_ts": r["last_seen_ts"],
-                "seen_count": r["seen_count"], "last_device": r["last_device"]}
+                "seen_count": r["seen_count"], "last_device": r["last_device"],
+                "expires_from_ts": kst_midnight(r["last_seen_ts"], 1),
+                "expires_by_ts": kst_midnight(r["first_seen_ts"], self._expiry_days)}
 
-    def search_market(self, q_norm: str, item_id, limit: int, min_seen_ts: float) -> tuple:
-        """이름 부분일치(정규화 키 ``instr``)·아이템 id 로 목록 검색. 반환 (신선한 행 목록, 신선도 무관 매칭 수).
+    def search_market(self, q_norm: str, item_id, limit: int, min_seen_ts: float, now: float | None = None) -> tuple:
+        """이름 부분일치(정규화 키 ``instr``)·아이템 id 로 목록 검색. 반환 (살아 있는 행 목록, 신선도 무관 매칭 수).
 
+        살아 있는 행 = ``expires_by_ts > now``(소멸 상한이 아직 안 지남) **AND** ``last_seen_ts >= min_seen_ts``
+        (관측 공백 안전망 ``max_age_sec``). ``now`` 가 None 이면 만료 필터를 걸지 않는다(옛 호출·DB 테스트 호환).
         이름은 행 자체의 ``item_name`` 이 NULL 이면 학습 표의 이름으로 보충해 매칭·표시한다.
         정렬은 단가 오름차순 → 최근 관측 우선 → 키(결정적).
         """
@@ -404,10 +442,13 @@ class Database:
         total = self._con.execute(
             "SELECT COUNT(*) AS c FROM market_listings l LEFT JOIN market_item_names n "
             "ON n.item_id = l.item_id" + cond, params).fetchone()["c"]
+        live, live_params = "", []
+        if now is not None:
+            live, live_params = f" AND {self._expires_by_sql} > ?", [float(now)]
         rows = self._con.execute(
-            _LISTING_SELECT + cond + " AND l.last_seen_ts >= ?"
+            _LISTING_SELECT + cond + " AND l.last_seen_ts >= ?" + live +
             " ORDER BY l.price ASC, l.last_seen_ts DESC, l.listing_key LIMIT ?",
-            params + [float(min_seen_ts), int(limit)]).fetchall()
+            params + [float(min_seen_ts)] + live_params + [int(limit)]).fetchall()
         return [self._listing_dict(r) for r in rows], int(total)
 
     def list_market_since(self, since_ts: float, since_key: str, limit: int) -> list:
@@ -444,6 +485,10 @@ class Database:
             "fresh_listings": one("SELECT COUNT(*) FROM market_listings WHERE last_seen_ts >= ?",
                                   now - float(fresh_sec)),
             "fresh_sec": float(fresh_sec),
+            # 소멸 상한이 아직 안 지난 행 — search 기본 필터와 같은 정의(§3-2). fresh_listings 는 관측 나이 기준(별개).
+            "live_listings": one(f"SELECT COUNT(*) FROM market_listings l WHERE {self._expires_by_sql} > ?",
+                                 float(now)),
+            "expiry_days": self._expiry_days,
             "latest_recv_ts": one("SELECT MAX(recv_ts) FROM market_observations"),
             "devices": devices,
             # 등록 = 정원을 차지하는 수(미제거). 자동 제외가 없으니 "활성"과 같은 수라 따로 싣지 않는다.

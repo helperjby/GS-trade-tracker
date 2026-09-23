@@ -65,7 +65,11 @@ DEFAULTS = {
     "secret": "",
     "db_path": "data/hub.db",
     "retention_market_days": 30,
-    "search_max_age_sec": 86400,
+    #: 소멸 일수 — 등록일(KST) 자정 + N 일에 목록에서 사라진다(게임 규칙: 단기 2·장기 3). `기간`(@45) 검정 전이라 단기 고정
+    #: (2026-09-23 사용자 결정). search 는 `expires_by_ts > now` 인 행만 낸다(HUB-PROTOCOL §4).
+    "listing_expiry_days": 2,
+    #: 관측 나이 안전망(호환 인자 `max_age_sec` 의 기본) — 만료 필터가 1차라 72h 로 넉넉히(장기 규칙 최대 생존 ≈72h).
+    "search_max_age_sec": 259200,
     "search_limit_default": 20,
     "search_limit_max": 100,
     "listings_limit_default": 500,
@@ -155,7 +159,7 @@ def load_config(path: str, env=None) -> dict:
     if cfg["port"] == cfg["public_port"]:
         raise SystemExit("config: 'public_port' 는 'port' 와 달라야 합니다 — 공개 리스너(Funnel 대상)와 관리 리스너를 나눈다")
     for key in ("register_limit_per_hour", "register_slot_limit_per_hour", "upload_limit_per_min",
-                "auth_fail_limit_per_min"):
+                "auth_fail_limit_per_min", "listing_expiry_days"):
         v = cfg.get(key)
         if not _is_int(v) or v < 1:
             raise SystemExit(f"config: '{key}' 는 1 이상의 정수여야 합니다")
@@ -649,9 +653,11 @@ async def api_market_search(request: web.Request) -> web.Response:
     limit = _q_num(request, "limit", int(cfg["search_limit_default"]), int, 1, int(cfg["search_limit_max"]))
     max_age = _q_num(request, "max_age_sec", float(cfg["search_max_age_sec"]), float, 0.0, None)
     now = time.time()
-    rows, total = request.app[DB_KEY].search_market(q_norm, item_id, limit, now - max_age)
+    database = request.app[DB_KEY]
+    rows, total = database.search_market(q_norm, item_id, limit, now - max_age, now)
     return web.json_response({"v": PROTO_V, "server_time": now, "q": q, "q_norm": q_norm,
                               "item_id": item_id, "max_age_sec": max_age, "limit": limit,
+                              "expiry_days": database.listing_expiry_days,
                               "count": len(rows), "total_matches": total, "listings": rows})
 
 
@@ -693,6 +699,10 @@ async def _retention_loop(app: web.Application) -> None:
 
 # ---------------------------------------------------------------- app
 
+def _open_db(cfg: dict) -> db_mod.Database:
+    return db_mod.Database(cfg["db_path"], listing_expiry_days=int(cfg["listing_expiry_days"]))
+
+
 def make_limiters(cfg: dict) -> dict:
     return {"register": RateLimiter(cfg["register_limit_per_hour"], 3600),
             # 슬롯당 같은 상한 — 코드가 새면 한 슬롯을 시간당 N번 이상 교체해 명단을 불리지 못한다(정원 검사 폐지의 보완).
@@ -721,7 +731,7 @@ def make_app(cfg: dict, database: db_mod.Database | None = None, *, limits: dict
     app = web.Application(middlewares=[_auth_middleware()], client_max_size=CLIENT_MAX_SIZE)
     owns_db = database is None
     app[CFG_KEY] = cfg
-    app[DB_KEY] = database if database is not None else db_mod.Database(cfg["db_path"])
+    app[DB_KEY] = database if database is not None else _open_db(cfg)
     app[RL_KEY] = limits if limits is not None else make_limiters(cfg)
     app[PUBLIC_KEY] = bool(public_only)
     if not public_only:
@@ -751,7 +761,7 @@ def make_app(cfg: dict, database: db_mod.Database | None = None, *, limits: dict
 async def serve(cfg: dict, *, started: asyncio.Event | None = None) -> None:
     """관리 리스너(``port``)와 공개 리스너(``public_port``)를 한 프로세스에서 — DB·속도제한 공유, retention 은 관리 앱만.
     SIGINT/SIGTERM(가능한 플랫폼) 또는 태스크 취소로 멈추고, 리스너를 닫은 뒤 DB 를 닫는다."""
-    database = db_mod.Database(cfg["db_path"])
+    database = _open_db(cfg)
     limits = make_limiters(cfg)
     listeners = ((make_app(cfg, database, limits=limits), int(cfg["port"]), "admin"),
                  (make_app(cfg, database, limits=limits, public_only=True, retention=False),
