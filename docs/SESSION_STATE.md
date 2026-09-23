@@ -35,6 +35,12 @@ SEAssist PR #306(PR-Y2) **미머지 → 닫음 예정, 이 레포로 이식(PR-Y
   ≥1(8→14쪽 도착) ③ 허브 반영 수 초(콘솔 정지 수정 뒤) ④ 음성 0 — 창을 안 여는 90초 동안 관측 31 고정 ⑤ **스풀 재시도**: 허브
   `docker compose stop` 15:11:45 → 사용자 페이지 넘김 → `start` 15:12:19 → 내려 있던 동안의 16쪽이 11초 안에 자동으로 이어
   올라옴(14→30) ⑥ `devices.py list` uploads 27. 관측 31·목록 61+, 이름 해석 정상. 남은 것 = 폰 LTE 재확인(선택)·지인 전달(슬롯 2~7).
+- **지인 1호(slot2) 첫 시도 실패 → Funnel 장애 발견·해결(15:20~15:35)**: 지인 PC 콘솔 `허브에 닿지 못했습니다 — SSL: UNEXPECTED_EOF`.
+  공개 DNS 의 인그레스 IPv4 로 `--resolve` 해 보니 **443·8443·10000 전부 TLS 직후 끊김** — Pi `journalctl -u tailscaled` 에 `peerapi:
+  ingress: denied; no ingress cap` 346회, **9월 11일부터**. 넷맵의 CapGrant(인그레스 23노드 → Pi) 는 정확했고 tailscaled 재시작·Funnel
+  토글로도 안 풀림 → tailscale **1.102.1 → 1.102.4** 업데이트로 즉시 해결(두 인그레스 IP 모두 200, register 401, Python TLS OK).
+  지금까지의 '외부망 게이트' 는 전부 tailnet 안(제작자 PC·Pi)에서 한 것이라 MagicDNS 직행으로 Funnel 을 안 거쳤다 — hub/README·
+  DEPLOY 를 '반드시 tailnet 밖에서(폰 LTE 또는 `--resolve`)' 로 정정. 지인은 같은 코드로 재시도하면 된다(exe 무변경).
 - 이 트랙에서 배운 것(문서에 반영): 콘솔 프롬프트는 이 기기에서 글자를 잘라먹으니 초대 코드는 `--invite-code` 인자로(DEPLOY 안내문은
   프롬프트 유지 — 코드가 짧고 대부분 PC 는 정상); 스니퍼 스레드는 콘솔에 직접 쓰지 않는다(`ConsoleOut`); 업로더 수명은 `Market` 이 쥔다.
 

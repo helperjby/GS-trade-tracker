@@ -104,11 +104,16 @@ tailscale funnel status                          # 설치판 구문은 `tailscal
 # 끄기: sudo tailscale funnel --https=10000 off  (`reset` 은 같은 Pi 의 다른 Funnel 까지 지우니 쓰지 않는다)
 ```
 
-외부망(폰 LTE) 게이트 — 아래가 전부 맞아야 공개 상태가 설계대로다(진짜 시크릿은 공개망에 보내지 않는다 — 더미로 충분):
+외부망 게이트 — 아래가 전부 맞아야 공개 상태가 설계대로다(진짜 시크릿은 공개망에 보내지 않는다 — 더미로 충분).
+**반드시 tailnet 밖에서 한다**: tailnet 에 든 PC(제작자 PC·Pi 자신)에서 `https://<pi-node>.<tailnet>.ts.net` 을 부르면 MagicDNS 가
+노드로 직행시켜 Funnel 인그레스를 **거치지 않는다** — 그 200 은 공개 경로의 증거가 아니다(2026-09-23: 9/11 부터 외부에서 죽어 있던
+Funnel 을 이 방식의 '게이트'가 12일 동안 못 잡았다). 폰 LTE 로 하거나, 제작자 PC 에서 공개 DNS 가 주는 인그레스 IPv4 로 강제한다:
 
 ```bash
+nslookup <pi-node>.<tailnet>.ts.net 8.8.8.8                                  # 인그레스 IPv4 (IPv6 도 나오지만 IPv6 없는 PC 에선 v4 로)
+R="--resolve <pi-node>.<tailnet>.ts.net:10000:<인그레스 IPv4>"                  # 아래 curl 마다 $R 을 붙이면 진짜 공개 경로다
 H=https://<pi-node>.<tailnet>.ts.net:10000
-curl -s $H/                                                                   # 200 상태 줄 (첫 요청은 인증서 발급으로 수 초)
+curl -s $R $H/                                                                # 200 상태 줄 (첫 요청은 인증서 발급으로 수 초)
 curl -s -H "Authorization: Bearer x" $H/api/market/stats                      # 403 {"ok":false,"error":"not_public"} — 공개 리스너는 자격을 보지도 않는다
 curl -s -X POST $H/api/market/register -H "Content-Type: application/json" \
   -d '{"v":1,"invite_code":"<어느 슬롯의 코드>","label":"GATE"}'              # 200 device_id·token·slot — 그 슬롯의 지인이 등록하면 GATE 는 자동 교체된다
@@ -118,6 +123,10 @@ curl -s -H "Authorization: Bearer <위 200 응답의 token>" $H/api/market/ping 
 docker compose exec yuktracker-hub python devices.py list                     # GATE 가 slot 열과 함께 보인다 → revoke <device_id> --note gate
 docker compose exec yuktracker-hub python devices.py alias <device_id> "친구1"  # 별칭은 등록 때 슬롯 이름으로 자동 — 바꾸고 싶을 때만
 ```
+
+외부에서 TLS 직후 끊기면(`SSL: UNEXPECTED_EOF`, `curl: (35)`) Pi 의 `journalctl -u tailscaled` 에 `peerapi: ingress: denied; no ingress cap`
+가 찍히는지 본다 — tailscale 1.102.1 의 회귀로 인그레스 피어 권한 판정이 깨져 **모든 Funnel 포트**가 외부에서 죽는다(tailnet 안은
+멀쩡). `sudo tailscale update --yes`(1.102.4 이상)로 해결됐다(2026-09-23). tailscaled 재시작·Funnel 껐다 켜기는 소용없었다.
 
 운영 메모:
 - **슬롯 = 지인 한 사람**(2026-09-23 결정): `invite_codes` 의 슬롯마다 코드 하나, 정원 = 슬롯 수(예시 7). 지인에게는 **본인 슬롯의

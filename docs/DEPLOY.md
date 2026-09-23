@@ -33,7 +33,9 @@ curl -s -X POST http://127.0.0.1:8800/api/market/register -H "Content-Type: appl
 ## 1. 허브 — 공개 노출까지
 
 hub/README "파이 배포" → "공개 노출(Tailscale Funnel)" 순서대로. 이 Pi 는 Funnel 443·8443 을 다른 서비스가 이미 쓰고 있어
-공개 리스너는 **10000 번**(`--https=10000`, 주소 `https://<pi-node>.<tailnet>.ts.net:10000`)으로 낸다(2026-09-23 결정). 끝나면 **외부망(폰 LTE)** 에서 게이트가 전부 맞아야 한다:
+공개 리스너는 **10000 번**(`--https=10000`, 주소 `https://<pi-node>.<tailnet>.ts.net:10000`)으로 낸다(2026-09-23 결정). 끝나면 **외부망**에서
+게이트가 전부 맞아야 한다 — tailnet 에 든 PC 의 curl 은 Funnel 을 안 거치므로 폰 LTE 또는 hub/README 의 `--resolve` 인그레스 IP 로(9/11~9/23 의
+Funnel 장애를 tailnet 안 게이트가 못 잡았다):
 `GET /` 200 · `stats` 403 `not_public`(더미 Bearer) · `register` 200/401 · `ping` 200 · `devices.py list` 에 그 기기.
 게이트용 기기는 어느 슬롯 코드로 만들어도 그 슬롯의 지인이 등록하면 자동 교체되지만, 명단을 깨끗이 두려면 `devices.py revoke <device_id>
 --note gate` 로 지운다.
@@ -112,4 +114,5 @@ curl -s -H "Authorization: Bearer <관리 시크릿>" "http://<pi-tailnet-ip>:88
 | `X 기기 토큰 — 403 제거됨` | 관리자가 명단에서 뺌, 또는 같은 코드로 다른 PC 가 등록해 교체됨 | 본인 PC 가 맞으면 같은 코드로 재등록(상대가 교체됨), 아니면 관리자에게 문의 |
 | `X 기기 토큰 — 옛 판입니다` | 허브가 PR-Y5 이전 | Pi 재배포(0번) |
 | `X 허브 도달 — 닿지 못했습니다` | 주소 오타(`:10000` 누락)·Funnel 꺼짐 | Pi 에서 `tailscale funnel status` |
+| `허브에 닿지 못했습니다 … SSL: UNEXPECTED_EOF_WHILE_READING` | Funnel 인그레스가 TLS 직후 끊음 — tailnet 안에선 멀쩡 | Pi `journalctl -u tailscaled` 에 `no ingress cap` 이면 `sudo tailscale update`(hub/README 공개 노출) |
 | `! 업로드 대기 N배치` 가 안 줄어듦 | 401/403 로 업로더 정지 | 같은 화면의 `기기 토큰` 줄을 본다 |
