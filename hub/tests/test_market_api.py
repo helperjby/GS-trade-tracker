@@ -228,18 +228,88 @@ def test_search_freshness_ordering_and_clock_clamp(tmp_path):
                 obs(obs_id="f3", agent_ts=now + 3600, rows=[row(listing_id=34, price=400, seller="판매자D")]),  # 앞선 시계
             ))
             st, data = await get(client, "/api/market/search", {"q": "봉인의돌"})
-            assert (data["count"], data["total_matches"]) == (3, 4)
+            assert (data["count"], data["total_matches"], data["expiry_days"]) == (3, 4, 2)
             assert [l["price"] for l in data["listings"]] == [200, 300, 400]  # 단가 오름차순
             assert all(l["last_seen_ts"] <= data["server_time"] for l in data["listings"])  # 미래 agent_ts → 서버 시각
+            # max_age_sec 를 아무리 늘려도 소멸 상한(첫 관측일+2 00:00 KST)이 지난 행은 안 나온다 — 만료 필터가 1차
             st, data = await get(client, "/api/market/search", {"q": "봉인의돌", "max_age_sec": "1e9"})
-            assert data["count"] == 4 and data["listings"][0]["price"] == 100
+            assert data["count"] == 3 and data["listings"][0]["price"] == 200
             st, data = await get(client, "/api/market/search", {"q": "봉인의돌", "max_age_sec": "0"})
             assert (data["count"], data["total_matches"]) == (0, 4)
             st, data = await get(client, "/api/market/search", {"q": "봉인의돌", "max_age_sec": "nan"})
-            assert data["max_age_sec"] == 86400.0  # 쓰레기는 기본값
+            assert data["max_age_sec"] == 259200.0  # 쓰레기는 기본값(72h 안전망)
         finally:
             await client.close()
     _run(scn())
+
+
+def _today0() -> float:
+    """오늘 00:00 KST — 자정 직전이면 넘긴 뒤 잰다(테스트의 '오늘'과 서버 호출의 '오늘'이 갈리지 않게)."""
+    now = time.time()
+    left = db_mod.kst_midnight(now, 1) - now
+    if left < 30:
+        time.sleep(left + 1)
+        now = time.time()
+    return db_mod.kst_midnight(now, 0)
+
+
+def test_search_hides_by_expiry_not_by_24h(tmp_path):
+    """소멸 규칙(등록일 D → D+2 00:00 KST, 단기 고정): 관측 시각으로 낸 상한이 지나야 숨긴다 — 24h 가 지나도 살아 있는 행은
+    보이고, 24h 안이라도 상한이 지난 행은 숨는다. 실제 시계를 쓰되 오늘 KST 자정 기준 오프셋이라 실행 시각과 무관하게 결정적."""
+    async def scn():
+        app, client = await start_client(make_cfg(tmp_path))
+        try:
+            today0 = _today0()                                    # 오늘 00:00 KST
+            await post(client, body(
+                # 어제 00:00:01 관측 → 등록일 ∈ {그제, 어제} → 상한 = 내일 00:00 (살아 있음, 나이 > 24h)
+                obs(obs_id="y", agent_ts=today0 - 86400 + 1, rows=[row(listing_id=41, price=100)]),
+                # 그제 12:00 관측 → 상한 = 오늘 00:00 ≤ now (확실히 사라짐, 나이는 36h~60h)
+                obs(obs_id="dby", agent_ts=today0 - 86400 - 43200, rows=[row(listing_id=42, price=50, seller="판매자B")]),
+                # 어제 23:59:59 첫 관측 + 오늘 00:00:01 재관측(자정 걸침) → from = by = 내일 00:00 → 등록일 = 어제 확정
+                obs(obs_id="s1", agent_ts=today0 - 1, rows=[row(listing_id=43, price=70, seller="판매자C")]),
+                obs(obs_id="s2", agent_ts=today0 + 1, rows=[row(listing_id=43, price=70, seller="판매자C")]),
+            ))
+            st, data = await get(client, "/api/market/search", {"q": "봉인의돌"})
+            assert st == 200 and (data["count"], data["total_matches"]) == (2, 3)
+            by_id = {l["listing_id"]: l for l in data["listings"]}
+            assert set(by_id) == {41, 43}
+            assert by_id[41]["expires_by_ts"] == today0 + 86400          # 내일 00:00 KST
+            assert by_id[41]["expires_from_ts"] == today0                # 어제 관측 → 오늘 00:00 부터 사라졌을 수 있음
+            assert by_id[43]["expires_from_ts"] == by_id[43]["expires_by_ts"] == today0 + 86400  # 자정 걸침 → 확정
+            # 증분 폴링은 만료 필터 없이 전부 + 같은 필드
+            st, data = await get(client, "/api/market/listings", {"since_ts": "0"})
+            assert data["count"] == 3 and all("expires_by_ts" in l and "expires_from_ts" in l for l in data["listings"])
+            st, s = await get(client, "/api/market/stats")
+            assert (s["live_listings"], s["expiry_days"], s["fresh_sec"]) == (2, 2, 259200.0)
+        finally:
+            await client.close()
+    _run(scn())
+
+
+def test_expiry_days_from_config(tmp_path):
+    async def scn():
+        app, client = await start_client(make_cfg(tmp_path, listing_expiry_days=3))
+        try:
+            today0 = _today0()
+            await post(client, body(obs(obs_id="dby", agent_ts=today0 - 86400 - 43200, rows=[row(listing_id=42)])))
+            st, data = await get(client, "/api/market/search", {"q": "봉인의돌"})
+            assert (data["count"], data["expiry_days"]) == (1, 3)                 # 장기 3일이면 그제 관측도 내일 00:00 까지
+            assert data["listings"][0]["expires_by_ts"] == today0 + 86400
+        finally:
+            await client.close()
+    _run(scn())
+
+
+def test_short_max_age_warns_at_startup(tmp_path, caplog):
+    """배포 config 가 예시 파일 복사본이면 옛 기본 86400 이 명시돼 있다 — 만료 전 행을 나이 필터가 먼저 숨기므로 기동 때 경고."""
+    async def scn(cfg):
+        with caplog.at_level("WARNING", logger="hub"):
+            app, client = await start_client(cfg)
+            await client.close()
+    caplog.clear(); _run(scn(make_cfg(tmp_path, search_max_age_sec=86400)))
+    assert any("search_max_age_sec=86400" in r.message and "259200" in r.message for r in caplog.records)
+    caplog.clear(); _run(scn(make_cfg(tmp_path)))
+    assert not any("search_max_age_sec" in r.message for r in caplog.records)
 
 
 def test_listings_keyset_cursor_delivers_every_row_at_the_same_ts(tmp_path):
@@ -334,7 +404,8 @@ def test_stats_shape_and_devices(tmp_path):
             st, s = await get(client, "/api/market/stats")
             assert st == 200 and s["v"] == 1
             assert (s["observations"], s["listings"], s["items"], s["item_names"], s["fresh_listings"]) == (3, 3, 2, 2, 3)
-            assert s["latest_recv_ts"] <= s["server_time"] and s["fresh_sec"] == 86400.0
+            assert s["latest_recv_ts"] <= s["server_time"] and s["fresh_sec"] == 259200.0
+            assert (s["live_listings"], s["expiry_days"]) == (3, 2)
             assert [(d["device_id"], d["observations"]) for d in s["devices"]] == [("DEV-1", 2), ("DEV-2", 1)]
         finally:
             await client.close()
