@@ -145,15 +145,14 @@ class WiringTest(_Base):
             return hub_client.Response(200, {"ok": True, "accepted": len(observations)})
 
         market = self._setup(A.RunOptions(hub_url="https://hub", invite_code="c"),
-                             register=self._register(), post=post)
-        market.uploader._batch_wait = 0.05
-        market.uploader.start()
+                             register=self._register(), post=post, uploader_kw={"batch_wait": 0.05})
+        market.start(self.said.append)
         try:
             market.observer._enqueue({"obs_id": "x"})
             self.assertTrue(done.wait(5.0), "업로더 스레드가 POST 하지 않았다")
         finally:
-            market.uploader.stop()
-            market.uploader.join(timeout=5.0)
+            market.close()
+        self.assertFalse(market.uploader.is_alive())
         self.assertEqual(posted[0][0], "https://hub")
         self.assertEqual([o["obs_id"] for o in posted[0][3]], ["x"])
         self.assertEqual(market.uploader.uploaded, 1)

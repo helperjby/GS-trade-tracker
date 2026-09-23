@@ -213,15 +213,45 @@ class _Console(threading.Thread):
 
 @dataclass
 class Market:
-    """육의전 배선 한 묶음 — 콜백(엔진에 넘길 것)과 업로더(종료 때 멈출 것)."""
+    """육의전 배선 한 묶음 — 콜백(엔진에 넘길 것)과 업로더. 수명은 **이 객체가** 쥔다: `start()`/`close()` 한 쌍을
+    `run()` 이 부른다(G7 1차: 만들기만 하고 start 를 빠뜨려 관측이 큐에서 썩었다 — 그 배치를 한 곳에 모은 것)."""
     cb: Optional[Callable[..., None]] = None
     uploader: Optional[spool.Uploader] = None
     observer: Optional[market_observer.MarketObserver] = None
+    #: `close()` 뒤 스풀에도 못 내린 관측 수(스레드가 POST 에 붙들려 있고 마지막 내림도 실패한 경우) — 종료 요약에 찍는다.
+    unsaved: int = 0
+
+    def start(self, say: Callable[[str], None]) -> None:
+        """업로더 스레드를 띄운다. 못 띄우면(스레드 한도) 업로드 없이 관측만 — 관측 콜백은 그대로 산다."""
+        if self.uploader is None:
+            return
+        try:
+            self.uploader.start()
+        except RuntimeError as e:
+            say(f"[허브] 업로더를 띄우지 못했습니다 — 업로드 없이 관측만 합니다: {e}")
+            self.uploader = None
+
+    def close(self) -> None:
+        """업로더를 멈추고 잠깐 기다린 뒤, 스레드가 아직 POST 에 붙들려 있으면 큐를 **메인 스레드에서** 스풀에 내린다
+        (다음 실행이 올린다). 여러 번 불러도 된다(콘솔 종료 훅과 finally 가 둘 다 부른다)."""
+        up = self.uploader
+        if up is None:
+            return
+        try:
+            up.stop()
+            if up.is_alive():
+                up.join(timeout=3.0)
+            if up.is_alive() or up.queue_size():
+                while up.drain_queue(wait=False) is not None:
+                    pass
+            self.unsaved = up.queue_size()
+        except Exception:
+            self.unsaved = up.queue_size() if up is not None else 0
 
 
 def setup_market(opts: RunOptions, say: Callable[[str], None], stdin: Optional[TextIO], *,
                  config_path=None, spool_dir=None, names=None,
-                 register=None, post=None) -> Market:
+                 register=None, post=None, uploader_kw: Optional[dict] = None) -> Market:
     """아이템 표 → 설정 → (필요하면) 첫 실행 등록 → 스풀·업로더.
 
     업로드가 안 되는 상황(주소 없음·등록 실패·`--no-upload`)에서도 **관측 콜백은 만든다** —
@@ -248,7 +278,7 @@ def setup_market(opts: RunOptions, say: Callable[[str], None], stdin: Optional[T
         store = spool.Spool(spool_dir)
         uploader = spool.Uploader(store, hub_url=hub_url, token=cfg.hub_token,
                                   device_id=lambda: cfg.hub_device_id, say=say, names=table,
-                                  **({"post": post} if post is not None else {}))
+                                  **({"post": post} if post is not None else {}), **(uploader_kw or {}))
         say(f"[허브] {hub_url} 기기 {cfg.hub_device_id}")
         waiting = len(store.pending())
         if waiting:
@@ -296,10 +326,6 @@ def run(opts: RunOptions, *, engine_factory=None, recorder=None,
         say(f"[패킷] 클라{slot_idx + 1} 이벤트 — {kind}")
 
     market = market_setup(opts, say, stdin)
-    if market.uploader is not None:
-        # 스레드를 **여기서** 띄운다 — 만들기만 하면 관측이 큐에 쌓인 채 전송도 스풀도 안 된다
-        # (실기기 G7 1차, 2026-09-23: 등록·페이지 인식은 됐는데 허브에 0건).
-        market.uploader.start()
 
     engine = factory(
         indexer.provide, status_cb=say, event_cb=event_cb,
@@ -347,10 +373,14 @@ def run(opts: RunOptions, *, engine_factory=None, recorder=None,
             engine.stop()
         except Exception:
             pass
+        market.close()   # 큐에 남은 관측을 스풀에 — CTRL_CLOSE 의 유예 몇 초 안에 끝난다(join 3s + 파일 쓰기)
 
     remove_close_hook = _install_console_close_hook(on_console_close)
     rc = RC_OK
     try:
+        # 엔진이 뜬 **뒤**, try 안에서 — 엔진 실패로 일찍 나가는 길에는 띄우지 않고, finally 가 반드시 close 한다.
+        # 만들기만 하고 start 를 빠뜨리면 관측이 큐에 쌓인 채 전송도 스풀도 안 된다(실기기 G7 1차, 2026-09-23).
+        market.start(say)
         if opts.capture_min:
             rc = _open_window(opts, engine, recorder, indexer, state, stop, say, clock, sleep)
         # 콘솔은 수집 창이 열린 **뒤에** 읽기 시작한다 — 그 전에 친 줄은 라벨이 될 창이 없다
@@ -382,7 +412,7 @@ def run(opts: RunOptions, *, engine_factory=None, recorder=None,
             engine.stop()
         except Exception:
             pass
-        _stop_uploader(market)
+        market.close()
         try:
             h = engine.health_snapshot()
             say(f"[패킷] 종료 헬스 — 패킷 {h.get('packets', 0)} / 세그 {h.get('fed_segments', 0)} / "
@@ -446,19 +476,6 @@ def _capturing(engine) -> bool:
         return False
 
 
-def _stop_uploader(market: Market) -> None:
-    """업로더를 멈추고 잠깐 기다린다 — 큐에 남은 관측을 스풀에 내려놓을 시간(전송은 다음 실행)."""
-    up = market.uploader
-    if up is None:
-        return
-    try:
-        up.stop()
-        if up.is_alive():
-            up.join(timeout=3.0)
-    except Exception:
-        pass
-
-
 def _say_upload_health(market: Market, say: Callable[[str], None]) -> None:
     obs, up = market.observer, market.uploader
     if obs is None:
@@ -473,6 +490,8 @@ def _say_upload_health(market: Market, say: Callable[[str], None]) -> None:
                  f" · 큐 유실 {up.queue_dropped}")
         if up.halted:
             line += f" · 정지({up.stopped_reason})"
+        if market.unsaved:
+            line += f" · 큐 미저장 {market.unsaved}(유실)"
     say(line)
 
 

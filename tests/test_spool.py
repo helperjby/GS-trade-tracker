@@ -82,7 +82,7 @@ class UploaderTest(unittest.TestCase):
         self.spool = spool.Spool(Path(self.tmp.name) / "spool")
         self.sent: list[tuple] = []
         self.said: list[str] = []
-        self.slept: list[float] = []
+        self.now = 1000.0
         self.responses: list[hub_client.Response] = []
 
     def _post(self, url, token, device_id, observations):
@@ -92,13 +92,13 @@ class UploaderTest(unittest.TestCase):
     def _uploader(self, device_id="d-1", **kw) -> spool.Uploader:
         return spool.Uploader(self.spool, hub_url="https://hub", token="tok",
                               device_id=lambda: device_id, say=self.said.append,
-                              post=self._post, sleep=self.slept.append, **kw)
+                              post=self._post, clock=lambda: self.now, **kw)
 
     def test_device_id_is_filled_at_post_time(self) -> None:
         box = {"id": "d-old"}
         up = spool.Uploader(self.spool, hub_url="https://hub", token="tok",
                             device_id=lambda: box["id"], say=self.said.append,
-                            post=self._post, sleep=self.slept.append)
+                            post=self._post, clock=lambda: self.now)
         path = self.spool.write([_env("a")])
         box["id"] = "d-new"  # 재등록
         up.send_one(path)
@@ -148,9 +148,15 @@ class UploaderTest(unittest.TestCase):
                                     retry_after=42.0))
         path = self.spool.write([_env("a")])
         self.assertEqual(up.send_one(path), "wait")
-        self.assertEqual(self.slept, [42.0])
+        self.assertEqual((up.retry_delay, up.retry_at), (42.0, self.now + 42.0))   # 재우지 않고 시각만 정한다
         self.assertTrue(path.exists())
         self.assertFalse(up.halted)
+        up.flush_pending()
+        self.assertEqual(len(self.sent), 1, "대기 중에는 보내지 않는다")
+        self.now += 42.0
+        self.responses.append(_resp())
+        up.flush_pending()
+        self.assertEqual(len(self.sent), 2, "시각이 되면 같은 파일부터")
 
     def test_413_splits_the_batch(self) -> None:
         up = self._uploader()
@@ -171,13 +177,30 @@ class UploaderTest(unittest.TestCase):
                                _resp(500, body={"ok": False, "error": "storage_error"}),
                                _resp()])
         path = self.spool.write([_env("a")])
-        self.assertEqual([up.send_one(path), up.send_one(path)], ["retry", "retry"])
-        self.assertEqual(self.slept, [spool.BACKOFF_MIN_SEC, spool.BACKOFF_MIN_SEC * 2])
+        delays = []
+        for _ in range(2):
+            self.assertEqual(up.send_one(path), "retry")
+            delays.append(up.retry_delay)
+        self.assertEqual(delays, [spool.BACKOFF_MIN_SEC, spool.BACKOFF_MIN_SEC * 2])
         self.assertTrue(path.exists())
         self.assertEqual(up.send_one(path), "ok")
         self.responses.append(hub_client.Response(status=0, error="network"))
         up.send_one(self.spool.write([_env("b")]))
-        self.assertEqual(self.slept[-1], spool.BACKOFF_MIN_SEC, "성공하면 백오프가 처음으로 돌아간다")
+        self.assertEqual(up.retry_delay, spool.BACKOFF_MIN_SEC, "성공하면 백오프가 처음으로 돌아간다")
+
+    def test_backoff_does_not_starve_the_queue(self) -> None:
+        """허브가 죽어 있는 동안에도 루프는 큐를 스풀로 내린다 — 백오프가 스레드를 재우지 않기 때문."""
+        up = self._uploader(batch_wait=0.01)
+        self.responses.append(hub_client.Response(status=0, error="network"))
+        self.assertEqual(up.send_one(self.spool.write([_env("a")])), "retry")
+        for i in range(3):
+            up.enqueue(_env(f"q{i}"))
+        up.flush_pending()                                   # retry_at 전 — 전송 없음
+        self.assertEqual(len(self.sent), 1)
+        self.assertIsNotNone(up.drain_queue())               # 그래도 큐는 스풀로 내려간다
+        self.assertEqual(len(self.spool.pending()), 2)
+        self.assertEqual(up.queue_size(), 0)
+        self.assertIsNone(up.drain_queue(wait=False))
 
     def test_tls_failure_stops_instead_of_retrying_forever(self) -> None:
         up = self._uploader()

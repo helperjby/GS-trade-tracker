@@ -83,9 +83,10 @@ class _Base(unittest.TestCase):
         self.out = io.StringIO()
 
     def _run(self, opts, stdin_text: str, factory=None, sleep=None, clock=None,
-             market_setup=_no_market):
+             market_setup=_no_market, stdin_obj=None):
         return A.run(opts, engine_factory=factory or _factory(), recorder=self.recorder,
-                     indexer=self.indexer, stdin=io.StringIO(stdin_text), out=self.out,
+                     indexer=self.indexer, stdin=stdin_obj if stdin_obj is not None else io.StringIO(stdin_text),
+                     out=self.out,
                      clock=clock or time.monotonic, sleep=sleep or (lambda s: time.sleep(0.02)),
                      market_setup=market_setup)
 
@@ -294,6 +295,7 @@ class ObserveModeTest(_Base):
             def __init__(self):
                 self.started = False
                 self.stopped = False
+                self.order = []
                 self.uploaded = 3
                 self.quarantined = self.queue_dropped = 0
                 self.spool = SimpleNamespace(pending=lambda: [1, 2])
@@ -302,12 +304,18 @@ class ObserveModeTest(_Base):
 
             def start(self):
                 self.started = True
+                eng = _EngineStub.instances[-1]
+                self.order.append(("start", eng.started, eng.stopped))   # 엔진이 뜬 뒤·멈추기 전
 
             def stop(self):
                 self.stopped = True
+                self.order.append(("stop", _EngineStub.instances[-1].stopped))   # 엔진을 멈춘 뒤
 
             def is_alive(self):
                 return False
+
+            def queue_size(self):
+                return 0
 
         def setup(opts, say, stdin):
             obs = SimpleNamespace(pages=2, rows=12, unknown_item=1)
@@ -319,8 +327,87 @@ class ObserveModeTest(_Base):
         self.assertEqual(_EngineStub.instances[-1].market_cb, "MARKET_CB")
         self.assertTrue(seen["market"].uploader.started, "업로더 스레드를 띄운다 — 안 띄우면 관측이 큐에서 썩는다(G7 1차)")
         self.assertTrue(seen["market"].uploader.stopped, "종료 때 업로더를 멈춘다")
+        self.assertEqual(seen["market"].uploader.order, [("start", True, False), ("stop", True)],
+                         "start 는 엔진 기동 뒤·루프 전, stop 은 엔진 정지 뒤")
         self.assertIn("[육의전] 관측 2쪽 12행 / 이름 미해석 1행 / 업로드 3건 · 대기 2배치",
                       self.out.getvalue())
+
+
+class UploaderLifecycleTest(_Base):
+    """run() 이 **진짜** Uploader 를 띄우고 닫는다 — 스텁이 아니라 지난 실행의 스풀이 실제로 POST 되는지로 본다."""
+
+    def _market(self, post, *, batch_wait=0.05):
+        from yuktracker import spool as S
+        store = S.Spool(self.root / "spool")
+        up = S.Uploader(store, hub_url="https://hub", token="tok", device_id=lambda: "d-1",
+                        say=lambda m: self.out.write(m + "\n"), post=post, batch_wait=batch_wait)
+        obs = SimpleNamespace(pages=0, rows=0, unknown_item=0)
+        return store, A.Market(cb=lambda *a, **k: None, uploader=up, observer=obs)
+
+    def test_run_starts_the_real_uploader_and_pending_spool_is_posted(self) -> None:
+        posted = threading.Event()
+        seen = []
+
+        def post(hub_url, token, device_id, observations):
+            seen.append([o["obs_id"] for o in observations])
+            posted.set()
+            from yuktracker import hub_client
+            return hub_client.Response(200, {"ok": True, "accepted": len(observations)})
+
+        store, market = self._market(post)
+        store.write([{"obs_id": "prev"}])           # 지난 실행이 남긴 스풀
+        stdin = _SlowQuit(posted)
+        rc = self._run(A.RunOptions(capture_min=None, pause_on_exit=False, attach_log=False), "",
+                       market_setup=lambda o, s, i: market, stdin_obj=stdin)
+        self.assertEqual(rc, A.RC_OK)
+        self.assertEqual(seen, [["prev"]])
+        self.assertFalse(market.uploader.is_alive(), "close() 가 스레드를 끝낸다")
+        self.assertIn("업로드 1건 · 대기 0배치", self.out.getvalue())
+
+    def test_engine_failure_never_starts_the_uploader(self) -> None:
+        store, market = self._market(lambda *a: (_ for _ in ()).throw(AssertionError("POST 금지")))
+        store.write([{"obs_id": "prev"}])
+        rc = self._run(A.RunOptions(capture_min=None, pause_on_exit=False, attach_log=False), "",
+                       factory=_factory(start_ok=False, start_msg="Npcap 없음"),
+                       market_setup=lambda o, s, i: market)
+        self.assertEqual(rc, A.RC_ENGINE)
+        self.assertFalse(market.uploader.is_alive())
+        self.assertEqual(len(store.pending()), 1, "엔진이 못 뜨면 업로더도 안 뜬다 — 스풀은 그대로")
+
+    def test_close_drains_the_queue_to_spool_when_the_thread_is_stuck(self) -> None:
+        """POST 가 붙들린 채 join 이 시간 초과해도 큐는 메인 스레드가 스풀에 내린다 — 관측을 잃지 않는다."""
+        release = threading.Event()
+
+        def slow_post(*a):
+            release.wait(10.0)
+            from yuktracker import hub_client
+            return hub_client.Response(0, error="network")
+
+        store, market = self._market(slow_post, batch_wait=0.01)
+        store.write([{"obs_id": "stuck"}])
+        market.start(lambda m: None)
+        try:
+            time.sleep(0.2)                                  # 스레드가 slow_post 안에 들어갈 시간
+            market.uploader.enqueue({"obs_id": "late"})
+            with mock.patch.object(market.uploader, "join", lambda timeout=None: None):   # join 시간 초과 흉내
+                market.close()
+            self.assertEqual(market.unsaved, 0)
+            names = sorted(p.name for p in store.pending())
+            self.assertEqual(len(names), 2, "stuck 파일 + late 가 새 스풀 파일로")
+        finally:
+            release.set()
+            market.uploader.join(timeout=5.0)
+
+
+class _SlowQuit:
+    """stdin 흉내 — 이벤트가 켜질 때까지 기다렸다가 'q' 한 줄을 준 뒤 EOF."""
+
+    def __init__(self, event: threading.Event) -> None:
+        self._event = event
+
+    def __iter__(self):                                   # _Console 은 `for line in stdin` 으로 읽는다
+        self._event.wait(10.0)
+        yield "q\n"
 
 
 class PauseOnExitTest(_Base):
