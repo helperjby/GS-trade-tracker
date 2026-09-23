@@ -150,10 +150,10 @@ class MarketObserver:
             env = self.envelope(page, observation)
             self.pages += 1
             self.rows += page.count
+            if self._enqueue is not None:
+                self._enqueue(env)         # 업로드가 표시보다 먼저 — 콘솔이 막혀도 관측은 큐로 간다
             if self._say is not None:
                 extra = f" ⚠{','.join(page.anomalies)}" if page.anomalies else ""
                 self._say(f"[육의전] 클라{slot_idx + 1} 목록 {page.count}행 / 총 {page.total_pages}쪽{extra}")
-            if self._enqueue is not None:
-                self._enqueue(env)
         except Exception:
             get_logger().exception("육의전 관측 처리 실패 — 이 페이지는 버린다")

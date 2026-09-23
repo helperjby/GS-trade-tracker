@@ -83,9 +83,10 @@ class _Base(unittest.TestCase):
         self.out = io.StringIO()
 
     def _run(self, opts, stdin_text: str, factory=None, sleep=None, clock=None,
-             market_setup=_no_market):
+             market_setup=_no_market, stdin_obj=None):
         return A.run(opts, engine_factory=factory or _factory(), recorder=self.recorder,
-                     indexer=self.indexer, stdin=io.StringIO(stdin_text), out=self.out,
+                     indexer=self.indexer, stdin=stdin_obj if stdin_obj is not None else io.StringIO(stdin_text),
+                     out=self.out,
                      clock=clock or time.monotonic, sleep=sleep or (lambda s: time.sleep(0.02)),
                      market_setup=market_setup)
 
@@ -292,18 +293,29 @@ class ObserveModeTest(_Base):
 
         class _Up:
             def __init__(self):
+                self.started = False
                 self.stopped = False
+                self.order = []
                 self.uploaded = 3
                 self.quarantined = self.queue_dropped = 0
                 self.spool = SimpleNamespace(pending=lambda: [1, 2])
                 self.stopped_reason = ""
                 self.halted = False
 
+            def start(self):
+                self.started = True
+                eng = _EngineStub.instances[-1]
+                self.order.append(("start", eng.started, eng.stopped))   # 엔진이 뜬 뒤·멈추기 전
+
             def stop(self):
                 self.stopped = True
+                self.order.append(("stop", _EngineStub.instances[-1].stopped))   # 엔진을 멈춘 뒤
 
             def is_alive(self):
                 return False
+
+            def queue_size(self):
+                return 0
 
         def setup(opts, say, stdin):
             obs = SimpleNamespace(pages=2, rows=12, unknown_item=1)
@@ -313,9 +325,163 @@ class ObserveModeTest(_Base):
         opts = A.RunOptions(capture_min=None, pause_on_exit=False, attach_log=False)
         self.assertEqual(self._run(opts, "q\n", market_setup=setup), A.RC_OK)
         self.assertEqual(_EngineStub.instances[-1].market_cb, "MARKET_CB")
+        self.assertTrue(seen["market"].uploader.started, "업로더 스레드를 띄운다 — 안 띄우면 관측이 큐에서 썩는다(G7 1차)")
         self.assertTrue(seen["market"].uploader.stopped, "종료 때 업로더를 멈춘다")
+        self.assertEqual(seen["market"].uploader.order, [("start", True, False), ("stop", True)],
+                         "start 는 엔진 기동 뒤·루프 전, stop 은 엔진 정지 뒤")
         self.assertIn("[육의전] 관측 2쪽 12행 / 이름 미해석 1행 / 업로드 3건 · 대기 2배치",
                       self.out.getvalue())
+
+
+class UploaderLifecycleTest(_Base):
+    """run() 이 **진짜** Uploader 를 띄우고 닫는다 — 스텁이 아니라 지난 실행의 스풀이 실제로 POST 되는지로 본다."""
+
+    def _market(self, post, *, batch_wait=0.05):
+        from yuktracker import spool as S
+        store = S.Spool(self.root / "spool")
+        up = S.Uploader(store, hub_url="https://hub", token="tok", device_id=lambda: "d-1",
+                        say=lambda m: self.out.write(m + "\n"), post=post, batch_wait=batch_wait)
+        obs = SimpleNamespace(pages=0, rows=0, unknown_item=0)
+        return store, A.Market(cb=lambda *a, **k: None, uploader=up, observer=obs)
+
+    def test_run_starts_the_real_uploader_and_pending_spool_is_posted(self) -> None:
+        posted = threading.Event()
+        seen = []
+
+        def post(hub_url, token, device_id, observations):
+            seen.append([o["obs_id"] for o in observations])
+            posted.set()
+            from yuktracker import hub_client
+            return hub_client.Response(200, {"ok": True, "accepted": len(observations)})
+
+        store, market = self._market(post)
+        store.write([{"obs_id": "prev"}])           # 지난 실행이 남긴 스풀
+        stdin = _SlowQuit(posted)
+        rc = self._run(A.RunOptions(capture_min=None, pause_on_exit=False, attach_log=False), "",
+                       market_setup=lambda o, s, i: market, stdin_obj=stdin)
+        self.assertEqual(rc, A.RC_OK)
+        self.assertEqual(seen, [["prev"]])
+        self.assertFalse(market.uploader.is_alive(), "close() 가 스레드를 끝낸다")
+        self.assertIn("업로드 1건 · 대기 0배치", self.out.getvalue())
+
+    def test_engine_failure_never_starts_the_uploader(self) -> None:
+        store, market = self._market(lambda *a: (_ for _ in ()).throw(AssertionError("POST 금지")))
+        store.write([{"obs_id": "prev"}])
+        rc = self._run(A.RunOptions(capture_min=None, pause_on_exit=False, attach_log=False), "",
+                       factory=_factory(start_ok=False, start_msg="Npcap 없음"),
+                       market_setup=lambda o, s, i: market)
+        self.assertEqual(rc, A.RC_ENGINE)
+        self.assertFalse(market.uploader.is_alive())
+        self.assertEqual(len(store.pending()), 1, "엔진이 못 뜨면 업로더도 안 뜬다 — 스풀은 그대로")
+
+    def test_close_drains_the_queue_to_spool_when_the_thread_is_stuck(self) -> None:
+        """POST 가 붙들린 채 join 이 시간 초과해도 큐는 메인 스레드가 스풀에 내린다 — 관측을 잃지 않는다."""
+        release = threading.Event()
+
+        def slow_post(*a):
+            release.wait(10.0)
+            from yuktracker import hub_client
+            return hub_client.Response(0, error="network")
+
+        store, market = self._market(slow_post, batch_wait=0.01)
+        store.write([{"obs_id": "stuck"}])
+        market.start(lambda m: None)
+        try:
+            time.sleep(0.2)                                  # 스레드가 slow_post 안에 들어갈 시간
+            market.uploader.enqueue({"obs_id": "late"})
+            with mock.patch.object(market.uploader, "join", lambda timeout=None: None):   # join 시간 초과 흉내
+                market.close()
+            self.assertEqual(market.unsaved, 0)
+            names = sorted(p.name for p in store.pending())
+            self.assertEqual(len(names), 2, "stuck 파일 + late 가 새 스풀 파일로")
+        finally:
+            release.set()
+            market.uploader.join(timeout=5.0)
+
+
+class ConsoleOutTest(unittest.TestCase):
+    """콘솔이 막혀도(QuickEdit 선택) 스니퍼·업로더 스레드의 say 는 돌아온다 — F1_JBY G7 2차의 3분 지연."""
+
+    class _Frozen(io.StringIO):
+        """conhost 흉내 — `release` 가 켜질 때까지 write 가 막힌다."""
+
+        def __init__(self) -> None:
+            super().__init__()
+            self.release = threading.Event()
+
+        def write(self, s: str) -> int:
+            self.release.wait(10.0)
+            return super().write(s)
+
+    def test_sync_before_start_and_async_after(self) -> None:
+        out = io.StringIO()
+        c = A.ConsoleOut(out)
+        c.say("먼저")
+        self.assertIn("먼저", out.getvalue())               # 시작 전엔 즉시(등록 프롬프트 순서)
+        c.start()
+        c.say("나중")
+        c.stop()
+        self.assertIn("나중", out.getvalue())
+        self.assertLess(out.getvalue().index("먼저"), out.getvalue().index("나중"))
+        c.say("멈춘 뒤")                                     # stop 뒤엔 다시 동기
+        self.assertIn("멈춘 뒤", out.getvalue())
+
+    def test_say_does_not_block_when_the_console_is_frozen(self) -> None:
+        out = self._Frozen()
+        c = A.ConsoleOut(out)
+        c.start()
+        t0 = time.monotonic()
+        for i in range(5):
+            c.say(f"line{i}")
+        self.assertLess(time.monotonic() - t0, 1.0, "막힌 콘솔에 say 가 붙들렸다")
+        self.assertEqual(c.dropped, 0)
+        out.release.set()
+        c.stop()
+        text = out.getvalue()
+        self.assertEqual([f"line{i}" in text for i in range(5)], [True] * 5)
+        self.assertLess(text.index("line0"), text.index("line4"), "순서 보존")
+
+    def test_overflow_is_counted_and_reported_once(self) -> None:
+        out = self._Frozen()
+        c = A.ConsoleOut(out)
+        c.MAX_LINES = 3
+        c._q = __import__("queue").Queue(maxsize=3)
+        c.start()
+        for i in range(10):
+            c.say(f"l{i}")
+        self.assertGreater(c.dropped, 0)
+        out.release.set()
+        c.stop()
+        self.assertIn("표시 줄", out.getvalue())
+        self.assertIn("생략", out.getvalue())
+        self.assertEqual(c.dropped, 0)
+
+    def test_log_handler_goes_through_console_out(self) -> None:
+        out = io.StringIO()
+        c = A.ConsoleOut(out)
+        h = A._ConsoleLogHandler(c)
+        h.setFormatter(__import__("logging").Formatter("%(levelname)s %(message)s"))
+        rec = __import__("logging").LogRecord("x", 20, __file__, 1, "헬스 줄", None, None)
+        h.emit(rec)
+        self.assertIn("INFO 헬스 줄", out.getvalue())
+
+    def test_run_flushes_console_before_returning(self) -> None:
+        """run() 이 finally 에서 stop() 하므로 호출자는 out 에서 종료 헬스까지 전부 본다."""
+        # 위의 run() 기반 테스트들이 out.getvalue() 로 '종료 헬스' 를 읽는 것이 곧 이 보장이다 — 여기서는 cli 의 QuickEdit
+        # 토글이 콘솔이 아닌 환경에서 조용히 넘어가는지만 본다.
+        from yuktracker import cli
+        cli._disable_quick_edit()
+
+
+class _SlowQuit:
+    """stdin 흉내 — 이벤트가 켜질 때까지 기다렸다가 'q' 한 줄을 준 뒤 EOF."""
+
+    def __init__(self, event: threading.Event) -> None:
+        self._event = event
+
+    def __iter__(self):                                   # _Console 은 `for line in stdin` 으로 읽는다
+        self._event.wait(10.0)
+        yield "q\n"
 
 
 class PauseOnExitTest(_Base):

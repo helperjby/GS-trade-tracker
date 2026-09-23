@@ -133,8 +133,10 @@ class Uploader(threading.Thread):
     def __init__(self, spool: Spool, *, hub_url: str, token: str,
                  device_id: Callable[[], str], say: Optional[Callable[[str], None]] = None,
                  names=None, post=hub_client.upload,
-                 sleep: Callable[[float], None] = time.sleep,
+                 clock: Callable[[], float] = time.monotonic,
                  batch_wait: float = BATCH_WAIT_SEC) -> None:
+        """백오프·429 대기는 **스레드를 재우지 않는다** — ``retry_at``(단조시계) 이전에는 전송만 건너뛰고 루프는 계속 큐를
+        스풀로 내린다(허브가 죽은 동안에도 관측이 큐에서 넘쳐 버려지지 않게, ``stop()`` 이 즉시 먹게)."""
         super().__init__(name="YukTrackerUploader", daemon=True)
         self.spool = spool
         self.hub_url = hub_url
@@ -142,8 +144,11 @@ class Uploader(threading.Thread):
         self.device_id = device_id
         self.names = names
         self._post = post
-        self._sleep = sleep
+        self._clock = clock
         self._batch_wait = batch_wait
+        #: 이 시각(단조) 전에는 전송을 시도하지 않는다. ``retry_delay`` 는 마지막으로 정한 대기(표시·테스트용).
+        self.retry_at = 0.0
+        self.retry_delay = 0.0
         self._say = say or (lambda msg: None)
         self._q: "queue.Queue[dict]" = queue.Queue(maxsize=QUEUE_MAX)
         self._stop = threading.Event()
@@ -171,11 +176,20 @@ class Uploader(threading.Thread):
         """자격 문제로 전송을 멈춘 상태(스풀은 쌓인다)."""
         return bool(self.stopped_reason)
 
-    def drain_queue(self) -> Optional[Path]:
-        """큐에 있는 만큼(상한 100) 모아 스풀 파일 1개로. 없으면 None."""
+    def queue_size(self) -> int:
+        """아직 스풀에 안 내린 관측 수(메모리 큐) — 종료 요약의 '미저장'."""
+        return self._q.qsize()
+
+    def _defer(self, delay: float) -> None:
+        self.retry_delay = float(delay)
+        self.retry_at = self._clock() + self.retry_delay
+
+    def drain_queue(self, *, wait: bool = True) -> Optional[Path]:
+        """큐에 있는 만큼(상한 100) 모아 스풀 파일 1개로. 없으면 None. ``wait`` 면 첫 항목을 ``batch_wait`` 까지 기다린다
+        (루프의 박자) — 종료 직전·메인 스레드의 마지막 내림은 기다리지 않는다."""
         batch: list[dict] = []
         try:
-            batch.append(self._q.get(timeout=self._batch_wait))
+            batch.append(self._q.get(timeout=self._batch_wait) if wait else self._q.get_nowait())
         except queue.Empty:
             return None
         while len(batch) < hub_client.MAX_OBSERVATIONS:
@@ -222,27 +236,30 @@ class Uploader(threading.Thread):
             return action
         if action == "wait":
             self._say(f"[허브] {why}")
-            self._sleep(max(1.0, resp.retry_after))
+            self._defer(max(1.0, resp.retry_after))
             return action
-        # retry
+        # retry — 재우지 않고 다음 시도 시각만 정한다(루프는 그동안 큐를 계속 스풀로 내린다)
         self._say(f"[허브] {why} — {self._backoff:.0f}초 뒤 다시 시도합니다.")
-        self._sleep(self._backoff)
+        self._defer(self._backoff)
         self._backoff = min(self._backoff * 2, BACKOFF_MAX_SEC)
         return action
 
     def flush_pending(self) -> None:
-        """오래된 것부터. `stop` 이 나오면 즉시 그만둔다(스풀은 남는다)."""
+        """오래된 것부터. `stop` 이 나오면 즉시 그만두고(스풀은 남는다), 백오프·대기 중(``retry_at`` 전)이면 아무것도 안 보낸다."""
+        if self._clock() < self.retry_at:
+            return
         for path in self.spool.pending():
             if self._stop.is_set() or self.halted:
                 return
             if self.send_one(path) in ("retry", "wait"):
-                return  # 백오프·대기는 이미 잤다 — 다음 회차에 같은 파일부터
+                return  # 다음 시도 시각이 정해졌다 — 그때 같은 파일부터
 
     def run(self) -> None:  # pragma: no cover - 스레드 진입점(본체는 아래 두 메서드)
         while not self._stop.is_set():
-            self.drain_queue()
+            self.drain_queue()                 # ≤ batch_wait 블록 — 루프의 박자이자 stop 반응 시간
             if not self.halted:
-                self.flush_pending()
+                self.flush_pending()           # retry_at 전이면 곧바로 돌아온다
             if self.names is not None and self.names.recheck():
                 self._say(f"[아이템표] 클라 패치 감지 — {self.names.rows}건으로 갱신")
-        self.drain_queue()  # 종료 직전 큐에 남은 것은 스풀에 남긴다(다음 실행이 올린다)
+        while self.drain_queue(wait=False) is not None:   # 종료 직전 큐에 남은 것은 전부 스풀에(다음 실행이 올린다)
+            pass

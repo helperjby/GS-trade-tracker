@@ -116,6 +116,18 @@ class CallbackTest(unittest.TestCase):
         obs(0, page, _obs(page))
         self.assertIn("⚠hdr4,price_hi", said[0])
 
+    def test_enqueue_happens_before_the_console_line(self) -> None:
+        """콘솔이 막혀 say 가 붙들려도(또는 터져도) 관측은 이미 큐에 있다 — 업로드가 표시에 종속되지 않는다."""
+        queued = []
+
+        def stuck_say(_msg):
+            raise RuntimeError("콘솔 고장")
+
+        obs = MO.MarketObserver("id", MO.ItemNames(_table()), enqueue=queued.append, say=stuck_say)
+        page = _page()
+        obs(0, page, _obs(page))
+        self.assertEqual(len(queued), 1)
+
     def test_callback_never_raises_into_the_sniffer_thread(self) -> None:
         def boom(_env):
             raise RuntimeError("스풀 고장")
