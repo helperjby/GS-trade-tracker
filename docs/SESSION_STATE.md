@@ -8,6 +8,18 @@ PR-Y2' 이식 + PR-Y1b 관측·업로드 완료(아래 두 절) ·
 각 `/code-review high` 15건·14건 전부 반영) · **허브 Pi 배포 완료(2026-09-22 11:24, `~/yuktracker-hub`, :8800, G7 `stats` 응답 확인 — 아래 "허브 배포")** ·
 SEAssist PR #306(PR-Y2) **미머지 → 닫음 예정, 이 레포로 이식(PR-Y2')** · Step 1 = SEAssist #304·#305(머지, 동결 시점 참조)
 
+## 실기기 G7 1차 (2026-09-23 오후, F1_JBY) — 업로더 스레드 미기동 결함 발견·수정
+
+- F1_JBY(관리자, 거상 3클라): `--selftest` 9줄 중 8 O + 기기 토큰 `!`(미등록) → 콘솔 프롬프트 등록 3회 실패(붙여넣은 코드가 12자 중
+  11자 — 이 기기의 콘솔 입력 잘림, 코드 쪽 읽기는 `readline`+strip 뿐) → `--invite-code` 인자로 **slot1 등록 성공**(`(슬롯 slot1)`),
+  `[패킷] 캡처 시작`·`흐름을 잡았습니다`·육의전 페이지 인식까지 정상. **그러나 허브에 0건**: `devices.py list` uploads 0, 접근 로그에
+  F1_JBY 의 `POST /api/market/observations` 가 한 번도 없음.
+- 원인: `agent.run` 이 `setup_market` 이 만든 `spool.Uploader` 를 **`start()` 하지 않았다** — 관측은 큐(`enqueue`)에 쌓이고 스레드가
+  없으니 스풀 파일도 POST 도 없고, 종료 때 `stop()` 만 불러 큐가 그대로 버려진다(스풀 이월도 없음). PR-Y1b 의 종단 스모크는 업로더를
+  직접 몰아 이 경로를 못 봤다. 수정: `run()` 이 `market.uploader.start()`(이 PR) + 회귀 테스트 2건(run 이 start 를 부른다 · 진짜
+  스레드가 큐 → 스풀 → POST). 이 실행에서 본 페이지들은 유실 — 새 exe 로 다시 열람해야 한다.
+- 남은 게이트: 새 exe 로 F1_JBY 재실행 → 육의전 열람 → 허브 `search`·uploads ≥1 → 스풀 재시도(허브 잠깐 내림) → 음성 0.
+
 ## 슬롯별 초대 코드 (2026-09-23, PR #15)
 
 - 배경: 사용자 제안 "invite_code 를 slot 별로 지정하는 게 인식·관리가 편할 것" — 코드 하나·임의 `device_id`·사후 별칭 구조는 등록

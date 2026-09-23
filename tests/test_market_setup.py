@@ -132,6 +132,32 @@ class WiringTest(_Base):
         market.observer._enqueue({"obs_id": "x"})
         self.assertEqual(market.uploader._q.qsize(), 1)
 
+    def test_started_uploader_thread_posts_enqueued_observations(self) -> None:
+        """배선이 만든 진짜 Uploader 를 띄우면 큐 → 스풀 → POST 까지 스스로 간다(run() 이 start 를 부른다는 전제)."""
+        import threading
+        from yuktracker import hub_client
+        posted = []
+        done = threading.Event()
+
+        def post(hub_url, token, device_id, observations):
+            posted.append((hub_url, token, device_id, observations))
+            done.set()
+            return hub_client.Response(200, {"ok": True, "accepted": len(observations)})
+
+        market = self._setup(A.RunOptions(hub_url="https://hub", invite_code="c"),
+                             register=self._register(), post=post)
+        market.uploader._batch_wait = 0.05
+        market.uploader.start()
+        try:
+            market.observer._enqueue({"obs_id": "x"})
+            self.assertTrue(done.wait(5.0), "업로더 스레드가 POST 하지 않았다")
+        finally:
+            market.uploader.stop()
+            market.uploader.join(timeout=5.0)
+        self.assertEqual(posted[0][0], "https://hub")
+        self.assertEqual([o["obs_id"] for o in posted[0][3]], ["x"])
+        self.assertEqual(market.uploader.uploaded, 1)
+
     def test_pending_spool_from_a_previous_run_is_announced(self) -> None:
         from yuktracker import spool as S
         S.Spool(self.spool).write([{"obs_id": "old"}])

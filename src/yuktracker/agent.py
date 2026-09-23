@@ -296,6 +296,10 @@ def run(opts: RunOptions, *, engine_factory=None, recorder=None,
         say(f"[패킷] 클라{slot_idx + 1} 이벤트 — {kind}")
 
     market = market_setup(opts, say, stdin)
+    if market.uploader is not None:
+        # 스레드를 **여기서** 띄운다 — 만들기만 하면 관측이 큐에 쌓인 채 전송도 스풀도 안 된다
+        # (실기기 G7 1차, 2026-09-23: 등록·페이지 인식은 됐는데 허브에 0건).
+        market.uploader.start()
 
     engine = factory(
         indexer.provide, status_cb=say, event_cb=event_cb,

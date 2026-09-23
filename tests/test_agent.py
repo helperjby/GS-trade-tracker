@@ -292,12 +292,16 @@ class ObserveModeTest(_Base):
 
         class _Up:
             def __init__(self):
+                self.started = False
                 self.stopped = False
                 self.uploaded = 3
                 self.quarantined = self.queue_dropped = 0
                 self.spool = SimpleNamespace(pending=lambda: [1, 2])
                 self.stopped_reason = ""
                 self.halted = False
+
+            def start(self):
+                self.started = True
 
             def stop(self):
                 self.stopped = True
@@ -313,6 +317,7 @@ class ObserveModeTest(_Base):
         opts = A.RunOptions(capture_min=None, pause_on_exit=False, attach_log=False)
         self.assertEqual(self._run(opts, "q\n", market_setup=setup), A.RC_OK)
         self.assertEqual(_EngineStub.instances[-1].market_cb, "MARKET_CB")
+        self.assertTrue(seen["market"].uploader.started, "업로더 스레드를 띄운다 — 안 띄우면 관측이 큐에서 썩는다(G7 1차)")
         self.assertTrue(seen["market"].uploader.stopped, "종료 때 업로더를 멈춘다")
         self.assertIn("[육의전] 관측 2쪽 12행 / 이름 미해석 1행 / 업로드 3건 · 대기 2배치",
                       self.out.getvalue())
