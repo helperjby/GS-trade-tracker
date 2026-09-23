@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import logging
 import os
+import queue
 import sys
 import threading
 import time
@@ -79,6 +80,87 @@ RC_NO_FLOW = 3     # 게임 흐름 대기 초과
 RC_WINDOW = 4      # 수집 창 열기 실패(폴더/writer)
 
 _console_log_attached = False
+
+
+class ConsoleOut:
+    """콘솔 출력 한 곳 — `say` 와 로거 핸들러가 여기로 온다. `start()` 뒤에는 **쓰기 스레드**가 대신 쓴다.
+
+    conhost 는 마우스 선택(QuickEdit) 중 콘솔 쓰기를 통째로 멈춘다. 스니퍼 스레드가 그 `print` 에 걸리면 패킷 처리·
+    관측 enqueue·업로드가 함께 멈추고 풀릴 때 몰려온다(F1_JBY G7 2차 2026-09-23: 페이지 인식 14:59 → 허브 15:01, 3분).
+    엔진이 뜨기 전(등록 프롬프트 등)은 순서가 중요하니 동기로 쓰고, 뜬 뒤에는 큐에 넣고 바로 돌아온다 — 표시만 밀린다.
+    큐가 차면(콘솔이 오래 막혀 있으면) 새 줄을 버리고 세어 두었다가 `stop()` 때 한 줄로 알린다.
+    """
+    MAX_LINES = 2000
+    _STOP = object()
+
+    def __init__(self, out: TextIO) -> None:
+        self._out = out
+        self._q: "queue.Queue" = queue.Queue(maxsize=self.MAX_LINES)
+        self._thread: Optional[threading.Thread] = None
+        self._lock = threading.Lock()
+        self.dropped = 0
+
+    def _emit(self, line: str) -> None:
+        with self._lock:
+            try:
+                print(line, file=self._out, flush=True)
+            except Exception:
+                pass                       # 콘솔이 닫힌 뒤의 출력 — 관측을 죽일 이유가 없다
+
+    def write_line(self, line: str) -> None:
+        if self._thread is None:
+            self._emit(line)
+            return
+        try:
+            self._q.put_nowait(line)
+        except queue.Full:
+            self.dropped += 1
+
+    def say(self, msg: str) -> None:
+        self.write_line(f"{time.strftime('%H:%M:%S')} {msg}")
+
+    def start(self) -> None:
+        if self._thread is not None:
+            return
+        self._thread = threading.Thread(target=self._run, name="YukTrackerConsoleOut", daemon=True)
+        self._thread.start()
+
+    def _run(self) -> None:
+        while True:
+            item = self._q.get()
+            if item is self._STOP:
+                return
+            self._emit(item)
+
+    def stop(self, timeout: float = 3.0) -> None:
+        """큐를 비우고 스레드를 끝낸다. 콘솔이 아직 막혀 있으면 기다리다 포기하고 동기 모드로 돌아간다 — 남은 줄은
+        스레드가 콘솔이 풀릴 때 마저 쓴다(데몬)."""
+        t = self._thread
+        if t is None:
+            return
+        try:
+            self._q.put(self._STOP, timeout=timeout)
+        except queue.Full:
+            pass
+        t.join(timeout)
+        self._thread = None
+        if self.dropped:
+            self._emit(f"[콘솔] 콘솔이 막혀 있는 동안 표시 줄 {self.dropped}개를 생략했습니다(관측·업로드는 계속됐습니다)")
+            self.dropped = 0
+
+
+class _ConsoleLogHandler(logging.Handler):
+    """로거 → ConsoleOut. StreamHandler 로 직접 쓰면 5분 헬스 INFO 줄이 스니퍼 스레드를 콘솔에 묶는다."""
+
+    def __init__(self, console: ConsoleOut) -> None:
+        super().__init__(logging.INFO)
+        self._console = console
+
+    def emit(self, record: logging.LogRecord) -> None:
+        try:
+            self._console.write_line(self.format(record))
+        except Exception:
+            pass
 
 
 class PidIndexer:
@@ -133,16 +215,15 @@ class RunOptions:
     upload: bool = True
 
 
-def _attach_console_log(out: TextIO) -> None:
+def _attach_console_log(console: ConsoleOut) -> None:
     """SEAssist 로거의 INFO(5분 헬스 줄)·WARNING 을 콘솔에. GUI 와 달리 INFO 소비자가 있으니
-    레벨을 INFO 로 내린다(logger.py 의 불변식 — INFO 는 소비 핸들러와 함께)."""
+    레벨을 INFO 로 내린다(logger.py 의 불변식 — INFO 는 소비 핸들러와 함께). 쓰기는 ConsoleOut 을 거친다."""
     global _console_log_attached
     if _console_log_attached:
         return
     log = get_logger()
     log.setLevel(logging.INFO)
-    handler = logging.StreamHandler(out)
-    handler.setLevel(logging.INFO)
+    handler = _ConsoleLogHandler(console)
     handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s", "%H:%M:%S"))
     log.addHandler(handler)
     _console_log_attached = True
@@ -299,14 +380,10 @@ def run(opts: RunOptions, *, engine_factory=None, recorder=None,
     recorder = recorder if recorder is not None else DISCOVERY_RECORDER
     indexer = indexer if indexer is not None else PidIndexer(game_pids)
     factory = engine_factory if engine_factory is not None else PacketStateSource
-    say_lock = threading.Lock()
-
-    def say(msg: str) -> None:
-        with say_lock:
-            print(f"{time.strftime('%H:%M:%S')} {msg}", file=out, flush=True)
-
+    console = ConsoleOut(out)
+    say = console.say
     if opts.attach_log:
-        _attach_console_log(out)
+        _attach_console_log(console)
 
     mode = (f"관측 + 수집 {opts.capture_min:g}분" if opts.capture_min else "관측")
     try:
@@ -381,6 +458,7 @@ def run(opts: RunOptions, *, engine_factory=None, recorder=None,
         # 엔진이 뜬 **뒤**, try 안에서 — 엔진 실패로 일찍 나가는 길에는 띄우지 않고, finally 가 반드시 close 한다.
         # 만들기만 하고 start 를 빠뜨리면 관측이 큐에 쌓인 채 전송도 스풀도 안 된다(실기기 G7 1차, 2026-09-23).
         market.start(say)
+        console.start()   # 여기부터 콘솔 쓰기는 별도 스레드 — 스니퍼·업로더가 막힌 콘솔에 붙들리지 않는다(G7 2차)
         if opts.capture_min:
             rc = _open_window(opts, engine, recorder, indexer, state, stop, say, clock, sleep)
         # 콘솔은 수집 창이 열린 **뒤에** 읽기 시작한다 — 그 전에 친 줄은 라벨이 될 창이 없다
@@ -423,6 +501,7 @@ def run(opts: RunOptions, *, engine_factory=None, recorder=None,
         except Exception:
             pass
         _say_upload_health(market, say)
+        console.stop()    # 밀린 표시를 비우고 동기 모드로 — 종료 안내는 바로 보이게
     return _finish(rc, opts, say, final, state)
 
 

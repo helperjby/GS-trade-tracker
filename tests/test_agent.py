@@ -399,6 +399,80 @@ class UploaderLifecycleTest(_Base):
             market.uploader.join(timeout=5.0)
 
 
+class ConsoleOutTest(unittest.TestCase):
+    """콘솔이 막혀도(QuickEdit 선택) 스니퍼·업로더 스레드의 say 는 돌아온다 — F1_JBY G7 2차의 3분 지연."""
+
+    class _Frozen(io.StringIO):
+        """conhost 흉내 — `release` 가 켜질 때까지 write 가 막힌다."""
+
+        def __init__(self) -> None:
+            super().__init__()
+            self.release = threading.Event()
+
+        def write(self, s: str) -> int:
+            self.release.wait(10.0)
+            return super().write(s)
+
+    def test_sync_before_start_and_async_after(self) -> None:
+        out = io.StringIO()
+        c = A.ConsoleOut(out)
+        c.say("먼저")
+        self.assertIn("먼저", out.getvalue())               # 시작 전엔 즉시(등록 프롬프트 순서)
+        c.start()
+        c.say("나중")
+        c.stop()
+        self.assertIn("나중", out.getvalue())
+        self.assertLess(out.getvalue().index("먼저"), out.getvalue().index("나중"))
+        c.say("멈춘 뒤")                                     # stop 뒤엔 다시 동기
+        self.assertIn("멈춘 뒤", out.getvalue())
+
+    def test_say_does_not_block_when_the_console_is_frozen(self) -> None:
+        out = self._Frozen()
+        c = A.ConsoleOut(out)
+        c.start()
+        t0 = time.monotonic()
+        for i in range(5):
+            c.say(f"line{i}")
+        self.assertLess(time.monotonic() - t0, 1.0, "막힌 콘솔에 say 가 붙들렸다")
+        self.assertEqual(c.dropped, 0)
+        out.release.set()
+        c.stop()
+        text = out.getvalue()
+        self.assertEqual([f"line{i}" in text for i in range(5)], [True] * 5)
+        self.assertLess(text.index("line0"), text.index("line4"), "순서 보존")
+
+    def test_overflow_is_counted_and_reported_once(self) -> None:
+        out = self._Frozen()
+        c = A.ConsoleOut(out)
+        c.MAX_LINES = 3
+        c._q = __import__("queue").Queue(maxsize=3)
+        c.start()
+        for i in range(10):
+            c.say(f"l{i}")
+        self.assertGreater(c.dropped, 0)
+        out.release.set()
+        c.stop()
+        self.assertIn("표시 줄", out.getvalue())
+        self.assertIn("생략", out.getvalue())
+        self.assertEqual(c.dropped, 0)
+
+    def test_log_handler_goes_through_console_out(self) -> None:
+        out = io.StringIO()
+        c = A.ConsoleOut(out)
+        h = A._ConsoleLogHandler(c)
+        h.setFormatter(__import__("logging").Formatter("%(levelname)s %(message)s"))
+        rec = __import__("logging").LogRecord("x", 20, __file__, 1, "헬스 줄", None, None)
+        h.emit(rec)
+        self.assertIn("INFO 헬스 줄", out.getvalue())
+
+    def test_run_flushes_console_before_returning(self) -> None:
+        """run() 이 finally 에서 stop() 하므로 호출자는 out 에서 종료 헬스까지 전부 본다."""
+        # 위의 run() 기반 테스트들이 out.getvalue() 로 '종료 헬스' 를 읽는 것이 곧 이 보장이다 — 여기서는 cli 의 QuickEdit
+        # 토글이 콘솔이 아닌 환경에서 조용히 넘어가는지만 본다.
+        from yuktracker import cli
+        cli._disable_quick_edit()
+
+
 class _SlowQuit:
     """stdin 흉내 — 이벤트가 켜질 때까지 기다렸다가 'q' 한 줄을 준 뒤 EOF."""
 

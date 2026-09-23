@@ -51,6 +51,24 @@ def _utf8_console() -> None:
                 pass
 
 
+def _disable_quick_edit() -> None:
+    """conhost 의 QuickEdit(마우스 드래그 선택)을 끈다 — 선택 중엔 콘솔 쓰기가 통째로 멈춰 표시가 밀린다(쓰기 스레드가
+    있어도 화면은 멈춘다). 관측 모드만: `--selftest` 는 화면을 복사해 보내야 하니 그대로 둔다. Windows Terminal 은 선택을
+    스스로 처리해 이 플래그와 무관하다. 콘솔이 아니면(파이프·서비스) 조용히 넘어간다."""
+    if sys.platform != "win32":
+        return
+    try:
+        import ctypes
+        k32 = ctypes.windll.kernel32
+        handle = k32.GetStdHandle(-10)               # STD_INPUT_HANDLE
+        mode = ctypes.c_uint32()
+        if not k32.GetConsoleMode(handle, ctypes.byref(mode)):
+            return
+        k32.SetConsoleMode(handle, (mode.value | 0x0080) & ~0x0040)   # ENABLE_EXTENDED_FLAGS | ~ENABLE_QUICK_EDIT_MODE
+    except Exception:
+        pass
+
+
 def main(argv: list[str] | None = None) -> int:
     _utf8_console()
     ap = build_parser()
@@ -84,4 +102,5 @@ def main(argv: list[str] | None = None) -> int:
                       pause_on_exit=not args.no_pause, hub_url=args.hub_url,
                       invite_code=args.invite_code, device_label=args.device_label,
                       client_dir=args.client_dir, upload=not args.no_upload)
+    _disable_quick_edit()
     return run(opts)
