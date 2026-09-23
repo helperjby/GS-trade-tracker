@@ -18,11 +18,11 @@ SEAssist PR #306(PR-Y2) **미머지 → 닫음 예정, 이 레포로 이식(PR-Y
   자정을 걸쳐 두 번 보면 둘이 같아져 등록일 확정. `/code-review 18 high` 7건 중 6건 반영(상한에 하한 합치기 = 느린 시계 기기·from>by·장기
   재관측 세 건 해결, SQL 날짜 산술 제거(열 비교 `_LIVE_WHERE`), ctor 정수 검증, 자정 경계 테스트 플레이크, 배포 config 의 옛 86400 기동 경고
   `_warn_short_max_age`); 1건(장기 물품을 단기로 보는 것)은 사용자 결정이라 문서 주석만.
-- 구현(스키마 무변경, API additive): `hub/db.py` `kst_midnight`·`_expires_by_sql`(정의 하나, SQL↔파이썬 일치 테스트) · `Database(listing_expiry_days=)`
+- 구현(스키마 무변경, API additive): `hub/db.py` `kst_midnight`·`expiry_bounds`(정의 하나; SQL 은 열 비교 `_LIVE_WHERE`, 파이썬 정의와 일치 테스트) · `Database(listing_expiry_days=)`
   · 행 dict 에 두 필드 · `search_market(..., now)` 는 `expires_by_ts > now` 필터 · `stats.live_listings`·`expiry_days`; `hub/server.py` 설정
   `listing_expiry_days`(2, 정수 ≥1 검증) · `search_max_age_sec` 기본 86400 → **259200**(72h 안전망) · search 응답 `expiry_days`. 봇 표시 형식에
   소멸 칸(`~M/D 00:00`, 확정이 아니면 `(M/D 부터 가능)`). 허브 테스트 115 passed, 관측기 186 passed, 벤더 체크 일치.
-- 후속: H-2609-11 → B 승격 뒤 행별 일수(2=장기 → 3일, `_expires_by_sql` CASE) · 봇(PR-Y4)은 `expires_from/by_ts` 소비.
+- 후속: H-2609-11 → B 승격 뒤 행별 일수(2=장기 → 3일, `expiry_bounds`·`_LIVE_WHERE` 에 flag45 분기) · 봇(PR-Y4)은 `expires_from/by_ts` 소비.
 
 ## 실기기 G7 1차 (2026-09-23 오후, F1_JBY) — 업로더 스레드 미기동 결함 발견·수정
 
