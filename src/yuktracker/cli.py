@@ -53,7 +53,13 @@ def _utf8_console() -> None:
 
 def main(argv: list[str] | None = None) -> int:
     _utf8_console()
-    args = build_parser().parse_args(argv)
+    ap = build_parser()
+    args = ap.parse_args(argv)
+    if args.selftest and (args.invite_code or args.device_label or args.capture is not None):
+        # 자가진단은 등록·수집을 하지 않는다 — 조용히 무시하면 "--invite-code 로 등록하라"는 안내를 따라 온
+        # 사람이 같은 경고를 또 본다.
+        ap.error("--selftest 는 등록·수집을 하지 않습니다 — 등록은 --selftest 없이 --invite-code 로, "
+                 "--capture 는 관측 실행에서 주세요")
     if sys.platform != "win32":
         print("이 프로그램은 Windows 전용입니다(Npcap).", file=sys.stderr)
         return 1

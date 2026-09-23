@@ -353,7 +353,9 @@ def run(opts: RunOptions, *, engine_factory=None, recorder=None,
         # (흐름 대기 중 중단은 Ctrl+C). 관측 대기 모드는 바로 읽는다.
         if rc == RC_OK:
             _Console(stdin, on_line).start()
-            status: dict = {}
+            # 이미 흐름을 잡은 채로 들어오면(수집 모드는 _open_window 가 기다렸다) 첫 틱이 시작을
+            # 다시 알리지 않는다 — 엔진의 `[패킷] 캡처 시작 — 서버 …` 줄이 그 증거다.
+            status: dict = {"capturing": True} if _capturing(engine) else {}
             while not stop.is_set():
                 sleep(_TICK_SEC)
                 line = _status_tick(status, capturing=_capturing(engine),
@@ -397,6 +399,8 @@ def _status_tick(state: dict, *, capturing: bool, pages: int, now: float) -> Opt
     "Npcap 이 다른 어댑터를 잡았다"·"잘 돌고 있다"를 구분해 주지 못한다. 그래서 ① 흐름 전이(잡음·끊김)는
     **그때 한 번**, ② 흐름을 못 잡은 동안은 ``FLOW_REMIND_SEC`` 마다, ③ 흐름은 잡았는데 육의전을 아직 못 본
     동안은 ``IDLE_REMIND_SEC`` 마다 한 줄씩 낸다. 첫 관측 뒤에는 ③ 이 멎는다(목록 줄이 대신 찍힌다).
+    ``capturing`` 은 캡처 핸들이 아니라 **흐름**(`_capturing`)이다 — "캡처 시작" 문구는 엔진의 상태 줄이
+    이미 쓰므로 여기서는 되풀이하지 않고 다음 행동(육의전 열기)을 말한다.
 
     ``state`` 는 호출자가 들고 있는 dict 하나다(키: 최근 캡처 상태·마지막 대기 안내·마지막 무관측 안내).
     """
@@ -406,7 +410,9 @@ def _status_tick(state: dict, *, capturing: bool, pages: int, now: float) -> Opt
         state["flow_said"] = now
         state["idle_said"] = now
         if capturing:
-            return "[패킷] 캡처 시작 — 육의전을 한 번 열면 여기에 목록이 찍힙니다"
+            if was is None:
+                return "[패킷] 게임 서버 흐름을 잡았습니다 — 육의전을 한 번 열면 여기에 목록이 찍힙니다"
+            return "[패킷] 게임 서버 흐름을 다시 잡았습니다 — 관측을 계속합니다"
         if was is None:
             return None        # 시작 직후의 미개통은 정상 — 첫 안내는 FLOW_REMIND_SEC 뒤에
         return "[패킷] 게임 서버 흐름이 끊겼습니다 — 거상이 켜져 있는지 확인하세요(다시 잡히면 알려 줍니다)"
@@ -422,8 +428,16 @@ def _status_tick(state: dict, *, capturing: bool, pages: int, now: float) -> Opt
 
 
 def _capturing(engine) -> bool:
+    """게임 서버 흐름이 살아 있는가 — 캡처 핸들이 열려 있고(`is_capturing`) 8000 흐름을 추적 중인가.
+
+    핸들만 보면 거상을 끄거나 접속이 끊겨도 True 로 남는다 — 핸들은 `stop()` 과 읽기 오류에서만 닫히고
+    하우스키핑은 필터를 넓힐 뿐이다. `tracked_flows` 는 pid·흐름이 사라지면 FLOW_MISS_LIMIT 번의
+    하우스키핑(REFRESH_SEC) 뒤 0 이 된다(종료 헬스 줄이 이미 읽는 값). 그래서 "끊겼습니다" 가 실제로 뜬다.
+    """
     try:
-        return bool(engine.is_capturing())
+        if not engine.is_capturing():
+            return False
+        return int(engine.health_snapshot().get("tracked_flows", 0)) > 0
     except Exception:
         return False
 

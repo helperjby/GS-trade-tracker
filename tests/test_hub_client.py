@@ -177,7 +177,25 @@ class PingTest(_ServerTest):
         resp = hub_client.status(self.url)
         self.assertEqual(_Handler.seen[0]["path"], "/")
         self.assertTrue(resp.ok)
+        self.assertTrue(hub_client.is_hub(resp))
         self.assertIn("응답", hub_client.describe_status(resp))
+
+    def test_status_200_from_something_else_is_not_the_hub(self) -> None:
+        """오타 주소·접속 포털의 200 HTML 은 '도달' 이 아니다 — 옛 판 안내로 이어지면 관리자가 헛걸음한다."""
+        _Handler.script.append((200, {"Content-Type": "text/html"}, b"<html>welcome</html>"))
+        resp = hub_client.status(self.url)
+        self.assertTrue(resp.ok)                 # 전송은 성공
+        self.assertFalse(hub_client.is_hub(resp))
+        self.assertIn("허브가 아닙니다", hub_client.describe_status(resp))
+
+    def test_transport_failures_read_the_same_everywhere(self) -> None:
+        tls = hub_client.Response(0, error="tls", text="CERTIFICATE_VERIFY_FAILED", tls=True)
+        down = hub_client.Response(0, error="network", text="연결 거부")
+        for resp, expect in ((tls, "인증서"), (down, "닿지 못했습니다")):
+            lines = {hub_client.describe_register(resp), hub_client.describe_status(resp),
+                     hub_client.describe_ping(resp)}
+            self.assertEqual(len(lines), 1, lines)   # 세 함수가 같은 문장
+            self.assertIn(expect, lines.pop())
 
     def test_old_hub_without_the_route_is_named_as_such(self) -> None:
         """허브가 아직 이 판이 아니면 404(직접 접속) 또는 403 not_public(공개 리스너) 이다 — 둘 다 같은 안내."""

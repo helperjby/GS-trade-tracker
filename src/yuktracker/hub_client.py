@@ -27,6 +27,9 @@ TIMEOUT_SEC = 15.0
 MAX_OBSERVATIONS = 100
 MAX_ROWS = 64
 USER_AGENT = "YukTracker"
+#: 허브 `GET /` 의 `service` 값(hub/server.py `SERVICE`) — 200 이 왔다고 허브인 것은 아니다(오타 주소의 다른
+#: 서비스·접속 포털의 HTML 도 200 이다). `--selftest` 의 "허브 도달" 은 이 값까지 맞아야 O 다.
+SERVICE = "yuktracker-hub"
 
 
 @dataclass(frozen=True)
@@ -126,15 +129,28 @@ def upload(hub_url: str, token: str, device_id: str, observations: list, *, open
                      token=token, opener=opener)
 
 
-def describe_register(resp: Response) -> str:
-    """등록 실패 사유 한 줄 — 사용자가 다음에 뭘 해야 하는지까지."""
-    if resp.ok:
-        return f"등록 완료 — 기기 {resp.body.get('device_id', '?')}"
+def is_hub(resp: Response) -> bool:
+    """`GET /` 응답이 **이 허브**인가 — 200 + `service == SERVICE`. 닿기만 한 200 은 아니다."""
+    return resp.ok and str(resp.body.get("service") or "") == SERVICE
+
+
+def _describe_transport(resp: Response) -> Optional[str]:
+    """전송 단계 실패(인증서·미도달)의 공통 문장 — 등록·상태·ping 세 곳이 같은 말을 해야 한다."""
     if resp.tls:
         return ("허브 인증서를 검증하지 못했습니다 — 이 PC 의 인증서 저장소가 낡았을 수 있습니다"
                 f" (Windows 업데이트 뒤 다시 시도). {resp.text}")
     if resp.status == 0:
         return f"허브에 닿지 못했습니다 — 주소·네트워크를 확인하세요. {resp.text}"
+    return None
+
+
+def describe_register(resp: Response) -> str:
+    """등록 실패 사유 한 줄 — 사용자가 다음에 뭘 해야 하는지까지."""
+    if resp.ok:
+        return f"등록 완료 — 기기 {resp.body.get('device_id', '?')}"
+    transport = _describe_transport(resp)
+    if transport:
+        return transport
     if resp.error == "bad_invite":
         return "초대 코드가 맞지 않습니다 — 관리자에게 받은 코드를 다시 확인하세요."
     if resp.error == "registration_full":
@@ -150,14 +166,15 @@ def describe_register(resp: Response) -> str:
 
 
 def describe_status(resp: Response) -> str:
-    """`GET /` 결과 한 줄 — 허브에 **닿는지**만 말한다(자격 문제는 ping 이 본다)."""
-    if resp.ok:
+    """`GET /` 결과 한 줄 — 허브에 **닿는지**와 **허브가 맞는지**(`is_hub`)만 말한다(자격 문제는 ping 이 본다)."""
+    if is_hub(resp):
         return f"허브가 응답했습니다 (v{resp.body.get('v', '?')})"
-    if resp.tls:
-        return ("허브 인증서를 검증하지 못했습니다 — 이 PC 의 인증서 저장소가 낡았을 수 있습니다"
-                f" (Windows 업데이트 뒤 다시 시도). {resp.text}")
-    if resp.status == 0:
-        return f"허브에 닿지 못했습니다 — 주소·네트워크를 확인하세요. {resp.text}"
+    transport = _describe_transport(resp)
+    if transport:
+        return transport
+    if resp.status == 200:
+        return ("허브 주소가 이상합니다 — 응답은 왔지만 육의전 허브가 아닙니다(다른 서비스나 접속 포털). "
+                "주소와 포트를 확인하세요.")
     return f"허브 주소가 이상합니다 — HTTP {resp.status} {resp.error or resp.text}".strip()
 
 
@@ -171,15 +188,13 @@ def describe_ping(resp: Response) -> str:
         label = str(resp.body.get("label") or "")
         return (f"허브가 기기 토큰을 확인했습니다 — 기기 {resp.body.get('device_id', '?')}"
                 + (f" ({label})" if label else ""))
-    if resp.tls:
-        return ("허브 인증서를 검증하지 못했습니다 — 이 PC 의 인증서 저장소가 낡았을 수 있습니다"
-                f" (Windows 업데이트 뒤 다시 시도). {resp.text}")
-    if resp.status == 0:
-        return f"허브에 닿지 못했습니다 — 주소·네트워크를 확인하세요. {resp.text}"
+    transport = _describe_transport(resp)
+    if transport:
+        return transport
     if resp.status == 404 or (resp.status == 403 and resp.error == "not_public"):
         return "허브에 토큰 확인 기능이 없습니다 — 허브가 옛 판입니다(관리자에게 업데이트를 요청하세요)."
     if resp.status == 401:
-        return "허브가 기기 토큰을 거부했습니다(401) — --invite-code 로 다시 등록하세요."
+        return "허브가 기기 토큰을 거부했습니다(401) — --selftest 없이 --invite-code 로 다시 등록하세요."
     if resp.status == 403 and resp.error == "device_revoked":
         return "이 기기가 허브 명단에서 제거됐습니다(403) — 관리자에게 문의하세요."
     if resp.status == 429:

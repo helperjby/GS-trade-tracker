@@ -15,8 +15,9 @@
 """
 from __future__ import annotations
 
+import os
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Callable, Optional, Sequence
 
 from . import __version__, app_config, hub_client, market_observer, paths, spool
@@ -79,7 +80,8 @@ class Probes:
     hub_status: Callable[[str], hub_client.Response]
     hub_ping: Callable[[str, str], hub_client.Response]
     spool_counts: Callable[[], tuple[int, int]]
-    env: dict = field(default_factory=dict)
+    #: 환경변수 표. **None = 실제 `os.environ`**, `{}` = 환경변수 없음(테스트 격리) — `resolve_hub_url` 과 같은 약속.
+    env: Optional[dict] = None
     #: CLI 오버라이드 — 판정 문구가 "어디서 온 주소인지"를 말할 수 있게 그대로 들고 있는다.
     cli_hub_url: str = ""
     upload: bool = True
@@ -93,7 +95,8 @@ def probe_capture(wait_sec: float = WAIT_SEC, *, factory=None, pids=None,
     """엔진을 띄워 캡처 핸들이 열리는지 보고 **반드시 멈춘다**(자가진단은 관측하지 않는다).
 
     `start()` 가 Npcap 유무를, 그 뒤 `is_capturing()` 이 게임 흐름(8000) 을 잡았는지를 말해 준다 —
-    둘은 다른 고장이라 줄도 둘이다.
+    둘은 다른 고장이라 줄도 둘이다. 거상 프로세스가 하나도 없으면 흐름을 기다리지 않는다 — 판정은 어차피
+    "거상이 꺼져 있어 확인하지 못했습니다" 이고, 지인이 15초 동안 멈춘 화면을 볼 이유가 없다.
     """
     from .seassist import pcap_ffi
     from .seassist.packet_state_source import PacketStateSource
@@ -106,9 +109,15 @@ def probe_capture(wait_sec: float = WAIT_SEC, *, factory=None, pids=None,
     engine = (factory or PacketStateSource)(provider)
     started, msg = engine.start()
     if not started:
-        return CaptureProbe(npcap_ok=False, npcap_msg=msg, npcap_reason=reason)
+        # Npcap 은 있는데 엔진이 못 떴다 — Npcap 사유 토큰(`reason` 은 여기서 "ok")을 붙이면 run() 이
+        # "Npcap 을 설치하라"로 접는다. 사유 없음(빈 토큰) + 엔진 문장으로 돌려 준다.
+        return CaptureProbe(npcap_ok=False, npcap_msg=msg, npcap_reason="")
     try:
-        deadline = clock() + max(0.0, float(wait_sec))
+        try:
+            have_game = bool(provider())
+        except Exception:
+            have_game = True
+        deadline = clock() + (max(0.0, float(wait_sec)) if have_game else 0.0)
         while not engine.is_capturing() and clock() < deadline:
             sleep(_POLL_SEC)
         health = engine.health_snapshot()
@@ -171,9 +180,10 @@ def run(p: Probes) -> tuple[list[Check], int]:
     if cap is None:
         add(Check(FAIL, "Npcap", "캡처를 확인하지 못했습니다(내부 오류)."))
     elif not cap.npcap_ok:
+        # 모르는 사유(엔진 시작 실패·새 토큰)에 "Npcap 을 설치하라"고 하지 않는다 — 멀쩡한 설치를 다시 깐다.
         add(Check(FAIL, "Npcap", NPCAP_HINTS.get(
             cap.npcap_reason,
-            f"{cap.npcap_msg} — https://npcap.com 에서 Npcap 을 설치한 뒤 다시 실행하세요.")))
+            f"{cap.npcap_msg} — 관리자 권한과 Npcap 설치 상태를 확인한 뒤 다시 실행하세요.")))
     else:
         add(Check(OK, "Npcap", cap.npcap_msg))
     if cap is None or not cap.npcap_ok:
@@ -196,7 +206,7 @@ def run(p: Probes) -> tuple[list[Check], int]:
               "거상 폴더가 특이하면 --client-dir 로 알려 주세요."))
 
     cfg = _safe(p.config, None) or app_config.Config()
-    hub_url = app_config.resolve_hub_url(p.cli_hub_url, cfg, p.env or None)
+    hub_url = app_config.resolve_hub_url(p.cli_hub_url, cfg, p.env)
     if not p.upload:
         add(Check(WARN, "허브 설정", "--no-upload — 업로드 없이 관측만 합니다."))
     elif not hub_url:
@@ -212,13 +222,15 @@ def run(p: Probes) -> tuple[list[Check], int]:
         add(Check(SKIP, "기기 토큰", why))
     else:
         resp = _safe(lambda: p.hub_status(hub_url), None)
-        reachable = bool(resp is not None and resp.ok)
+        # 200 만으로는 부족하다 — 오타 주소의 다른 서비스·포털 HTML 도 200 이다. 허브 서명(`service`)까지 본다.
+        reachable = bool(resp is not None and hub_client.is_hub(resp))
         add(Check(OK if reachable else FAIL, "허브 도달",
                   hub_client.describe_status(resp) if resp is not None
                   else "허브 상태를 확인하지 못했습니다(내부 오류)."))
         if not cfg.hub_token:
             add(Check(WARN, "기기 토큰",
-                      "아직 등록하지 않았습니다 — --invite-code <초대코드> 로 한 번만 등록하면 됩니다."))
+                      "아직 등록하지 않았습니다 — --selftest 없이 --invite-code <초대코드> 로 한 번만 등록하면 됩니다"
+                      "(자가진단은 등록하지 않습니다)."))
         elif not reachable:
             add(Check(SKIP, "기기 토큰", "허브에 닿은 뒤에 봅니다."))
         else:
@@ -248,7 +260,7 @@ def _ping_check(p: Probes, hub_url: str, cfg: app_config.Config) -> Check:
     if cfg.hub_device_id and seen and seen != cfg.hub_device_id:
         return Check(FAIL, "기기 토큰",
                      f"설정의 기기 id({cfg.hub_device_id})와 허브가 아는 id({seen})가 다릅니다 — "
-                     "--invite-code 로 다시 등록하세요.")
+                     "--selftest 없이 --invite-code 로 다시 등록하세요.")
     return Check(OK, "기기 토큰", hub_client.describe_ping(resp))
 
 
@@ -257,7 +269,8 @@ def _url_origin(p: Probes, cfg: app_config.Config) -> str:
         return "--hub-url"
     if cfg.hub_url:
         return "설정 파일"
-    if (p.env or {}).get(app_config.ENV_HUB_URL, "").strip():
+    environ = os.environ if p.env is None else p.env
+    if str(environ.get(app_config.ENV_HUB_URL, "") or "").strip():
         return "환경변수"
     return "빌드 주입"
 

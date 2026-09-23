@@ -118,14 +118,23 @@ SEAssist PR #306(PR-Y2) **미머지 → 닫음 예정, 이 레포로 이식(PR-Y
 - 실기기에서 드러나 고친 것: 비승격 실행의 Npcap 줄이 벤더 문구(`관리자 권한이 아닙니다 — 화면 감지를 계속 사용합니다`)에
   "npcap.com 에서 설치하세요"를 붙여 **멀쩡한 설치를 다시 깔라고** 말했다 → 사유 토큰별 안내(`NPCAP_HINTS`)로 교체
   (`not_elevated` 는 "관리자 권한으로 다시 실행").
-- 관측 모드 상태 줄(`agent._status_tick`, 순수): 흐름 전이 1회(`캡처 시작` / `끊겼습니다`), 미개통 30초마다, 흐름은 잡았는데
-  육의전 무관측이면 10분마다. 첫 관측 뒤 멎는다. 5분 SEAssist 헬스 INFO 줄은 그대로(개발자용).
+- 관측 모드 상태 줄(`agent._status_tick`, 순수): 흐름 전이 1회(`흐름을 잡았습니다` / `끊겼습니다` / `다시 잡았습니다`), 미개통
+  30초마다, 흐름은 잡았는데 육의전 무관측이면 10분마다. 첫 관측 뒤 멎는다. 5분 SEAssist 헬스 INFO 줄은 그대로(개발자용).
 - 문서: `docs/DEPLOY.md` **신규** — 0단계 Pi 판 확인, Funnel(=hub/README 링크), exe 빌드, **지인 복붙 안내문**, G7 게이트 6개,
   운영 확인(G7 2차), 실패 증상표. HUB-PROTOCOL §0 표·§3-7·§7, hub/README(라우트·게이트 ping), README·AGENTS·PLAN(PR-Y5 절).
 - 검증: 루트 **228 passed**(신규 29: selftest 18 · ping/status 해석 5 · 상태 줄 6) · hub **87 passed**(신규 5) ·
   진짜 허브 프로세스 2리스너 상대 **종단 스모크 12/12**(공개 stats 403 → 잘못된 토큰 401 → 등록 → ping 200 id 일치 →
   자가진단 rc 0 → `devices.py revoke` → ping 403 → 자가진단 rc 1 + 사유 → 관리 시크릿 ping 200) ·
   실기기 비승격 `--selftest`(거상 3개 검출·아이템 표 4,001행·권한/Npcap X·허브 미설정 경고, rc 1) · `--check` rc 0(벤더 무변경).
+- **`/code-review 13 high` 8건 전부 반영(2026-09-23)**: ① `_capturing` = 핸들 + 엔진 헬스 `tracked_flows > 0` — 핸들은 거상을
+  꺼도 `stop()`·읽기 오류에서만 닫혀 "끊겼습니다" 가 영영 안 떴다(하우스키핑은 FLOW_MISS_LIMIT 뒤 흐름을 0 으로), ② `Probes.env`
+  기본 **None = os.environ**, `{}` = 격리 — 빌드 PC 에 `YUKTRACKER_HUB_URL` 이 있으면 `build.bat` 의 테스트 단계가 깨지던 것,
+  `_url_origin` 도 같은 표를 본다, ③ "허브 도달" 은 200 이 아니라 `is_hub`(`service == yuktracker-hub`) — 오타 주소·포털 HTML 의
+  200 이 "옛 판" 안내로 이어져 관리자가 Pi 를 재배포하러 가던 경로 차단(`허브가 아닙니다` 줄), ④ 거상 프로세스 0 이면
+  `probe_capture` 가 15초를 기다리지 않는다, ⑤ 틱의 첫 줄에서 "캡처 시작" 문구 제거(엔진 상태 줄과 중복) + 루프 진입 때 이미
+  흐름이면 seed 해서 수집 모드에서 재알림 없음, ⑥ `--selftest` 에 `--invite-code`/`--device-label`/`--capture` 를 주면 parser
+  error(안내문도 "--selftest 없이"), ⑦ 인증서·미도달 문장은 `_describe_transport` 한 곳, ⑧ 엔진 시작 실패는 Npcap 사유 토큰
+  없이(빈 토큰) 돌려주고 모르는 사유의 fallback 도 "Npcap 을 설치하라" 가 아니다. 루트 **240 passed**(신규 12) · hub 87.
 - **Pi 판 확인 결과(2026-09-23)**: 떠 있는 컨테이너는 09-22 11:23 빌드 = **PR #10 이전 판**(compose 8800 만, `devices.py` 없음,
   `invite_code` 없음, `register`·`ping` 이 `401 unauthorized` — 옛 전역 Bearer 미들웨어). DEPLOY §0 표에 이 응답 행을 추가했다.
   **Funnel 은 443·8443 이 이미 같은 Pi 의 다른 서비스에 걸려 있다** → 사용자 결정: 공개 리스너는 **10000 번**
