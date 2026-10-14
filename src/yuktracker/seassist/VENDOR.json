@@ -53,12 +53,13 @@
     "VENDOR.json",
     "__init__.py",
     "config.py",
-    "packet_market.py"
+    "packet_market.py",
+    "packet_satong.py"
   ],
   "diverged": [
     {
       "file": "gersang_protocol.py",
-      "why": "PR-Y2' 육의전 프레이머 확장 — MARKET_OPCODES·is_market·market_row_count·MarketObservation, StreamFramer(observe_market=) 전량 대기(≤9+48×64B)·take_market·market_dropped/rejected, FlowDecoder 패스스루와 market_ts. 상류에는 없는 기능이다(SEAssist PR 미머지). 더해서 공개 레포 규칙에 따라 주석의 실기기명 5건을 합성 이름(DEV-1·DEV-2)으로 바꿨다."
+      "why": "PR-Y2' 육의전 프레이머 확장 — MARKET_OPCODES·is_market·market_row_count·MarketObservation, StreamFramer(observe_market=) 전량 대기(≤9+48×64B)·take_market·market_dropped/rejected, FlowDecoder 패스스루와 market_ts. 상류에는 없는 기능이다(SEAssist PR 미머지). 더해서 공개 레포 규칙에 따라 주석의 실기기명 5건을 합성 이름(DEV-1·DEV-2)으로 바꿨다. 2026-10-14 사통팔달 확장(H-2610-01) — OP_SATONG·SATONG_OPCODES·SATONG_BODY_LEN·is_satong·SatongObservation, StreamFramer(observe_satong=) 73B 전량 대기·take_satong·satong_dropped/rejected, 히스토그램 상한 통과, FlowDecoder 패스스루와 satong_ts."
     },
     {
       "file": "packet_discovery_ledger.py",
@@ -66,7 +67,7 @@
     },
     {
       "file": "packet_state_source.py",
-      "why": "PR-Y2' 엔진 배선 — PacketStateSource(market_cb=)·헬스 7종·세그먼트마다 observe_market 동기화·거부 델타 경고·헬스 줄 market/mrej. 상류에는 없는 기능이다(SEAssist PR 미머지)."
+      "why": "PR-Y2' 엔진 배선 — PacketStateSource(market_cb=)·헬스 7종·세그먼트마다 observe_market 동기화·거부 델타 경고·헬스 줄 market/mrej. 상류에는 없는 기능이다(SEAssist PR 미머지). 2026-10-14 사통팔달 배선(H-2610-01) — PacketStateSource(satong_cb=)·헬스 6종·세그먼트마다 observe_satong 동기화·거부 델타 경고·헬스 줄 satong/srej·흐름별 1f82=."
     }
   ]
 }

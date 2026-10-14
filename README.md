@@ -22,6 +22,8 @@
 - 관측기: 육의전 목록 관측 → 아이템 이름 해석 → 로컬 스풀 → **허브 업로드**까지 동작한다(첫 실행에 초대 코드로 등록).
   발굴용 수집 모드(`--capture`)와 아이템 표 추출 도구도 그대로 있다.
 - 허브: API·저장 계층·테스트·Docker 배포 완료.
+- 사통팔달(서버 전체 외치기, `0x1f82`): 운영자 PC 한 대가 `--satong <서버 번호>` 로 켜면 허브 `/api/satong/*` 로 올린다
+  (기본 꺼짐, 허브가 허용한 슬롯만 — [docs/PACKET-SATONG.md](docs/PACKET-SATONG.md), HUB-PROTOCOL §3-8).
 
 ## 실행
 
@@ -29,6 +31,7 @@
 run_dev.bat                               # 관측기 소스 실행(관리자 승격) — 관측·업로드
 run_dev.bat --invite-code CODE            # 첫 실행: 초대 코드로 기기 등록(코드는 저장하지 않는다)
 run_dev.bat --capture 5                   # 관측 + 5분 발굴 수집 창
+run_dev.bat --satong 7                    # 운영자 PC 전용: 사통팔달도 수집·업로드(서버 번호, 기본 꺼짐)
 run_dev.bat --selftest                    # 자가진단(권한·Npcap·거상·아이템 표·허브·토큰·스풀) — 안 될 때 이 화면을 보낸다
 build.bat                                 # 출처 선언 검사 → 테스트 → PyInstaller → dist\YukTracker.exe
 python tools\dump_item_names.py --check   # 클라이언트의 아이템 id→이름 표 추출 확인

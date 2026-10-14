@@ -25,13 +25,14 @@ class _EngineStub:
     instances: list["_EngineStub"] = []
 
     def __init__(self, pids_provider, *, status_cb=None, event_cb=None, segment_cb=None,
-                 market_cb=None, enter_anchor=True, start_ok=True, start_msg="패킷 스니퍼 시작",
-                 capturing=True):
+                 market_cb=None, satong_cb=None, enter_anchor=True, start_ok=True,
+                 start_msg="패킷 스니퍼 시작", capturing=True):
         self.pids_provider = pids_provider
         self.status_cb = status_cb
         self.event_cb = event_cb
         self.segment_cb = segment_cb
         self.market_cb = market_cb
+        self.satong_cb = satong_cb
         self.enter_anchor = enter_anchor
         self._start_ok = start_ok
         self._start_msg = start_msg
@@ -63,6 +64,11 @@ def _no_market(opts, say, stdin):
     return A.Market()
 
 
+def _no_satong(opts, say, market):
+    """사통 배선을 끈 `satong_setup` — 사용자 프로필의 설정을 읽지 않는다(배선 자체는 test_satong_observer.py)."""
+    return A.Satong()
+
+
 def _factory(**kw):
     def make(pids_provider, **engine_kw):
         return _EngineStub(pids_provider, **engine_kw, **kw)
@@ -83,12 +89,12 @@ class _Base(unittest.TestCase):
         self.out = io.StringIO()
 
     def _run(self, opts, stdin_text: str, factory=None, sleep=None, clock=None,
-             market_setup=_no_market, stdin_obj=None):
+             market_setup=_no_market, stdin_obj=None, satong_setup=_no_satong):
         return A.run(opts, engine_factory=factory or _factory(), recorder=self.recorder,
                      indexer=self.indexer, stdin=stdin_obj if stdin_obj is not None else io.StringIO(stdin_text),
                      out=self.out,
                      clock=clock or time.monotonic, sleep=sleep or (lambda s: time.sleep(0.02)),
-                     market_setup=market_setup)
+                     market_setup=market_setup, satong_setup=satong_setup)
 
     def _rows(self) -> list[dict]:
         d = self.root / "packet_discovery"
@@ -232,7 +238,8 @@ class CaptureModeTest(_Base):
         threading.Thread(target=fire, daemon=True).start()
         with mock.patch.object(A, "_install_console_close_hook", fake_install):
             rc = A.run(opts, engine_factory=_factory(), recorder=self.recorder, indexer=self.indexer,
-                       stdin=_Stdin(), out=self.out, sleep=lambda s: time.sleep(0.02))
+                       stdin=_Stdin(), out=self.out, sleep=lambda s: time.sleep(0.02),
+                       satong_setup=_no_satong)
         self.assertEqual(rc, A.RC_OK)
         self.assertTrue(captured["removed"])
         rows = self._rows()
@@ -331,6 +338,40 @@ class ObserveModeTest(_Base):
                          "start 는 엔진 기동 뒤·루프 전, stop 은 엔진 정지 뒤")
         self.assertIn("[육의전] 관측 2쪽 12행 / 이름 미해석 1행 / 업로드 3건 · 대기 2배치",
                       self.out.getvalue())
+
+    def test_satong_callback_uploader_and_engine_probe_are_wired(self) -> None:
+        """사통도 같은 수명 계약 — 엔진에 `satong_cb` 가 가고, 업로더는 엔진 기동 뒤 start·정지 뒤 stop, 하트비트의 연결 판정은
+        엔진의 흐름 상태를 본다(끊기면 미루봇이 '사통 없음'과 '수집기 죽음'을 못 가른다)."""
+        events = []
+
+        class _Up(SimpleNamespace):
+            def start(self):
+                events.append(("start", _EngineStub.instances[-1].started))
+
+            def stop(self):
+                events.append(("stop", _EngineStub.instances[-1].stopped))
+
+            def is_alive(self):
+                return False
+
+            def queue_size(self):
+                return 0
+
+        holder = {}
+
+        def setup(opts, say, market):
+            obs = SimpleNamespace(messages=5, duplicates=2, collector=lambda *, connected: {"client_connected": connected})
+            up = _Up(uploaded=5, heartbeats=3, quarantined=0, queue_dropped=0, halted=False, stopped_reason="",
+                     spool=SimpleNamespace(pending=lambda: []))
+            holder["satong"] = A.Satong(cb="SATONG_CB", uploader=up, observer=obs, server_id=7)
+            return holder["satong"]
+
+        opts = A.RunOptions(capture_min=None, pause_on_exit=False, attach_log=False)
+        self.assertEqual(self._run(opts, "q\n", satong_setup=setup), A.RC_OK)
+        self.assertEqual(_EngineStub.instances[-1].satong_cb, "SATONG_CB")
+        self.assertEqual(events, [("start", True), ("stop", True)])
+        self.assertTrue(holder["satong"].collector_status()["client_connected"], "스텁 엔진은 흐름 1개 — 연결됨")
+        self.assertIn("[사통] 서버 7 관측 5건 / 클라 간 사본 2건 / 업로드 5건 · 하트비트 3", self.out.getvalue())
 
 
 class UploaderLifecycleTest(_Base):

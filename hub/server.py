@@ -3,8 +3,9 @@
 라우팅: ``GET /``(무인증 상태 줄) · ``POST /api/market/register``(초대 코드 → 기기 토큰, 무 Bearer) ·
 ``POST /api/market/observations``(관측기 업로드 — 기기 토큰, 직접 접속이면 관리 시크릿도) ·
 ``GET /api/market/ping``(기기 토큰 확인 — 관측기 ``--selftest``) ·
-``GET /api/market/search`` · ``GET /api/market/listings`` · ``GET /api/market/stats``(관리 시크릿, **직접 접속 전용**).
-계약 정본은 docs/HUB-PROTOCOL.md.
+``GET /api/market/search`` · ``GET /api/market/listings`` · ``GET /api/market/stats``(관리 시크릿, **직접 접속 전용**) ·
+``POST /api/satong/observations``(사통 수집기 — 기기 토큰이면 ``satong_slots`` 슬롯만) · ``GET /api/satong/recent``(관리 시크릿,
+직접 접속 전용). 계약 정본은 docs/HUB-PROTOCOL.md.
 
 리스너 둘(``serve``): **관리 리스너** ``port``(8800) 는 전 라우트, Pi 안(봇)·LAN·tailnet 의 직접 접속용. **공개 리스너**
 ``public_port``(8801) 는 Tailscale Funnel 이 가리키는 포트 — 여기로 온 요청은 헤더와 무관하게 전부 "공개"라 관리 시크릿을
@@ -91,7 +92,18 @@ DEFAULTS = {
     #: IP 상한과 별개 키: IP 쪽은 실패까지 세는 무차별 대입 상한이고, 이쪽은 성공한 교체만 센다.
     "register_slot_limit_per_hour": 5,
     "upload_limit_per_min": 120,
+    #: 사통 업로드·하트비트의 기기당 분당 상한 — 육의전 버킷과 **따로** 센다(밀린 사통 스풀이 육의전 업로드를 429 로 막지 않게).
+    "satong_upload_limit_per_min": 60,
     "auth_fail_limit_per_min": 30,
+    #: 사통팔달(§3-8) — 업로드를 받을 슬롯 이름 목록(빈 목록 = 기기 토큰으로는 못 올린다, 관리 시크릿만). 사통은 그대로 카톡방에
+    #: 나가므로 지인 기기 아무나 올리게 두지 않는다(2026-10-14).
+    "satong_slots": [],
+    "retention_satong_days": 7,
+    #: 하트비트가 이보다 오래됐거나 클라가 끊겼으면 recent 의 `online` 이 false — 관측기 하트비트 60s 의 3배.
+    "satong_offline_sec": 180,
+    "max_satong_messages_per_request": 100,
+    "satong_recent_limit_default": 200,
+    "satong_recent_limit_max": 500,
 }
 #: 관측 100건 × 행 64 × 행당 ~180B ≈ 1.2MB — aiohttp 기본 1MiB 보다 넉넉하게.
 CLIENT_MAX_SIZE = 4 * 1024 * 1024
@@ -120,6 +132,9 @@ MAX_LABEL_LEN = 64
 #: 허브가 발급하는 id(`d-`+10hex)는 12자라 여유가 많지만, 관리 시크릿 업로드는 자유 문자열이다.
 MAX_OBS_ID_LEN = 128
 MAX_DEVICE_ID_LEN = MAX_OBS_ID_LEN - len(":") - 13 - len(":") - 12  # 101
+#: 사통 문자열 상한 — 프레임 필드는 보낸이 20B·내용 40B(cp949)라 글자 수는 그 이하다. 넉넉히 두되 무한은 아니다.
+MAX_SATONG_SENDER_LEN = 64
+MAX_SATONG_TEXT_LEN = 128
 
 CFG_KEY = web.AppKey("cfg", dict)
 DB_KEY = web.AppKey("db", db_mod.Database)
@@ -130,7 +145,7 @@ PUBLIC_KEY = web.AppKey("public_only", bool)
 DEVICE_KEY = "device"
 #: 라우트별 인증 모드 — 없는 경로는 "admin"(관리 시크릿, 직접 접속 전용).
 ROUTE_AUTH = {"/api/market/register": "open", "/api/market/observations": "device_or_admin",
-              "/api/market/ping": "device_or_admin"}
+              "/api/market/ping": "device_or_admin", "/api/satong/observations": "device_or_admin"}
 
 
 def load_config(path: str, env=None) -> dict:
@@ -159,7 +174,8 @@ def load_config(path: str, env=None) -> dict:
     if cfg["port"] == cfg["public_port"]:
         raise SystemExit("config: 'public_port' 는 'port' 와 달라야 합니다 — 공개 리스너(Funnel 대상)와 관리 리스너를 나눈다")
     for key in ("register_limit_per_hour", "register_slot_limit_per_hour", "upload_limit_per_min",
-                "auth_fail_limit_per_min", "listing_expiry_days"):
+                "satong_upload_limit_per_min", "auth_fail_limit_per_min", "listing_expiry_days", "retention_satong_days", "satong_offline_sec",
+                "max_satong_messages_per_request", "satong_recent_limit_default", "satong_recent_limit_max"):
         v = cfg.get(key)
         if not _is_int(v) or v < 1:
             raise SystemExit(f"config: '{key}' 는 1 이상의 정수여야 합니다")
@@ -169,6 +185,7 @@ def load_config(path: str, env=None) -> dict:
     if not isinstance(proxy_header, str) or not proxy_header.strip():
         raise SystemExit("config: 'proxy_header' 는 비어 있지 않은 문자열이어야 합니다")
     cfg["proxy_header"] = proxy_header.strip()
+    cfg["satong_slots"] = _load_satong_slots(cfg.get("satong_slots"), cfg["invite_codes"])
     db_path = env.get(ENV_DB_PATH) or cfg.get("db_path")
     if not isinstance(db_path, str) or not db_path:
         raise SystemExit("config: 'db_path' 가 비어 있습니다")
@@ -294,7 +311,9 @@ def _auth_middleware():
                 log.exception("기기 토큰 조회 실패")
                 return _storage_error(time.time())
             if dev is not None:
-                wait = limits["upload"].hit(dev["device_id"])      # 취소 검사보다 먼저 — 취소된 클라의 폭주도 기기 단위로 429
+                # 취소 검사보다 먼저 — 취소된 클라의 폭주도 기기 단위로 429. 사통은 버킷이 따로다(§0).
+                bucket = "satong_upload" if request.path.startswith("/api/satong/") else "upload"
+                wait = limits[bucket].hit(dev["device_id"])
                 if wait:
                     return _too_many(wait)
                 if dev["revoked_ts"] is not None:
@@ -368,6 +387,25 @@ def _load_invite_codes(raw, secret: str) -> dict:
         seen[code] = slot
         codes[slot] = code
     return codes
+
+
+def _load_satong_slots(raw, codes: dict) -> list:
+    """`satong_slots` 검증 → 슬롯 이름 목록(strip). 없음·null = 빈 목록. `invite_codes` 에 없는 이름은 거부 — 오타가 조용히
+    "아무도 못 올린다"가 되지 않게."""
+    if raw is None:
+        return []
+    if not isinstance(raw, list):
+        raise SystemExit("config: 'satong_slots' 는 슬롯 이름 목록이어야 합니다(예: [\"slot1\"], 빈 목록 = 기기 토큰 업로드 닫힘)")
+    out: list[str] = []
+    for item in raw:
+        name = item.strip() if isinstance(item, str) else ""
+        if not name:
+            raise SystemExit(f"config: 'satong_slots' 의 {item!r} — 비어 있지 않은 문자열이어야 합니다")
+        if name not in codes:
+            raise SystemExit(f"config: 'satong_slots' 의 '{name}' 이 'invite_codes' 에 없습니다 — 슬롯 이름을 확인하세요")
+        if name not in out:
+            out.append(name)
+    return out
 
 
 def slot_for_invite(codes: dict, invite: str) -> str | None:
@@ -460,6 +498,68 @@ def validate_upload(body, cfg: dict, now: float) -> tuple:
     return device_id.strip(), obs_list
 
 
+def clean_line(value: str) -> str:
+    """사통 보낸이·내용의 인쇄 불가 문자(줄바꿈·탭·터미널 이스케이프 등)를 공백으로 — 받은 글은 그대로 카톡방과 운영자 로그로
+    나가므로 줄을 끊어 가짜 줄을 만들 수 없게 한다(2026-10-14 리뷰). 글자 수는 바뀌지 않는다."""
+    return "".join(ch if ch.isprintable() else " " for ch in value)
+
+
+def validate_satong_upload(body, cfg: dict, now: float) -> tuple:
+    """사통 POST 본문 전건 검증 → (device_id, server_id, collector, messages). 첫 위반에서 ``_Bad``.
+
+    ``messages`` 는 빈 목록이 정상이다(하트비트). ``collector.client_connected`` 는 필수 bool — 봇의 오프라인 판정 근거라
+    빠지면 거부한다. 메시지의 미지 키는 통과(payload_json 에 남는다). ``agent_ts`` 범위는 육의전과 같은 이유로 검사한다
+    (보존 기간 이전·하루 넘게 미래 = 400). 통과한 메시지는 보낸이·내용을 `clean_line` 으로 정리한 **사본**으로 돌려준다.
+    """
+    if not isinstance(body, dict):
+        raise _Bad()
+    device_id = body.get("device_id")
+    if not isinstance(device_id, str) or not device_id.strip() or len(device_id) > MAX_DEVICE_ID_LEN:
+        raise _Bad(field="device_id")
+    server_id = body.get("server_id")
+    if not _is_int(server_id) or server_id < 0:
+        raise _Bad(field="server_id")
+    collector = body.get("collector")
+    if not isinstance(collector, dict):
+        raise _Bad(field="collector")
+    if not isinstance(collector.get("client_connected"), bool):
+        raise _Bad(field="collector.client_connected")
+    for k in ("last_message_ts", "agent_ts"):
+        v = collector.get(k)
+        if v is not None and not _is_num(v):
+            raise _Bad(field=f"collector.{k}")
+    if not _is_opt_int(collector.get("messages")):
+        raise _Bad(field="collector.messages")
+    messages = body.get("messages")
+    if not isinstance(messages, list):
+        raise _Bad(field="messages")
+    if len(messages) > int(cfg["max_satong_messages_per_request"]):
+        raise _Bad("too_many", field="messages")
+    oldest = now - int(cfg["retention_satong_days"]) * 86400
+    newest = now + float(cfg["max_agent_ts_ahead_sec"])
+    for i, msg in enumerate(messages):
+        if not isinstance(msg, dict):
+            raise _Bad(index=i)
+        obs_id = msg.get("obs_id")
+        if not isinstance(obs_id, str) or not 1 <= len(obs_id) <= MAX_OBS_ID_LEN:
+            raise _Bad(index=i, field="obs_id")
+        agent_ts = msg.get("agent_ts")
+        if not _is_num(agent_ts):
+            raise _Bad(index=i, field="agent_ts")
+        if not oldest <= float(agent_ts) <= newest:
+            raise _Bad("agent_ts_out_of_range", index=i, field="agent_ts")
+        sender = msg.get("sender")
+        if not _is_str_max(sender, MAX_SATONG_SENDER_LEN) or not clean_line(sender).strip():
+            raise _Bad(index=i, field="sender")
+        if not _is_str_max(msg.get("text"), MAX_SATONG_TEXT_LEN):
+            raise _Bad(index=i, field="text")
+    messages = [{**m, "sender": clean_line(m["sender"]), "text": clean_line(m["text"])} for m in messages]
+    clean = {"client_connected": collector["client_connected"],
+             "last_message_ts": collector.get("last_message_ts"),
+             "messages": collector.get("messages"), "agent_ts": collector.get("agent_ts")}
+    return device_id.strip(), int(server_id), clean, messages
+
+
 def validate_register(body) -> tuple:
     """등록 본문 → (invite_code, label). 코드는 앞뒤 공백을 벗긴다(콘솔 프롬프트에 붙은 공백). label 은 선택(없음·null = ""),
     인쇄 가능 문자 ≤64 — 운영자 터미널(devices.py list)에 그대로 찍히므로 제어 문자(터미널 이스케이프)는 거부한다."""
@@ -496,18 +596,18 @@ def _q_num(request: web.Request, key: str, default, cast, lo=None, hi=None):
     return v
 
 
-def _q_item_id(request: web.Request):
-    """``item_id`` 는 있으면 정확해야 한다 — 음수·비정수·i64 초과는 400. 조용히 0 으로 깎거나 버리면 틀린 결과가
-    옳은 것처럼 나간다(예: ``item_id=abc&q=봉인`` 이 id 필터 없이 전부 반환)."""
-    raw = request.query.get("item_id")
+def _q_id(request: web.Request, key: str):
+    """id 류 쿼리(``item_id``·``server_id``·``since_id``) — 없으면 None, 있으면 0~i64 정수여야 한다(아니면 400). 조용히 0 으로
+    깎거나 버리면 틀린 결과가 옳은 것처럼 나간다(예: ``item_id=abc&q=봉인`` 이 id 필터 없이 전부 반환). 필수 여부는 호출자 몫."""
+    raw = request.query.get(key)
     if raw is None or raw == "":
         return None
     try:
         v = int(raw)
     except ValueError:
-        raise _Bad(field="item_id") from None
+        raise _Bad(field=key) from None
     if not 0 <= v <= I64_MAX:
-        raise _Bad(field="item_id")
+        raise _Bad(field=key)
     return v
 
 
@@ -640,12 +740,75 @@ async def api_market_observations(request: web.Request) -> web.Response:
                               "rows": rows, "server_time": now})
 
 
+async def api_satong_observations(request: web.Request) -> web.Response:
+    """사통 수집기 업로드·하트비트(§3-8). 기기 토큰이면 그 기기의 슬롯이 ``satong_slots`` 에 있어야 한다 — 사통은 그대로
+    카톡방에 나가므로 지인 기기 아무나 올리지 못하게(403 ``satong_not_allowed``, 관측기는 업로더를 멈춘다)."""
+    cfg = request.app[CFG_KEY]
+    db = request.app[DB_KEY]
+    dev = request.get(DEVICE_KEY)
+    now = time.time()
+    if dev is not None and (dev.get("slot") or "") not in cfg["satong_slots"]:
+        _touch_device(db, dev, now)
+        return web.json_response({"ok": False, "error": "satong_not_allowed"}, status=403)
+    try:
+        body = await request.json()
+    except (ValueError, LookupError):
+        body = None
+    try:
+        device_id, server_id, collector, messages = validate_satong_upload(body, cfg, now)
+    except _Bad as e:
+        _touch_device(db, dev, now)
+        return e.response()
+    if dev is not None and device_id != dev["device_id"]:
+        _touch_device(db, dev, now)
+        return web.json_response({"ok": False, "error": "device_mismatch", "device_id": dev["device_id"]}, status=403)
+    try:
+        accepted, duplicates, merged = db.insert_satong(
+            device_id, server_id, collector, messages, now, seen_device=dev["device_id"] if dev is not None else None)
+    except sqlite3.Error:
+        log.exception("사통 저장 실패: %s", device_id)
+        return _storage_error(now)
+    if messages:
+        log.info("사통 수신: %s%s 서버 %d 신규 %d / 병합 %d / 중복 %d", device_id,
+                 f"({_device_name(dev)})" if _device_name(dev) else "", server_id, accepted, merged, duplicates)
+    return web.json_response({"ok": True, "accepted": accepted, "merged": merged, "duplicates": duplicates,
+                              "server_time": now})
+
+
+async def api_satong_recent(request: web.Request) -> web.Response:
+    """봇의 사통 폴링(§3-8) — 메시지(id 오름차순)와 수집기 상태. ``online`` 은 봇이 그대로 쓰는 판정이다:
+    하트비트가 ``satong_offline_sec`` 안이고 클라가 연결된 수집기가 하나라도 있으면 true."""
+    cfg = request.app[CFG_KEY]
+    try:
+        server_id = _q_id(request, "server_id")
+        if server_id is None:
+            raise _Bad(field="server_id")
+        since_id = _q_id(request, "since_id")
+    except _Bad as e:
+        return e.response()
+    limit = _q_num(request, "limit", int(cfg["satong_recent_limit_default"]), int, 1,
+                   int(cfg["satong_recent_limit_max"]))
+    now = time.time()
+    database = request.app[DB_KEY]
+    messages = database.satong_recent(server_id, limit, since_id)
+    collectors = database.satong_collectors(server_id)
+    offline_sec = float(cfg["satong_offline_sec"])
+    for c in collectors:
+        c["heartbeat_age_sec"] = max(0.0, now - float(c["last_heartbeat_ts"]))
+        c["online"] = c["client_connected"] and c["heartbeat_age_sec"] <= offline_sec
+    return web.json_response({"v": PROTO_V, "server_time": now, "server_id": server_id, "since_id": since_id,
+                              "limit": limit, "online": any(c["online"] for c in collectors),
+                              "offline_sec": offline_sec, "collectors": collectors,
+                              "last_message_ts": database.satong_last_seen(server_id),
+                              "count": len(messages), "messages": messages})
+
+
 async def api_market_search(request: web.Request) -> web.Response:
     cfg = request.app[CFG_KEY]
     q = request.query.get("q", "")
     q_norm = db_mod.norm_item_name(q)
     try:
-        item_id = _q_item_id(request)
+        item_id = _q_id(request, "item_id")
         if not q_norm and item_id is None:
             raise _Bad(field="q")
     except _Bad as e:
@@ -689,9 +852,13 @@ async def _retention_loop(app: web.Application) -> None:
     cfg = app[CFG_KEY]
     while True:
         try:
-            n_o, n_l = app[DB_KEY].prune(time.time(), int(cfg["retention_market_days"]))
+            now = time.time()
+            n_o, n_l = app[DB_KEY].prune(now, int(cfg["retention_market_days"]))
             if n_o or n_l:
                 log.info("retention: 관측 %d건 / 목록 %d건 삭제", n_o, n_l)
+            n_m, n_i = app[DB_KEY].prune_satong(now, int(cfg["retention_satong_days"]))
+            if n_m or n_i:
+                log.info("retention: 사통 %d건 / obs_id %d건 삭제", n_m, n_i)
         except Exception:
             log.exception("retention 오류 — 태스크 유지")
         await asyncio.sleep(86400)
@@ -708,6 +875,7 @@ def make_limiters(cfg: dict) -> dict:
             # 슬롯당 같은 상한 — 코드가 새면 한 슬롯을 시간당 N번 이상 교체해 명단을 불리지 못한다(정원 검사 폐지의 보완).
             "register_slot": RateLimiter(cfg["register_slot_limit_per_hour"], 3600),
             "upload": RateLimiter(cfg["upload_limit_per_min"], 60),
+            "satong_upload": RateLimiter(cfg["satong_upload_limit_per_min"], 60),
             "auth_fail": RateLimiter(cfg["auth_fail_limit_per_min"], 60)}
 
 
@@ -754,6 +922,8 @@ def make_app(cfg: dict, database: db_mod.Database | None = None, *, limits: dict
     app.router.add_get("/api/market/search", api_market_search)
     app.router.add_get("/api/market/listings", api_market_listings)
     app.router.add_get("/api/market/stats", api_market_stats)
+    app.router.add_post("/api/satong/observations", api_satong_observations)
+    app.router.add_get("/api/satong/recent", api_satong_recent)
 
     async def _lifecycle(app_: web.Application):
         task = asyncio.create_task(_retention_loop(app_)) if retention else None
@@ -809,10 +979,10 @@ def main(argv=None) -> None:
     logging.basicConfig(level=logging.INFO,
                         format="%(asctime)s %(levelname)s %(name)s %(message)s")
     cfg = load_config(args.config)
-    log.info("db_path=%s host=%s port=%s public_port=%s registration=%s admin_public=%s proxy_header=%s",
+    log.info("db_path=%s host=%s port=%s public_port=%s registration=%s admin_public=%s proxy_header=%s satong_slots=%s",
              cfg["db_path"], cfg["host"], cfg["port"], cfg["public_port"],
              f"open({len(cfg['invite_codes'])} slots)" if cfg["invite_codes"] else "closed",
-             cfg["admin_public"], cfg["proxy_header"])
+             cfg["admin_public"], cfg["proxy_header"], ",".join(cfg["satong_slots"]) or "-")
     try:
         asyncio.run(serve(cfg))
     except KeyboardInterrupt:

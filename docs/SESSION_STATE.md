@@ -1,12 +1,22 @@
 # Session State
 
-Updated: 2026-09-23 저녁 (Asia/Seoul) — **허브 소멸 추정(아래 절, PR 대기) · 실기기 G7 통과(F1_JBY; 결함 2건 수정 PR #16 머지) · 슬롯별 초대 코드 PR #15 머지·Pi 7슬롯 재배포 — 다음은 소멸 PR 머지·Pi 재배포 → 지인 전달 → PR-Y4 미루봇** ·
+Updated: 2026-10-14 (Asia/Seoul) — **사통팔달 수집 PR(아래 첫 절) · 소멸 추정 PR #18 머지(3cb2d8a, Pi 재배포 대기)** · 이전: 2026-09-23 저녁 — **허브 소멸 추정(아래 절, PR 대기) · 실기기 G7 통과(<디바이스>; 결함 2건 수정 PR #16 머지) · 슬롯별 초대 코드 PR #15 머지·Pi 7슬롯 재배포 — 다음은 소멸 PR 머지·Pi 재배포 → 지인 전달 → PR-Y4 미루봇** ·
 PR-Y2' 이식 + PR-Y1b 관측·업로드 완료(아래 두 절) ·
 허브 공개 업로드 PR #10 **머지 완료** ·
 **방향 전환(사용자 결정 2026-09-22): SEAssist 레포에는 더 이상 머지하지 않는다.**
 **PR #5(PR-Y2b 아이템 표)·PR #6(PR-Y3 허브) 머지 완료**(https://github.com/helperjby/GS-trade-tracker/pull/5 840d8d3 · https://github.com/helperjby/GS-trade-tracker/pull/6 1ed43ef,
 각 `/code-review high` 15건·14건 전부 반영) · **허브 Pi 배포 완료(2026-09-22 11:24, `~/yuktracker-hub`, :8800, G7 `stats` 응답 확인 — 아래 "허브 배포")** ·
 SEAssist PR #306(PR-Y2) **미머지 → 닫음 예정, 이 레포로 이식(PR-Y2')** · Step 1 = SEAssist #304·#305(머지, 동결 시점 참조)
+
+## 사통팔달 수집 — `0x1f82` 관측 + 허브 `/api/satong/*` (2026-10-14, 브랜치 `feat/satong-collector-20261014`)
+
+- 계기: 미루봇 사통 원본(외부 기록 사이트)이 10-06 부터 차단. 계획 PLAN §PR-S1(사용자 결정: 허브 경유 · YukTracker 확장 기본 꺼짐 · 자원 실측 게이트).
+- 0단계 통과: 자원 8h(클라 3개 PC, `--no-upload`) 관측기 RSS 22.0→22.6MB · CPU 194s(1코어 0.68%) · 핸들·스레드 평탄 — PC 부하는 게임 클라 쪽.
+  첫 실측(다른 PC)은 콘솔 선택 모드로 프로세스가 멎어 무효(옛 exe 추정 — 현 exe 는 드래그 선택이 안 됨을 확인). `0x1f82` 대조는 PACKET-SATONG §4.
+- PR #18(허브 소멸 추정) 먼저 머지(사용자 결정 10-14, 3cb2d8a) → 이 브랜치는 그 main 위.
+- 구현: PLAN §PR-S1. 코퍼스 재생(119창): 수용 252 · 거부 0 · 파싱 실패 0 · anomaly 0. 원시 바이트 검색 334 는 TCP 재전송 사본까지 센 값.
+- 다음 행동: 리뷰·머지 → Pi 허브 재배포(`config.json` 에 `satong_slots: ["<운영자 슬롯>"]`, 소멸 추정의 `search_max_age_sec` 259200 도 이때) →
+  exe 빌드 → 운영자 PC `--satong 7` → DEPLOY §6 게이트 → 미루봇-IRIS PR.
 
 ## 허브 소멸 추정 — 관측 시각으로 목록 소멸 경계 계산 (2026-09-23 저녁, 브랜치 `feat/hub-listing-expiry-20260923`)
 

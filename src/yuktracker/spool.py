@@ -230,6 +230,10 @@ class Uploader(threading.Thread):
                 return "quarantine"
             self._say(f"[허브] {why}")
             return action
+        return self.react(action, why, resp)
+
+    def react(self, action: str, why: str, resp: hub_client.Response) -> str:
+        """파일과 무관한 세 행동(`stop`·`wait`·`retry`)의 처리 — 여러 파일을 묶어 보내는 하위 클래스도 같은 규칙을 쓴다."""
         if action == "stop":
             self.stopped_reason = why
             self._say(f"[허브] {why}")

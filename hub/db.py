@@ -18,6 +18,16 @@
   아는 사람 최대 7명에게 직접 배포, 활성 여부에 따른 자동 제외 없음). ``alias`` 는 관리자가 붙이는 별칭
   (``label`` 은 기기가 등록 때 스스로 적은 값이라 신뢰하지 않는다).
 
+사통팔달 표 셋(2026-10-14, HUB-PROTOCOL §1·§3-8 — 육의전 표와 독립):
+- ``satong_messages`` — 외치기 1건 = 1행. ``id`` 는 AUTOINCREMENT 라 지운 번호를 다시 쓰지 않는다(소비자의 커서).
+  같은 (서버, 보낸이, 내용)이 ``SATONG_MERGE_SEC`` 안에 다시 오면(같은 PC 의 다른 클라·다른 수집 PC) 새 행 대신
+  ``seen_count`` 만 올린다. 서버는 사통을 약 15초 간격으로 내보내므로 창이 그보다 짧으면 진짜 반복 외치기는 따로 남는다.
+  창의 기준은 **첫 사본의 시각 ``anchor_ts``(고정)** 다 — 병합마다 넓어지는 [first, last] 에 대면 시계가 어긋난 두 수집
+  PC 의 사본이 15초 간격의 두 외치기를 사슬처럼 한 행으로 잇는다.
+- ``satong_obs_ids`` — 받은 ``obs_id``(재전송 dedup). 병합된 사본도 여기 남아 같은 배치가 다시 와도 두 번 세지 않는다.
+- ``satong_collectors`` — 수집 기기마다 마지막 하트비트(허브 수신 시각)와 클라 연결 상태. 봇은 이것으로 "사통이 없다"와
+  "수집기가 죽었다"를 가른다.
+
 writer: market 표는 서버 이벤트루프 하나만 쓴다. ``devices`` 는 ``devices.py``(관리 CLI, 별도 프로세스)가 드물게
 한 행 UPDATE 를 넣는다 — WAL + busy timeout(``Database(timeout=)``) 아래서 서버의 업로드 트랜잭션과 안전하게 교차하고,
 최악은 서버 쪽 ``storage_error``(500) 한 번인데 관측기는 5xx 를 재시도한다.
@@ -72,12 +82,33 @@ CREATE TABLE IF NOT EXISTS devices (
   created_ts REAL NOT NULL, created_ip TEXT,
   last_seen_ts REAL, upload_count INTEGER NOT NULL DEFAULT 0,
   revoked_ts REAL, note TEXT NOT NULL DEFAULT '');
+CREATE TABLE IF NOT EXISTS satong_messages (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  server_id INTEGER NOT NULL, sender TEXT NOT NULL, text TEXT NOT NULL,
+  anchor_ts REAL NOT NULL,
+  first_seen_ts REAL NOT NULL, last_seen_ts REAL NOT NULL, seen_count INTEGER NOT NULL DEFAULT 1,
+  first_device TEXT NOT NULL, last_obs_id TEXT NOT NULL, recv_ts REAL NOT NULL,
+  payload_json TEXT NOT NULL DEFAULT '{}');
+CREATE INDEX IF NOT EXISTS idx_satong_merge ON satong_messages(server_id, sender, text, anchor_ts);
+CREATE INDEX IF NOT EXISTS idx_satong_server_id ON satong_messages(server_id, id);
+CREATE INDEX IF NOT EXISTS idx_satong_server_seen ON satong_messages(server_id, last_seen_ts);
+CREATE TABLE IF NOT EXISTS satong_obs_ids (
+  obs_id TEXT PRIMARY KEY, message_id INTEGER NOT NULL, recv_ts REAL NOT NULL);
+CREATE TABLE IF NOT EXISTS satong_collectors (
+  device_id TEXT PRIMARY KEY, server_id INTEGER NOT NULL,
+  last_heartbeat_ts REAL NOT NULL, client_connected INTEGER NOT NULL,
+  last_message_ts REAL, messages INTEGER, agent_ts REAL);
 """
 
 DEFAULT_CATEGORY = "item"
 #: 행에서 ``market_listings`` 로 정규화되는 키 — payload_json 에는 이 밖의(미지) 키만 남긴다.
 ROW_NORMALIZED_KEYS = frozenset({"listing_id", "item_id", "item_name", "quantity", "price", "seller",
                                  "category", "flag45", "flag46"})
+#: 사통 병합 창(초) — 같은 (서버, 보낸이, 내용)이 이 안에 다시 오면 한 건. 서버 큐 간격(≈15s)보다 짧게(관측기의
+#: 클라 간 중복 창 `satong_observer.DEDUP_SEC` 과 같은 값 — 둘은 다른 배포 단위라 상수를 공유하지 않는다).
+SATONG_MERGE_SEC = 10.0
+#: 사통 메시지에서 열로 정규화되는 키 — payload_json 에는 이 밖의(미지·진단) 키만 남긴다.
+SATONG_NORMALIZED_KEYS = frozenset({"obs_id", "agent_ts", "sender", "text"})
 #: device_id 생성 시도 상한 — 40비트 난수라 충돌은 사실상 없지만 무한 루프는 두지 않는다.
 DEVICE_ID_ATTEMPTS = 5
 #: "등록된 기기"의 **한** 정의 — 정원 판정(server)·stats·CLI 가 전부 이 조건을 쓴다. 파라미터 없음.
@@ -508,6 +539,103 @@ class Database:
             "devices_revoked": one("SELECT COUNT(*) FROM devices WHERE revoked_ts IS NOT NULL"),
             "devices_orphaned": len(self.orphan_devices(slots)),
         }
+
+    # ---- 사통팔달 (POST /api/satong/observations · GET /api/satong/recent) ----
+
+    def insert_satong(self, device_id: str, server_id: int, collector: dict, messages: list, recv_ts: float,
+                      seen_device: str | None = None) -> tuple:
+        """검증이 끝난 사통 배치를 **트랜잭션 1개**로 반영 → (새 행 수, 재전송 중복 수, 병합 수).
+
+        메시지마다: ``obs_id`` 가 이미 있으면 재전송 → 중복. 없으면 ``seen_ts = min(agent_ts, recv_ts)`` 가 같은
+        (서버, 보낸이, 내용) 행의 ``anchor_ts`` 와 ``SATONG_MERGE_SEC`` 안이면 병합(``seen_count`` +1, first/last 갱신 —
+        ``anchor_ts`` 는 그대로), 없으면 새 행. 수집기 상태(``collector``)는 메시지가 없어도(하트비트) ``satong_collectors``
+        에 upsert 한다. ``seen_device`` 가 있으면 기기의 ``last_seen_ts`` 를 쓰고, ``upload_count`` 는 **메시지가 있을 때만**
+        올린다(60초 하트비트가 육의전 활동 지표를 부풀리지 않게).
+        """
+        accepted = duplicates = merged = 0
+        with self._tx() as con:
+            for msg in messages:
+                obs_id = msg["obs_id"]
+                if con.execute("SELECT 1 FROM satong_obs_ids WHERE obs_id = ?", (obs_id,)).fetchone():
+                    duplicates += 1
+                    continue
+                seen_ts = min(float(msg["agent_ts"]), recv_ts)
+                sender, text = str(msg["sender"]), str(msg["text"])
+                row = con.execute(
+                    "SELECT id FROM satong_messages WHERE server_id = ? AND sender = ? AND text = ? "
+                    "AND anchor_ts > ? AND anchor_ts < ? ORDER BY ABS(anchor_ts - ?), id LIMIT 1",
+                    (int(server_id), sender, text, seen_ts - SATONG_MERGE_SEC, seen_ts + SATONG_MERGE_SEC,
+                     seen_ts)).fetchone()
+                if row is not None:
+                    message_id = int(row[0])
+                    con.execute("UPDATE satong_messages SET first_seen_ts = MIN(first_seen_ts, ?), "
+                                "last_seen_ts = MAX(last_seen_ts, ?), seen_count = seen_count + 1, last_obs_id = ? "
+                                "WHERE id = ?", (seen_ts, seen_ts, obs_id, message_id))
+                    merged += 1
+                else:
+                    extras = {k: v for k, v in msg.items() if k not in SATONG_NORMALIZED_KEYS}
+                    cur = con.execute(
+                        "INSERT INTO satong_messages (server_id, sender, text, anchor_ts, first_seen_ts, last_seen_ts, "
+                        "seen_count, first_device, last_obs_id, recv_ts, payload_json) "
+                        "VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?)",
+                        (int(server_id), sender, text, seen_ts, seen_ts, seen_ts, device_id, obs_id, recv_ts,
+                         json.dumps(extras, ensure_ascii=False)))
+                    message_id = int(cur.lastrowid)
+                    accepted += 1
+                con.execute("INSERT INTO satong_obs_ids (obs_id, message_id, recv_ts) VALUES (?, ?, ?)",
+                            (obs_id, message_id, recv_ts))
+            con.execute(
+                "INSERT INTO satong_collectors (device_id, server_id, last_heartbeat_ts, client_connected, "
+                "last_message_ts, messages, agent_ts) VALUES (?, ?, ?, ?, ?, ?, ?) "
+                "ON CONFLICT(device_id) DO UPDATE SET server_id = excluded.server_id, "
+                "last_heartbeat_ts = excluded.last_heartbeat_ts, client_connected = excluded.client_connected, "
+                "last_message_ts = excluded.last_message_ts, messages = excluded.messages, agent_ts = excluded.agent_ts",
+                (device_id, int(server_id), recv_ts, 1 if collector.get("client_connected") else 0,
+                 collector.get("last_message_ts"), collector.get("messages"), collector.get("agent_ts")))
+            if seen_device is not None:
+                con.execute("UPDATE devices SET last_seen_ts = ?, upload_count = upload_count + ? WHERE device_id = ?",
+                            (recv_ts, 1 if messages else 0, seen_device))
+        return accepted, duplicates, merged
+
+    def satong_recent(self, server_id: int, limit: int, since_id: int | None = None) -> list[dict]:
+        """``since_id`` 가 있으면 그보다 큰 id 를 오래된 순으로 ``limit`` 개(증분 폴링), 없으면 **가장 최근** ``limit`` 개를
+        id 오름차순으로(첫 폴링·기준점)."""
+        cols = "id, sender, text, first_seen_ts, last_seen_ts, seen_count"
+        if since_id is not None:
+            rows = self._con.execute(
+                f"SELECT {cols} FROM satong_messages WHERE server_id = ? AND id > ? ORDER BY id ASC LIMIT ?",
+                (int(server_id), int(since_id), int(limit))).fetchall()
+        else:
+            rows = self._con.execute(
+                f"SELECT * FROM (SELECT {cols} FROM satong_messages WHERE server_id = ? ORDER BY id DESC LIMIT ?) "
+                "ORDER BY id ASC", (int(server_id), int(limit))).fetchall()
+        return [dict(r) for r in rows]
+
+    def satong_collectors(self, server_id: int) -> list[dict]:
+        """그 서버를 수집하는 기기들 — 최근 하트비트 순. 기기 표의 별칭·슬롯을 붙인다(없으면 null)."""
+        rows = self._con.execute(
+            "SELECT c.device_id, c.last_heartbeat_ts, c.client_connected, c.last_message_ts, c.messages, c.agent_ts, "
+            "d.slot AS slot, d.alias AS alias FROM satong_collectors c LEFT JOIN devices d ON d.device_id = c.device_id "
+            "WHERE c.server_id = ? ORDER BY c.last_heartbeat_ts DESC, c.device_id", (int(server_id),)).fetchall()
+        out = []
+        for r in rows:
+            d = dict(r)
+            d["client_connected"] = bool(d["client_connected"])
+            out.append(d)
+        return out
+
+    def satong_last_seen(self, server_id: int):
+        return self._con.execute("SELECT MAX(last_seen_ts) FROM satong_messages WHERE server_id = ?",
+                                 (int(server_id),)).fetchone()[0]
+
+    def prune_satong(self, now: float, days: int = 7) -> tuple:
+        """사통 보존 기간 초과분 삭제 — 메시지는 ``last_seen_ts``, obs_id 는 ``recv_ts`` 가 cutoff 미만. 수집기 표는 기기
+        수만큼이라 지우지 않는다. 반환 (삭제된 메시지 수, 삭제된 obs_id 수)."""
+        cutoff = now - int(days) * 86400
+        with self._tx() as con:
+            cur_m = con.execute("DELETE FROM satong_messages WHERE last_seen_ts < ?", (cutoff,))
+            cur_o = con.execute("DELETE FROM satong_obs_ids WHERE recv_ts < ?", (cutoff,))
+        return cur_m.rowcount, cur_o.rowcount
 
     # ---- 보존 ----
 

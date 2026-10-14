@@ -120,3 +120,29 @@ def default_rows(n: int, *, start: int = 3769258) -> list[bytes]:
     return [market_row(listing_id=start - k, item_id=100 + k, quantity=1 + k,
                        price=10_000 * (k + 1), seller=SELLER_A if k % 2 == 0 else SELLER_B)
             for k in range(n)]
+
+
+# ─────────────────────────── 사통팔달 프레임 ───────────────────────────
+
+OP_SATONG = gp.OP_SATONG
+#: 합성 보낸이·내용 — 실플레이어 이름·글은 쓰지 않는다.
+SENDER_A = "보낸이A"
+TEXT_A = "합성 외치기 팝니다"
+
+
+def satong_body(sender: str = SENDER_A, text: str = TEXT_A, *, mid: int = 0,
+                tail: bytes = bytes.fromhex("00010000000000"), sender_raw: bytes | None = None,
+                text_raw: bytes | None = None, opcode: int = OP_SATONG, length: int = gp.SATONG_BODY_LEN) -> bytes:
+    """73B 본문 — `docs/PACKET-SATONG.md` §필드 표 배치. 보낸이 20B·내용 40B 는 NUL 종료 + 0 패딩(내용이 40B 면
+    NUL 없음). ``length`` 로 길이 불일치를 만들 수 있다."""
+    s = sender_raw if sender_raw is not None else sender.encode("cp949")
+    t = text_raw if text_raw is not None else text.encode("cp949")
+    assert len(s) <= 20 and len(t) <= 40 and len(tail) == 7
+    body = (bytes((gp.MAGIC,)) + opcode.to_bytes(4, "little") + s.ljust(20, b"\x00") + bytes((mid,))
+            + t.ljust(40, b"\x00") + tail)
+    assert len(body) == gp.SATONG_BODY_LEN
+    return body[:length] if length <= len(body) else body + b"\x00" * (length - len(body))
+
+
+def satong_frame(*args, **kw) -> bytes:
+    return wire(satong_body(*args, **kw))
