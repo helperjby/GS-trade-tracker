@@ -206,11 +206,12 @@ CREATE TABLE devices (                  -- 초대 코드로 자기등록한 관�
 ```jsonc
 // ← 200  (q=봉인의 돌)
 {"v":1,"server_time":1758500100.0,"q":"봉인의 돌","q_norm":"봉인의돌","item_id":null,
- "max_age_sec":86400.0,"limit":20,"count":2,"total_matches":3,
+ "max_age_sec":259200.0,"limit":20,"expiry_days":2,"count":2,"total_matches":3,
  "listings":[
    {"listing_id":700001,"item_id":853,"item_name":"봉인의돌","quantity":10,"price":45000000,"seller":"판매자A",
     "category":"item","flag45":2,"flag46":0,"first_seen_ts":1758499000.0,"last_seen_ts":1758500000.1,
-    "seen_count":3,"last_device":"DEV-1"}, …]}
+    "seen_count":3,"last_device":"DEV-1",
+    "expires_from_ts":1758553200.0,"expires_by_ts":1758639600.0}, …]}   // 소멸 추정 경계(§4) — 2026-09-23 additive
 ```
 
 | 인자 | 기본 | 규칙 |
@@ -218,10 +219,14 @@ CREATE TABLE devices (                  -- 초대 코드로 자기등록한 관�
 | `q` | — | 정규화(§2) 뒤 부분 문자열 매칭. `q` 도 `item_id` 도 없으면 `400 {"error":"bad_request","field":"q"}` |
 | `item_id` | — | 아이템 id 정확 일치(`q` 와 AND). 있으면 정확해야 한다 — 음수·비정수·2⁶³ 초과는 `400 {"error":"bad_request","field":"item_id"}`(조용히 깎거나 버리지 않는다) |
 | `limit` | 20 | 1~100 클램프, 쓰레기는 기본값 |
-| `max_age_sec` | 86400 | `last_seen_ts ≥ server_time − max_age_sec` 인 행만 `listings` 에. 숨긴 행까지 센 수가 `total_matches` |
+| `max_age_sec` | 259200 | 관측 나이 안전망: `last_seen_ts ≥ server_time − max_age_sec` 인 행만. 2026-09-23 부터 기본 24h → **72h**(1차 필터는 아래 소멸 상한) |
 
-정렬: `price ASC, last_seen_ts DESC, listing_key`. 봇의 표시 형식(파일럿 계승): `{item_name} | {quantity}개 | {price:,}원 |
-{seller} | {N분 전}` — `N분 전` 은 `server_time − last_seen_ts`. `count < total_matches` 면 "오래된 N건 숨김" 한 줄.
+`listings` 에 실리는 행 = **`expires_by_ts > server_time`**(소멸 상한이 아직 안 지남, §4) AND `max_age_sec` 조건. 숨긴 행까지 센 수가
+`total_matches`. 응답 `expiry_days` 는 허브가 상한 계산에 쓴 일수(설정 `listing_expiry_days`, 현재 단기 2).
+
+정렬: `price ASC, last_seen_ts DESC, listing_key`. 봇의 표시 형식(파일럿 계승 + 소멸 칸, 2026-09-23): `{item_name} | {quantity}개 |
+{price:,}원 | {seller} | {N분 전} | {소멸}` — `N분 전` 은 `server_time − last_seen_ts`, `{소멸}` 은 `expires_from_ts == expires_by_ts` 면
+`~M/D 00:00`(등록일 확정), 다르면 `~M/D 00:00 (M/D 부터 가능)`(하한·상한, KST). `count < total_matches` 면 "사라졌거나 오래된 N건 숨김" 한 줄.
 
 ### 3-3. `GET /api/market/listings?since_ts=&since_key=&limit=` — 증분 폴링 (알람 잡, 60s)
 
@@ -229,9 +234,10 @@ CREATE TABLE devices (                  -- 초대 코드로 자기등록한 관�
 // ← 200
 {"v":1,"server_time":…,"since_ts":1758500000.0,"since_key":"700001:853:판매자A","limit":500,"count":2,
  "next_since_ts":1758500055.2,"next_since_key":"700009:3506:판매자B",
- "listings":[ …§3-2 와 같은 행 모양 + "listing_key"…, (last_seen_ts, listing_key) 오름차순 ]}
+ "listings":[ …§3-2 와 같은 행 모양(expires_from/by_ts 포함) + "listing_key"…, (last_seen_ts, listing_key) 오름차순 ]}
 ```
 
+만료 필터는 **걸지 않는다**(증분은 전부 전달 — 소비자가 `expires_by_ts` 로 판단·정리한다).
 **복합 keyset 커서** `(last_seen_ts, listing_key) > (since_ts, since_key)`, `(last_seen_ts, listing_key)` 오름차순, `limit`
 1~2000(기본 500). 소비자는 응답의 `next_since_ts`·`next_since_key` 를 **둘 다** 저장했다가 다음 호출에 넣는다(마지막 행의
 값; 행이 없으면 받은 값 그대로). 한 페이지의 행은 전부 같은 `seen_ts` 이고 관측기 시계가 앞서면 배치 전체가 같은
@@ -243,7 +249,9 @@ CREATE TABLE devices (                  -- 초대 코드로 자기등록한 관�
 
 ```jsonc
 {"v":1,"server_time":…,"observations":412,"listings":1380,"items":97,"item_names":95,
- "fresh_listings":210,"fresh_sec":86400.0,"latest_recv_ts":1758500055.2,
+ "fresh_listings":210,"fresh_sec":259200.0,"live_listings":180,"expiry_days":2,"latest_recv_ts":1758500055.2,
+                                          // live_listings = expires_by_ts > server_time 인 행(search 기본 필터와 같은 정의, §4);
+                                          // fresh_listings 는 관측 나이(fresh_sec = search_max_age_sec) 기준 — 별개
  "devices":[{"device_id":"d-3f9a1c7e2b","label":"DESKTOP-ABC","alias":"소가","slot":"slot3","observations":300,"last_recv_ts":…},
             {"device_id":"DEV-2","label":null,"alias":null,"slot":null,"observations":112,"last_recv_ts":…}],
  "devices_registered":5,"devices_revoked":1,"devices_orphaned":0,"devices_max":7}   // label·alias·slot: 등록 기기만, 관리 시크릿 업로드는 null
@@ -300,8 +308,21 @@ HTTP 관리 라우트를 두지 않는 이유: 공개 표면을 늘리지 않고
 
 - 허브 저장 시각은 `seen_ts = min(agent_ts, recv_ts)`: 스풀에 묵었다가 늦게 올라온 관측은 **관측 시각**이 남고(그때 본
   목록이므로), 관측기 시계가 앞서 있으면 서버 수신 시각으로 깎는다(미래 시각 금지). 목록의 `first/last_seen_ts` 는 이 값.
-- "사라짐" 판정은 없다(요청 c2s 가 암호화라 조회 조건을 모른다). 소비자는 `max_age_sec`(기본 24h)로 오래된 행을 숨기고
-  `last_seen_ts` 를 함께 보여준다. 응답이 총건수·조회조건을 싣게 되면 스냅샷 diff 로 고도화(FOLLOWUP).
+- **소멸 추정(2026-09-23)** — 게임 규칙(사용자 확인): 등록일 D(KST)에 올린 물품은 팔리지 않으면 **단기 = D+2 00:00, 장기 = D+3 00:00**
+  에 목록에서 사라진다(9/23 20:03 등록 → 단기 9/25 00:00). 등록 시각은 패킷에 없고(PACKET-MARKET §1) 관측 시각만 있으므로 허브는
+  관측 T 에 살아 있었다 → 등록일 ∈ {date(T)−1, date(T)} 로부터 두 경계를 **조회 때** 계산한다(저장 안 함, 스키마 무변경):
+  - `expires_from_ts` = date_kst(`last_seen_ts`)+1 00:00 — 이 시각부터 사라졌을 **수** 있다(하한)
+  - `expires_by_ts` = **max**(date_kst(`first_seen_ts`)+`listing_expiry_days` 00:00, `expires_from_ts`) — 이 시각 뒤는 없다(상한). 항상 from ≤ by.
+    하한을 합치는 이유: 마지막 관측 때 살아 있었으니 그 날 자정 전엔 사라질 수 없다 — 시계가 며칠 느린 기기가 `first_seen_ts`(MIN, 되돌아오지
+    않음)를 과거로 끌어내려도 다른 기기가 계속 보는 행은 숨지 않고, 장기 물품을 D+2 에 다시 봐도 상한이 따라온다.
+
+  첫 관측과 마지막 관측이 자정을 걸치면 둘이 같아져 등록일이 확정된다. `기간`(@45) 은 H-2609-11 검정 전(D)이라 **모든 행을 단기(2일)로
+  본다**(사용자 결정 2026-09-23) — 장기 물품은 D+2 하루 동안 재관측이 없으면 하루 일찍 숨는다(수용). 검정 뒤 행별 일수(2=장기 → 3일)는
+  후속(additive). 등록 id 자정 앵커로 등록일을 확정하는 방법은 보류. SQL 필터는 날짜 산술 없이 열 비교로 같은 조건을 건다
+  (`first_seen_ts ≥ midnight(now)+(1−N)일 OR last_seen_ts ≥ midnight(now)`, `db._LIVE_WHERE`).
+  KST 는 DST 가 없어 고정 오프셋 +9h(`db.kst_midnight`, tzdata 불필요). 팔려서 먼저 사라진 것은 알 수 없다(요청 c2s 가 암호화라 조회
+  조건을 모른다) — `search` 는 상한이 지난 행만 숨기고 `last_seen_ts` 를 함께 준다. 응답이 총건수·조회조건을 싣게 되면 스냅샷 diff 로
+  고도화(FOLLOWUP).
 - 관측기 시계 보정은 하지 않는다(대시보드와 같은 원칙). 작은 오차(하루 이내 앞섬)는 `recv_ts` 로 깎고, 보존 기간보다 과거이거나
   `max_agent_ts_ahead_sec` 넘게 미래인 `agent_ts` 는 `400 agent_ts_out_of_range` 로 돌려보낸다 — 조용히 받으면 그 관측은
   어떤 조회에도 안 보이고 다음 prune 에 사라지는데 관측기는 200 을 받고 스풀을 지웠을 것이다. 큰 오차는
@@ -316,7 +337,9 @@ HTTP 관리 라우트를 두지 않는 이유: 공개 표면을 늘리지 않고
 
 `host` `port`(8800) `secret`(필수 — **16자 이상 문자열**, 예시값 `CHANGE-ME` 면 기동 거부: 기본 host `0.0.0.0` 이라 공개
 시크릿으로 쓰기 API 가 LAN 에 열린다) `db_path`(상대 경로는 **config 파일 폴더 기준**; 환경변수 `HUB_DB_PATH` 가 있으면 그것이
-이긴다 — 컨테이너는 Dockerfile 이 `/data/hub.db` 로 고정) `retention_market_days`(30) `search_max_age_sec`(86400)
+이긴다 — 컨테이너는 Dockerfile 이 `/data/hub.db` 로 고정) `retention_market_days`(30) **`listing_expiry_days`**(2 — 소멸 상한 일수, 정수 ≥1,
+§4; `기간` 검정 뒤 장기 3 은 행별로) `search_max_age_sec`(259200 — 2026-09-23 부터 72h; **배포 config 가 예시 복사본이라 옛 86400 이 명시돼
+있으면 값을 고치거나 키를 지운다** — `(listing_expiry_days+1)×86400` 미만이면 기동 경고)
 `search_limit_default`(20) `search_limit_max`(100) `listings_limit_default`(500) `listings_limit_max`(2000)
 `max_observations_per_request`(100) `max_rows_per_observation`(64) `max_agent_ts_ahead_sec`(86400).
 
@@ -333,6 +356,10 @@ HTTP 관리 라우트를 두지 않는 이유: 공개 표면을 늘리지 않고
 
 ## 7. 변경 이력
 
+- 2026-09-23 v1 **소멸 추정**(additive; 사용자 결정 3건 — 허브+봇 계약까지 반영 · 등록일 추정은 관측 시각 경계만 · `기간` 검정 전엔 단기 고정):
+  §4 게임 규칙(단기 D+2 00:00 · 장기 D+3 00:00 KST)과 추정식, §3-2 행 `expires_from_ts`·`expires_by_ts` + 응답 `expiry_days` + 기본 필터
+  `expires_by_ts > server_time`(24h 나이 필터는 72h 안전망으로 — `search_max_age_sec` 기본 86400 → 259200) + 봇 표시 소멸 칸, §3-3 행 필드
+  (필터 없음), §3-4 `live_listings`·`expiry_days`, §6 `listing_expiry_days`. 스키마 무변경(조회 시점 계산).
 - 2026-09-23 v1 **슬롯별 초대 코드**(사용자 결정 — 등록 즉시 누구인지 보이게, 재설치에 관리자 개입 없이): §6 `invite_code`·`max_devices`
   → `invite_codes = {슬롯: 코드}`(정원 = 슬롯 수, 코드 슬롯 간 중복 금지, 구 키는 기동 거부), §1 `devices.slot`(기존 DB 는 ADD COLUMN —
   무마이그레이션 규칙의 유일한 additive 예외) + 초기 `alias` = 슬롯 이름, §3-0 응답 `slot`·`replaced` + 같은 슬롯 재등록은 옛 기기를

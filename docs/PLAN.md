@@ -138,7 +138,9 @@ python scripts/mine_packet_discovery.py --all --lead-sec 30
   limit=&max_age_sec=`(정규화 `instr` 부분일치, `price ASC`, `total_matches`) · `GET /api/market/listings?since_ts=&since_key=&limit=`
   (복합 keyset 커서 → `next_since_ts`·`next_since_key`; PR #6 리뷰 반영 2026-09-22) · `GET /api/market/stats` · `GET /`(무인증 상태 줄).
 - 시각·신선도: `seen_ts = min(agent_ts, recv_ts)`; upsert 는 "더 나중에 본 관측이 상태를 쓴다"(역순 스풀 업로드는 first_seen 만 앞당김);
-  "사라짐" 판정 없음, `max_age_sec`(기본 24h) 밖은 숨기고 `last_seen_ts` 를 준다. 보존 30일(`retention_market_days`), 학습 표는 유지.
+  **소멸 추정(2026-09-23)**: 게임 규칙(등록일 D → 단기 D+2 00:00 · 장기 D+3 00:00 KST, 사용자 확인)으로 관측 시각에서 `expires_from_ts`(하한)·
+  `expires_by_ts`(상한)를 조회 때 계산, `search` 는 상한이 지난 행을 숨긴다(`max_age_sec` 는 72h 안전망). `기간`(@45) 검정 전엔 단기 고정
+  (HUB-PROTOCOL §4). 팔려서 먼저 사라진 것은 알 수 없다. 보존 30일(`retention_market_days`), 학습 표는 유지.
 - **공개 업로드(2026-09-22 추가)**: 관측기는 Npcap 만 있는 일반 사용자 PC 에서 돌므로 VPN 전제를 버리고, 공개 리스너 **8801** 을 Pi 의
   **Tailscale Funnel** 로 공개(관리 리스너 8800 은 직접 접속 전용) + **초대 코드 자기등록**(`POST /api/market/register` → 기기별 토큰·허브
   발급 `device_id`, `devices` 표). 관리 시크릿은 exe 금지·공개 요청 무시(공개 리스너 전부 + 8800 의 `Tailscale-Funnel-Request` 헤더 2차
@@ -208,7 +210,8 @@ G7 은 exe 를 **지인 최대 7명**의 PC 에 돌리는 단계다. PR-Y1b 까�
 - `docs/GS-01_SOURCE_CONTRACT.md` 원본 정정: 이 레포 허브 market API(`http://127.0.0.1:8800`, Bearer, `docs/HUB-PROTOCOL.md`).
 - 통합 클라이언트 + env `MIRUBOT_MARKET_API_ORIGIN/SECRET`(fail-closed).
 - `yukeuijeon_search`(`!육의전 <아이템>` → `🏪 육의전 검색: {kw} ({n}건)` + `{item} | {qty}개 | {price:,}원 |
-  {seller} | {N분 전}` + 신선도 줄 — `count < total_matches` 면 "오래된 N건 숨김"), `yukeuijeon_alarm`(등록·해제·목록,
+  {seller} | {N분 전} | {소멸}`(`expires_from/by_ts` → `~M/D 00:00`, HUB-PROTOCOL §3-2, 2026-09-23) + 신선도 줄 — `count < total_matches` 면
+  "사라졌거나 오래된 N건 숨김"), `yukeuijeon_alarm`(등록·해제·목록,
   additive 스키마·ADR) + job `geosang.yukeuijeon_poll`(60s, `/api/market/listings?since_ts=` → `next_since_ts` 저장 → 매칭 →
   기존 내구 발송 경로).
   (2026-09-21: `Lv.`(용병) 표시는 용병 탭 캡처·가설 뒤로 보류 — 이번 파서는 아이템 탭만; `기간`(장기/단기)은 H-2609-11 검정 뒤 표시 후보.)

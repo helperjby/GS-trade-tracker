@@ -106,6 +106,7 @@ def test_invite_codes_missing_or_empty_means_closed_and_new_defaults(tmp_path):
 @pytest.mark.parametrize("key, value", [
     ("register_limit_per_hour", "10"), ("register_slot_limit_per_hour", 0), ("upload_limit_per_min", 0), ("auth_fail_limit_per_min", -1),
     ("admin_public", "no"), ("admin_public", 1), ("proxy_header", ""), ("proxy_header", "   "), ("proxy_header", 5),
+    ("listing_expiry_days", 0), ("listing_expiry_days", "2"), ("listing_expiry_days", 2.5),
     ("port", 0), ("port", "8800"), ("public_port", 70000), ("public_port", 8800),   # 두 리스너는 포트가 달라야 한다
 ])
 def test_bad_ports_limits_and_flags_refuse_to_start(tmp_path, key, value):
@@ -118,6 +119,8 @@ def test_defaults_filled_and_unknown_keys_kept(tmp_path):
     cfg = server_mod.load_config(str(_write(tmp_path, port=1234, extra="x")), env={})
     assert (cfg["port"], cfg["extra"], cfg["max_agent_ts_ahead_sec"]) == (1234, "x", 86400)
     assert cfg["listings_limit_max"] == server_mod.DEFAULTS["listings_limit_max"]
+    # 소멸 규칙(2026-09-23): 단기 2일 고정, max_age 는 72h 안전망
+    assert (cfg["listing_expiry_days"], cfg["search_max_age_sec"]) == (2, 259200)
 
 
 def test_example_config_refuses_to_start_as_is(tmp_path):
