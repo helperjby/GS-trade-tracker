@@ -268,6 +268,8 @@ class Database:
         self._con.row_factory = sqlite3.Row
         self._con.execute("PRAGMA journal_mode=WAL")
         self._con.execute("PRAGMA synchronous=NORMAL")
+        # 지운 행의 바이트를 0 으로 덮는다 — 귓속말(사적 메시지)이 prune 뒤 빈 페이지에 남지 않게(리뷰 #20).
+        self._con.execute("PRAGMA secure_delete=ON")
         self._con.executescript(SCHEMA)
         self._con.commit()
         self._add_missing_columns()
@@ -689,7 +691,18 @@ class Database:
         cutoff = now - int(hours) * 3600
         with self._tx() as con:
             cur = con.execute("DELETE FROM whisper_messages WHERE recv_ts < ?", (cutoff,))
+        if cur.rowcount:
+            # WAL 에 남은 지운 행의 옛 페이지 사본까지 비운다(secure_delete 는 본 파일만 덮는다). 실패해도 다음 정리에서 다시.
+            try:
+                self._con.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            except sqlite3.Error:
+                pass
         return cur.rowcount
+
+    def whisper_last_id(self) -> int:
+        """지금까지 발급한 가장 큰 귓속말 id(지운 행 포함, 없으면 0) — AUTOINCREMENT 의 ``sqlite_sequence``."""
+        row = self._con.execute("SELECT seq FROM sqlite_sequence WHERE name = 'whisper_messages'").fetchone()
+        return int(row[0]) if row is not None else 0
 
     # ---- 보존 ----
 

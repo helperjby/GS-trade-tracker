@@ -170,7 +170,6 @@ def test_empty_whisper_slots_blocks_device_tokens(tmp_path):
     (lambda b: b["messages"][0].update(sender="가" * 65), "sender"),
     (lambda b: b["messages"][0].update(text=None), "text"),
     (lambda b: b["messages"][0].update(text="가" * 257), "text"),
-    (lambda b: b["messages"][0].update(agent_ts=time.time() - 25 * 3600), "agent_ts"),
     (lambda b: b["messages"][0].update(agent_ts=True), "agent_ts"),
     (lambda b: b["messages"][0].pop("obs_id"), "obs_id"),
 ])
@@ -234,14 +233,79 @@ def test_prune_whisper_by_recv_ts_and_ids_are_not_reused(tmp_path):
 def test_whisper_has_its_own_rate_bucket(tmp_path):
     async def scn():
         app, client = await start_client(make_cfg(tmp_path, whisper_slots=["slot1"], whisper_upload_limit_per_min=2,
-                                                  upload_limit_per_min=2))
+                                                  upload_limit_per_min=50))
         try:
             st, d1 = await register(client, label="PC-1")
             hdr = device_auth(d1["token"])
             codes = [(await _post(client, _body(_msg(n), device_id=d1["device_id"]), headers=hdr))[0] for n in range(3)]
             assert codes == [200, 200, 429]
-            st, _ = await get(client, "/api/market/ping", headers=hdr)
-            assert st == 200, "육의전 버킷은 그대로"
+        finally:
+            await client.close()
+    _run(scn())
+
+
+def test_whisper_slot_token_is_scoped_to_whisper_routes(tmp_path):
+    """리뷰 #20 — 귓속말 전용 슬롯의 토큰이 새어도 공개 리스너에서 육의전·사통 쓰기를 열지 못한다."""
+    async def scn():
+        cfg = make_cfg(tmp_path, whisper_slots=["slot1"], satong_slots=["slot1"])
+        app, client = await start_client(cfg, public_only=True)
+        try:
+            st, d1 = await register(client, label="PC-1", headers=PROXY)
+            hdr = {**device_auth(d1["token"]), **PROXY}
+            for path in ("/api/market/ping",):
+                st, data = await get(client, path, headers=hdr)
+                assert (st, data["error"]) == (403, "whisper_slot_only")
+            resp = await client.post("/api/satong/observations", json={}, headers=hdr)
+            assert (resp.status, (await resp.json())["error"]) == (403, "whisper_slot_only")
+            resp = await client.post("/api/market/observations", json={}, headers=hdr)
+            assert (resp.status, (await resp.json())["error"]) == (403, "whisper_slot_only")
+            # 다른 슬롯은 그대로
+            st, d2 = await register(client, invite=INVITE2, label="PC-2", headers=PROXY)
+            st, _ = await get(client, "/api/market/ping", headers={**device_auth(d2["token"]), **PROXY})
+            assert st == 200
+        finally:
+            await client.close()
+    _run(scn())
+
+
+def test_out_of_window_whisper_is_rejected_alone(tmp_path):
+    """리뷰 #20 — 보존 시간 밖의 한 건은 그 건만 버리고 같은 배치의 새 귓속말은 받는다."""
+    async def scn():
+        app, client = await start_client(make_cfg(tmp_path))
+        try:
+            st, data = await _post(client, _body(_msg(1, agent_ts=time.time() - 25 * 3600), _msg(2, text="새 것")))
+            assert st == 200 and (data["accepted"], data["duplicates"], data["rejected"]) == (1, 0, 1)
+            _, data = await _recent(client)
+            assert [m["text"] for m in data["messages"]] == ["새 것"]
+        finally:
+            await client.close()
+    _run(scn())
+
+
+def test_recent_last_id_survives_prune_and_marks_an_empty_table(tmp_path):
+    """리뷰 #20 — 표가 비어도 `last_id` 로 기준점을 잡고, 지운 뒤에도 발급한 최대 id 를 준다(DB 재생성이면 작아진다)."""
+    async def scn():
+        app, client = await start_client(make_cfg(tmp_path))
+        try:
+            _, data = await _recent(client)
+            assert (data["count"], data["last_id"]) == (0, 0)
+            await _post(client, _body(_msg(1), _msg(2)))
+            _, data = await _recent(client)
+            assert data["last_id"] == data["messages"][-1]["id"]
+            last = data["last_id"]
+            assert app_db(app).prune_whisper(time.time() + 25 * 3600, 24) == 2
+            _, data = await _recent(client)
+            assert (data["count"], data["last_id"]) == (0, last)
+        finally:
+            await client.close()
+    _run(scn())
+
+
+def test_deleted_whispers_are_overwritten(tmp_path):
+    async def scn():
+        app, client = await start_client(make_cfg(tmp_path))
+        try:
+            assert app_db(app)._con.execute("PRAGMA secure_delete").fetchone()[0] == 1
         finally:
             await client.close()
     _run(scn())

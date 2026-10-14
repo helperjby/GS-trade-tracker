@@ -340,6 +340,9 @@ def _auth_middleware():
                     return _too_many(wait)
                 if dev["revoked_ts"] is not None:
                     return web.json_response({"ok": False, "error": "device_revoked"}, status=403)
+                if (dev.get("slot") or "") in cfg["whisper_slots"] and not request.path.startswith("/api/whisper/"):
+                    # 귓속말 전용 슬롯의 토큰은 귓속말 라우트에만 — 새어도 공개 리스너의 육의전·사통 쓰기를 못 연다(리뷰 #20).
+                    return web.json_response({"ok": False, "error": "whisper_slot_only"}, status=403)
                 request[DEVICE_KEY] = dev
                 return await handler(request)
         if public:
@@ -526,6 +529,20 @@ def clean_line(value: str) -> str:
     return "".join(ch if ch.isprintable() else " " for ch in value)
 
 
+def _check_obs_header(msg, i: int) -> float:
+    """사통·귓속말 메시지의 공통 머리(``obs_id`` 1~128자 · ``agent_ts`` 유한 수) → agent_ts. 범위 판정은 호출자 몫
+    (사통은 400, 귓속말은 그 건만 ``rejected``)."""
+    if not isinstance(msg, dict):
+        raise _Bad(index=i)
+    obs_id = msg.get("obs_id")
+    if not isinstance(obs_id, str) or not 1 <= len(obs_id) <= MAX_OBS_ID_LEN:
+        raise _Bad(index=i, field="obs_id")
+    agent_ts = msg.get("agent_ts")
+    if not _is_num(agent_ts):
+        raise _Bad(index=i, field="agent_ts")
+    return float(agent_ts)
+
+
 def validate_satong_upload(body, cfg: dict, now: float) -> tuple:
     """사통 POST 본문 전건 검증 → (device_id, server_id, collector, messages). 첫 위반에서 ``_Bad``.
 
@@ -560,15 +577,7 @@ def validate_satong_upload(body, cfg: dict, now: float) -> tuple:
     oldest = now - int(cfg["retention_satong_days"]) * 86400
     newest = now + float(cfg["max_agent_ts_ahead_sec"])
     for i, msg in enumerate(messages):
-        if not isinstance(msg, dict):
-            raise _Bad(index=i)
-        obs_id = msg.get("obs_id")
-        if not isinstance(obs_id, str) or not 1 <= len(obs_id) <= MAX_OBS_ID_LEN:
-            raise _Bad(index=i, field="obs_id")
-        agent_ts = msg.get("agent_ts")
-        if not _is_num(agent_ts):
-            raise _Bad(index=i, field="agent_ts")
-        if not oldest <= float(agent_ts) <= newest:
+        if not oldest <= _check_obs_header(msg, i) <= newest:
             raise _Bad("agent_ts_out_of_range", index=i, field="agent_ts")
         sender = msg.get("sender")
         if not _is_str_max(sender, MAX_SATONG_SENDER_LEN) or not clean_line(sender).strip():
@@ -583,11 +592,12 @@ def validate_satong_upload(body, cfg: dict, now: float) -> tuple:
 
 
 def validate_whisper_upload(body, cfg: dict, now: float) -> tuple:
-    """귓속말 POST 본문 전건 검증 → (device_id, messages). 첫 위반에서 ``_Bad``.
+    """귓속말 POST 본문 검증 → (device_id, messages, rejected). 형·필수 필드 위반은 첫 위반에서 ``_Bad``(배치 전체 400).
 
     하트비트가 없으므로 빈 ``messages`` 는 400. ``receiver``(받은 캐릭터)·``sender`` 는 `clean_line` 뒤 비어 있으면 안 되고,
-    ``text`` 는 빈 문자열을 허용한다(공백 한 칸 귓속말은 게임이 공백을 잘라 본문 0자로 온다). ``agent_ts`` 는 보존 시간 안이어야
-    한다. 통과한 메시지는 ``WHISPER_KEYS`` 만 남긴 **사본**(이름·본문은 `clean_line`) — 미지 키는 버린다.
+    ``text`` 는 빈 문자열을 허용한다(공백 한 칸 귓속말은 게임이 공백을 잘라 본문 0자로 온다). ``agent_ts`` 가 보존 시간 밖이면
+    **그 건만** 버리고 ``rejected`` 로 센다(리뷰 #20 — 늦게 올라온 한 건이 같은 배치의 새 귓속말을 막지 않게). 통과한 메시지는
+    ``WHISPER_KEYS`` 만 남긴 **사본**(이름·본문은 `clean_line`) — 미지 키는 버린다.
     """
     if not isinstance(body, dict):
         raise _Bad()
@@ -601,26 +611,20 @@ def validate_whisper_upload(body, cfg: dict, now: float) -> tuple:
         raise _Bad("too_many", field="messages")
     oldest = now - int(cfg["retention_whisper_hours"]) * 3600
     newest = now + float(cfg["max_agent_ts_ahead_sec"])
+    in_window: list[dict] = []
     for i, msg in enumerate(messages):
-        if not isinstance(msg, dict):
-            raise _Bad(index=i)
-        obs_id = msg.get("obs_id")
-        if not isinstance(obs_id, str) or not 1 <= len(obs_id) <= MAX_OBS_ID_LEN:
-            raise _Bad(index=i, field="obs_id")
-        agent_ts = msg.get("agent_ts")
-        if not _is_num(agent_ts):
-            raise _Bad(index=i, field="agent_ts")
-        if not oldest <= float(agent_ts) <= newest:
-            raise _Bad("agent_ts_out_of_range", index=i, field="agent_ts")
+        agent_ts = _check_obs_header(msg, i)
         for k in ("receiver", "sender"):
             v = msg.get(k)
             if not _is_str_max(v, MAX_WHISPER_NAME_LEN) or not clean_line(v).strip():
                 raise _Bad(index=i, field=k)
         if not _is_str_max(msg.get("text"), MAX_WHISPER_TEXT_LEN):
             raise _Bad(index=i, field="text")
+        if oldest <= agent_ts <= newest:
+            in_window.append(msg)
     clean = [{"obs_id": m["obs_id"], "agent_ts": float(m["agent_ts"]), "receiver": clean_line(m["receiver"]).strip(),
-              "sender": clean_line(m["sender"]).strip(), "text": clean_line(m["text"])} for m in messages]
-    return device_id.strip(), clean
+              "sender": clean_line(m["sender"]).strip(), "text": clean_line(m["text"])} for m in in_window]
+    return device_id.strip(), clean, len(messages) - len(in_window)
 
 
 def validate_register(body) -> tuple:
@@ -881,7 +885,7 @@ async def api_whisper_observations(request: web.Request) -> web.Response:
     except (ValueError, LookupError):
         body = None
     try:
-        device_id, messages = validate_whisper_upload(body, cfg, now)
+        device_id, messages, rejected = validate_whisper_upload(body, cfg, now)
     except _Bad as e:
         _touch_device(db, dev, now)
         return e.response()
@@ -894,9 +898,10 @@ async def api_whisper_observations(request: web.Request) -> web.Response:
     except sqlite3.Error:
         log.exception("귓속말 저장 실패: %s", device_id)
         return _storage_error(now)
-    log.info("귓속말 수신: %s%s 신규 %d / 중복 %d", device_id,
-             f"({_device_name(dev)})" if _device_name(dev) else "", accepted, duplicates)
-    return web.json_response({"ok": True, "accepted": accepted, "duplicates": duplicates, "server_time": now})
+    log.info("귓속말 수신: %s%s 신규 %d / 중복 %d / 기간 밖 %d", device_id,
+             f"({_device_name(dev)})" if _device_name(dev) else "", accepted, duplicates, rejected)
+    return web.json_response({"ok": True, "accepted": accepted, "duplicates": duplicates, "rejected": rejected,
+                              "server_time": now})
 
 
 async def api_whisper_recent(request: web.Request) -> web.Response:
@@ -909,9 +914,18 @@ async def api_whisper_recent(request: web.Request) -> web.Response:
         return e.response()
     limit = _q_num(request, "limit", int(cfg["whisper_recent_limit_default"]), int, 1,
                    int(cfg["whisper_recent_limit_max"]))
-    messages = request.app[DB_KEY].whisper_recent(limit, since_id)
-    return web.json_response({"v": PROTO_V, "server_time": time.time(), "since_id": since_id, "limit": limit,
-                              "count": len(messages), "messages": messages})
+    now = time.time()
+    try:
+        database = request.app[DB_KEY]
+        messages = database.whisper_recent(limit, since_id)
+        last_id = database.whisper_last_id()
+    except sqlite3.Error:
+        log.exception("귓속말 조회 실패")
+        return _storage_error(now)
+    # last_id = 지금까지 발급한 가장 큰 id(지운 행 포함) — 표가 비어도 기준점을 잡고, 허브 DB 가 새로 만들어지면(id 재시작)
+    # 소비자 커서보다 작아져 재기준점 신호가 된다(리뷰 #20).
+    return web.json_response({"v": PROTO_V, "server_time": now, "since_id": since_id, "limit": limit,
+                              "last_id": last_id, "count": len(messages), "messages": messages})
 
 
 async def api_market_search(request: web.Request) -> web.Response:
@@ -959,33 +973,33 @@ async def api_market_stats(request: web.Request) -> web.Response:
 
 # ---------------------------------------------------------------- retention
 
-async def _retention_loop(app: web.Application) -> None:
+def _prune_daily(app: web.Application, now: float) -> None:
     cfg = app[CFG_KEY]
-    while True:
-        try:
-            now = time.time()
-            n_o, n_l = app[DB_KEY].prune(now, int(cfg["retention_market_days"]))
-            if n_o or n_l:
-                log.info("retention: 관측 %d건 / 목록 %d건 삭제", n_o, n_l)
-            n_m, n_i = app[DB_KEY].prune_satong(now, int(cfg["retention_satong_days"]))
-            if n_m or n_i:
-                log.info("retention: 사통 %d건 / obs_id %d건 삭제", n_m, n_i)
-        except Exception:
-            log.exception("retention 오류 — 태스크 유지")
-        await asyncio.sleep(86400)
+    n_o, n_l = app[DB_KEY].prune(now, int(cfg["retention_market_days"]))
+    if n_o or n_l:
+        log.info("retention: 관측 %d건 / 목록 %d건 삭제", n_o, n_l)
+    n_m, n_i = app[DB_KEY].prune_satong(now, int(cfg["retention_satong_days"]))
+    if n_m or n_i:
+        log.info("retention: 사통 %d건 / obs_id %d건 삭제", n_m, n_i)
 
 
-async def _whisper_retention_loop(app: web.Application) -> None:
-    """귓속말은 보존이 시간 단위라 하루 주기 루프와 따로 1시간마다 지운다(보존 24h 면 최대 25h 생존)."""
-    cfg = app[CFG_KEY]
+def _prune_whisper(app: web.Application, now: float) -> None:
+    n = app[DB_KEY].prune_whisper(now, int(app[CFG_KEY]["retention_whisper_hours"]))
+    if n:
+        log.info("retention: 귓속말 %d건 삭제", n)
+
+
+#: (정리 함수, 주기 초) — 귓속말은 보존이 시간 단위라 1시간마다(보존 24h 면 최대 25h 생존).
+PRUNE_JOBS = ((_prune_daily, 86400), (_prune_whisper, 3600))
+
+
+async def _prune_loop(app: web.Application, prune, interval: float) -> None:
     while True:
         try:
-            n = app[DB_KEY].prune_whisper(time.time(), int(cfg["retention_whisper_hours"]))
-            if n:
-                log.info("retention: 귓속말 %d건 삭제", n)
+            prune(app, time.time())
         except Exception:
-            log.exception("귓속말 retention 오류 — 태스크 유지")
-        await asyncio.sleep(3600)
+            log.exception("retention 오류(%s) — 태스크 유지", prune.__name__)
+        await asyncio.sleep(interval)
 
 
 # ---------------------------------------------------------------- app
@@ -1053,8 +1067,8 @@ def make_app(cfg: dict, database: db_mod.Database | None = None, *, limits: dict
     app.router.add_get("/api/whisper/recent", api_whisper_recent)
 
     async def _lifecycle(app_: web.Application):
-        tasks = ([asyncio.create_task(_retention_loop(app_)), asyncio.create_task(_whisper_retention_loop(app_))]
-                 if retention else [])
+        tasks = [asyncio.create_task(_prune_loop(app_, prune, interval))
+                 for prune, interval in PRUNE_JOBS] if retention else []
         yield
         for task in tasks:
             task.cancel()

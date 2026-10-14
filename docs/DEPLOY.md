@@ -124,6 +124,25 @@ curl -s -H "Authorization: Bearer <관리 시크릿>" "http://<pi-tailnet-ip>:88
 
 `satong_not_allowed`(403)가 콘솔에 뜨면 1번의 슬롯 이름이 그 기기의 슬롯(`devices.py list`)과 다른 것이다.
 
+## 7. 귓속말 중계 게이트 (보내는 PC 1대, 2026-10-14)
+
+1. Pi `config.json` 의 `invite_codes` 에 보내는 PC **전용** 슬롯을 하나 더 둔다(예 `"<전용 슬롯>": "<새 코드>"`, 8자 이상·다른 코드와 다름) →
+   `"whisper_slots": ["<전용 슬롯>"]` → `docker compose up -d --build` → 기동 로그 `whisper_slots=<전용 슬롯>`.
+   **관측기 슬롯(예 slot1)을 쓰지 않는다** — 같은 슬롯으로 등록하면 그 슬롯의 관측기 기기가 제거된다. 전용 슬롯의 토큰은 귓속말 라우트에만 통한다.
+2. 보내는 PC 는 tailnet/LAN 의 관리 리스너 주소(`http://<pi-tailnet-ip>:8800`)로 등록·업로드한다. 공개(Funnel) 주소로는 `403 not_public`.
+3. 확인(제작자 PC, tailnet 직접 접속):
+
+```bash
+curl -s -H "Authorization: Bearer <관리 시크릿>" "http://<pi-tailnet-ip>:8800/api/whisper/recent?limit=5"
+```
+
+| # | 확인 | 기대 |
+|---|---|---|
+| 1 | 등록 전 | `count` 0, `last_id` 0 |
+| 2 | 보내는 쪽에서 귓속말 1건 | `messages` 1건(받는이·보낸이·본문), 로그 `귓속말 수신: … 신규 1` (이름·본문은 로그에 없다) |
+| 3 | 같은 주소를 Funnel 로 | `403 not_public` |
+| 4 | 25시간 뒤 | 행이 지워지고 `last_id` 는 그대로 |
+
 ## 자주 나오는 실패와 원인
 
 | 증상 | 원인 | 조치 |
