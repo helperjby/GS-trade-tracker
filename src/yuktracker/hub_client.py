@@ -1,4 +1,4 @@
-"""허브 HTTP 클라이언트 — 기기 등록과 관측 업로드. 계약 정본은 `docs/HUB-PROTOCOL.md` §3-0·§3-1.
+"""허브 HTTP 클라이언트 — 기기 등록과 관측 업로드. 계약 정본은 `docs/HUB-PROTOCOL.md` §3-0·§3-1·§3-8(사통팔달).
 
 stdlib `urllib` 만 쓴다(관측기 런타임 의존성 0). 관측기가 말을 거는 곳은 **공개 리스너** 하나이고,
 자격은 등록 때 받은 **기기 토큰**뿐이다 — 관리 시크릿은 exe 에 없다.
@@ -129,6 +129,16 @@ def upload(hub_url: str, token: str, device_id: str, observations: list, *, open
                      token=token, opener=opener)
 
 
+def upload_satong(hub_url: str, token: str, device_id: str, server_id: int, messages: list,
+                  collector: dict, *, opener=None) -> Response:
+    """`POST /api/satong/observations` — 기기 토큰(허브 `satong_slots` 에 든 슬롯만). ``messages`` 가 비면 하트비트다 —
+    ``collector``(클라 연결·마지막 사통 시각)만 갱신한다(HUB-PROTOCOL §3-8)."""
+    payload = {"v": 1, "device_id": device_id, "server_id": int(server_id),
+               "collector": collector, "messages": messages}
+    return post_json(hub_url.rstrip("/") + "/api/satong/observations", payload,
+                     token=token, opener=opener)
+
+
 def is_hub(resp: Response) -> bool:
     """`GET /` 응답이 **이 허브**인가 — 200 + `service == SERVICE`. 닿기만 한 200 은 아니다."""
     return resp.ok and str(resp.body.get("service") or "") == SERVICE
@@ -225,6 +235,9 @@ def classify_upload(resp: Response) -> tuple[str, str]:
     if resp.status == 403:
         if resp.error == "device_revoked":
             return "stop", "이 기기가 허브 명단에서 제거됐습니다(403) — 관리자에게 문의하세요."
+        if resp.error == "satong_not_allowed":
+            return "stop", ("이 기기는 사통 수집 기기로 지정돼 있지 않습니다(403) — 관리자가 허브 config 의 "
+                            "satong_slots 에 이 기기의 슬롯을 넣어야 합니다.")
         if resp.error == "device_mismatch":
             return "stop", ("설정의 기기 id 가 토큰과 다릅니다(403) — 허브가 알려준 id 는 "
                             f"{resp.body.get('device_id', '?')} 입니다.")

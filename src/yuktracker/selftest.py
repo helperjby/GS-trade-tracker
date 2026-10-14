@@ -85,6 +85,8 @@ class Probes:
     #: CLI 오버라이드 — 판정 문구가 "어디서 온 주소인지"를 말할 수 있게 그대로 들고 있는다.
     cli_hub_url: str = ""
     upload: bool = True
+    #: CLI `--satong N` — 설정 `satong_server_id` 보다 우선. 둘 다 없으면 사통 줄을 아예 찍지 않는다(지인 화면 무변경).
+    cli_satong_server_id: Optional[int] = None
 
 
 # ---------------------------------------------------------------- 실 프로브
@@ -143,7 +145,7 @@ def _spool_counts() -> tuple[int, int]:
 
 
 def default_probes(*, hub_url: str = "", client_dir: str = "", upload: bool = True,
-                   wait_sec: float = WAIT_SEC) -> Probes:
+                   wait_sec: float = WAIT_SEC, satong_server_id: Optional[int] = None) -> Probes:
     from .seassist.admin import is_admin
 
     opener = hub_client.make_opener()
@@ -156,7 +158,7 @@ def default_probes(*, hub_url: str = "", client_dir: str = "", upload: bool = Tr
         hub_status=lambda url: hub_client.status(url, opener=opener),
         hub_ping=lambda url, token: hub_client.ping(url, token, opener=opener),
         spool_counts=_spool_counts,
-        cli_hub_url=hub_url, upload=upload)
+        cli_hub_url=hub_url, upload=upload, cli_satong_server_id=satong_server_id)
 
 
 # ---------------------------------------------------------------- 판정(순수)
@@ -236,6 +238,10 @@ def run(p: Probes) -> tuple[list[Check], int]:
         else:
             add(_ping_check(p, hub_url, cfg))
 
+    satong = _satong_check(p, cfg, hub_url)
+    if satong is not None:
+        add(satong)
+
     pending, quarantined = _safe(p.spool_counts, (-1, -1))
     if pending < 0 or quarantined < 0:
         add(Check(WARN, "업로드 대기", f"스풀 폴더를 읽지 못했습니다 ({paths.spool_dir()})."))
@@ -248,6 +254,20 @@ def run(p: Probes) -> tuple[list[Check], int]:
     marks = [c.mark for c in checks]
     rc = RC_FAIL if FAIL in marks else (RC_WARN if WARN in marks else RC_OK)
     return checks, rc
+
+
+def _satong_check(p: Probes, cfg: app_config.Config, hub_url: str) -> Optional[Check]:
+    """사통팔달 수집 줄 — 켠 PC(운영자)에서만 나온다. 허브의 허용 여부(`satong_slots`)는 여기서 물을 길이 없다 —
+    관측 실행에서 403 `satong_not_allowed` 면 업로더가 멈추고 사유를 찍는다."""
+    raw = cfg.satong_server_id.strip()
+    server_id = app_config.resolve_satong_server_id(p.cli_satong_server_id, cfg)
+    if server_id is None:
+        if raw:
+            return Check(WARN, "사통 수집", f"설정의 satong_server_id={raw!r} 가 양의 정수가 아니라 꺼집니다.")
+        return None
+    if not p.upload or not hub_url or not cfg.hub_token:
+        return Check(WARN, "사통 수집", f"켬 — 서버 {server_id}. 허브 업로드가 안 되는 상태라 건수만 찍습니다.")
+    return Check(OK, "사통 수집", f"켬 — 서버 {server_id}. 허브가 이 기기 슬롯을 satong_slots 에 넣어 둬야 올라갑니다.")
 
 
 def _ping_check(p: Probes, hub_url: str, cfg: app_config.Config) -> Check:
@@ -303,13 +323,14 @@ def render(checks: Sequence[Check], rc: int) -> list[str]:
 
 def main(*, hub_url: str = "", client_dir: str = "", upload: bool = True,
          wait_sec: float = WAIT_SEC, probes: Optional[Probes] = None,
-         pause: bool = True, out=None, stdin=None) -> int:
+         pause: bool = True, out=None, stdin=None, satong_server_id: Optional[int] = None) -> int:
     """자가진단 1회. `pause` 는 승격 재기동으로 **새로 뜬 콘솔**이 결과를 보여 주기 전에 닫히지 않게 한다."""
     import sys
 
     out = out if out is not None else sys.stdout
     p = probes if probes is not None else default_probes(
-        hub_url=hub_url, client_dir=client_dir, upload=upload, wait_sec=wait_sec)
+        hub_url=hub_url, client_dir=client_dir, upload=upload, wait_sec=wait_sec,
+        satong_server_id=satong_server_id)
     checks, rc = run(p)
     for line in render(checks, rc):
         print(line, file=out, flush=True)

@@ -28,6 +28,8 @@
   | `POST /api/market/observations` | 허용 | 기기 토큰 `Authorization: Bearer <token>`; 직접 접속이면 관리 시크릿도 |
   | `GET /api/market/ping` | 허용 | 위와 같음 — 토큰 확인 전용(§3-7), 자가진단이 쓴다 |
   | `GET /api/market/search` `listings` `stats` | **`403 {"ok":false,"error":"not_public"}`**(자격 검사 전) | 관리 시크릿 `Authorization: Bearer <secret>` |
+  | `POST /api/satong/observations` | 허용 | 기기 토큰 + 그 기기의 슬롯이 `satong_slots` 에 있어야 함(§3-8); 직접 접속이면 관리 시크릿도 |
+  | `GET /api/satong/recent` | **`403 not_public`**(자격 검사 전) | 관리 시크릿 |
 
   자격 없음·불일치·범위 밖(기기 토큰으로 조회, 공개 요청의 관리 시크릿)은 전부 `401 {"error":"unauthorized"}`.
 - 속도제한(프로세스 메모리, 재기동이면 리셋; 두 리스너가 버킷을 공유): 등록 IP 당 `register_limit_per_hour`(10)·등록 **슬롯당**
@@ -74,6 +76,18 @@ CREATE TABLE devices (                  -- 초대 코드로 자기등록한 관�
   created_ts REAL NOT NULL, created_ip TEXT,
   last_seen_ts REAL, upload_count INTEGER NOT NULL DEFAULT 0,   -- 인증된 업로드마다 last_seen, 저장 성공이면 +1
   revoked_ts REAL, note TEXT NOT NULL DEFAULT '');              -- 제거 = 다음 요청부터 403 (요청마다 조회, 캐시 없음)
+CREATE TABLE satong_messages (          -- 사통팔달 1건 (§3-8, 2026-10-14)
+  id INTEGER PRIMARY KEY AUTOINCREMENT, -- 소비자 커서 — 지운 번호를 다시 쓰지 않는다
+  server_id INTEGER NOT NULL, sender TEXT NOT NULL, text TEXT NOT NULL,
+  first_seen_ts REAL NOT NULL, last_seen_ts REAL NOT NULL, seen_count INTEGER NOT NULL DEFAULT 1,   -- 병합된 사본 수
+  first_device TEXT NOT NULL, last_obs_id TEXT NOT NULL, recv_ts REAL NOT NULL,
+  payload_json TEXT NOT NULL DEFAULT '{}');  -- 열로 안 간 키(opcode·anomalies·mid·tail…)
+CREATE TABLE satong_obs_ids (           -- 받은 obs_id(재전송 dedup) → 반영된 메시지 id
+  obs_id TEXT PRIMARY KEY, message_id INTEGER NOT NULL, recv_ts REAL NOT NULL);
+CREATE TABLE satong_collectors (        -- 수집 기기마다 마지막 하트비트
+  device_id TEXT PRIMARY KEY, server_id INTEGER NOT NULL,
+  last_heartbeat_ts REAL NOT NULL,      -- 허브 수신 시각(관측기 시계 무관)
+  client_connected INTEGER NOT NULL, last_message_ts REAL, messages INTEGER, agent_ts REAL);
 ```
 
 - `listing_key` 에 아이템 id·판매자를 붙이는 이유: 등록 id 가 재사용돼도 다른 판매 건이 섞이지 않게. 같은 등록의
@@ -304,6 +318,54 @@ HTTP 관리 라우트를 두지 않는 이유: 공개 표면을 늘리지 않고
 - **옛 판 허브**(이 라우트 이전)는 직접 접속에서 404, 공개 리스너에서는 관리 라우트로 보여 403 `not_public` 이다. 관측기는 둘을
   같은 안내("허브가 옛 판입니다")로 묶는다.
 
+### 3-8. 사통팔달 — `POST /api/satong/observations` · `GET /api/satong/recent` (2026-10-14)
+
+운영자 PC 의 상시 클라가 받은 사통팔달(`docs/PACKET-SATONG.md`, H-2610-01 B)을 미루봇에 넘기는 경로. 육의전과 독립이다(표·설정·보존 별도).
+관측기는 `--satong <서버 번호>` 로만 켠다(기본 꺼짐, 지인 배포판은 이 라우트를 부르지 않는다).
+
+```jsonc
+// → POST /api/satong/observations   (Bearer <기기 토큰>)
+{"v":1, "device_id":"d-3f9a1c7e2b", "server_id":7,
+ "collector":{"client_connected":true, "last_message_ts":1760400000.1, "messages":118, "agent_ts":1760400012.0},
+ "messages":[{"obs_id":"a1b2c3d4:1760400000123:0123456789ab", "agent_ts":1760400000.123,
+              "sender":"보낸이A", "text":"합성 외치기", "opcode":8066, "anomalies":[], "mid":0, "tail":"00010000000000"}]}
+// ← 200
+{"ok":true, "accepted":1, "merged":0, "duplicates":0, "server_time":1760400012.4}
+```
+
+- **`messages` 가 빈 목록이면 하트비트**다 — 수집기 상태만 `satong_collectors` 에 upsert 한다. 관측기는 보낼 것이 없어도 60초마다 보내고,
+  메시지 배치에도 같은 `collector` 를 싣는다(하트비트 겸용). `collector.client_connected`(bool)는 필수, 나머지는 null 허용.
+- **허용 슬롯**: 기기 토큰이면 그 기기의 `slot` 이 설정 `satong_slots` 에 있어야 한다 — 아니면 `403 {"ok":false,"error":"satong_not_allowed"}`
+  (아무것도 쓰지 않고 `last_seen_ts` 만 남긴다; 관측기는 업로더를 멈춘다). 사통은 그대로 카톡방에 나가므로 지인 기기 아무나 올리지 못하게 한다.
+  관리 시크릿(직접 접속)은 항상 허용. 그 밖의 인증·속도제한(업로드 버킷 공유)·`device_mismatch` 는 §3-1 과 같다.
+- 검증(전건, 위반 시 400 + 아무것도 안 씀): `server_id` 0 이상 정수 · `messages` 목록 ≤ `max_satong_messages_per_request`(100) · 메시지마다
+  `obs_id` 1~128자 · `agent_ts` 는 `[now − retention_satong_days, now + max_agent_ts_ahead_sec]` · `sender` 비지 않은 문자열 ≤64자 · `text`
+  문자열 ≤128자(빈 문자열 허용). 미지 키는 통과해 `payload_json` 에 남는다.
+- 반영(트랜잭션 1개): `obs_id` 가 이미 있으면 **재전송 → `duplicates`**. 아니면 `seen_ts = min(agent_ts, recv_ts)` 로 같은 (서버, 보낸이, 내용)
+  행 중 **10초**(`SATONG_MERGE_SEC`) 안의 것을 찾아 **병합 → `merged`**(`seen_count` +1, 시각 창 넓힘 — 다른 PC 가 같은 외치기를 올린 경우),
+  없으면 **새 행 → `accepted`**. 서버는 사통을 약 15초 간격으로 내보내므로 같은 사람이 같은 글을 다음 순번에 또 외치면 새 행이다.
+  관측기도 같은 PC 의 클라 간 사본을 같은 10초 규칙으로 먼저 거른다.
+
+```jsonc
+// → GET /api/satong/recent?server_id=7&since_id=1203&limit=200   (Bearer <관리 시크릿>, 직접 접속 전용)
+// ← 200
+{"v":1, "server_time":1760400030.0, "server_id":7, "since_id":1203, "limit":200,
+ "online":true, "offline_sec":180.0,
+ "collectors":[{"device_id":"d-3f9a1c7e2b", "slot":"slot1", "alias":"slot1", "last_heartbeat_ts":1760400012.4,
+                "heartbeat_age_sec":17.6, "client_connected":true, "online":true,
+                "last_message_ts":1760400000.1, "messages":118, "agent_ts":1760400012.0}],
+ "last_message_ts":1760400000.123,
+ "count":1, "messages":[{"id":1204, "sender":"보낸이A", "text":"합성 외치기",
+                         "first_seen_ts":1760400000.123, "last_seen_ts":1760400000.123, "seen_count":1}]}
+```
+
+- `server_id` 필수(없거나 정수가 아니면 400 `field:"server_id"`). `since_id` 가 있으면 **그보다 큰 id 를 오래된 순으로** `limit` 개(증분),
+  없으면 **가장 최근** `limit` 개를 id 오름차순으로(첫 폴링의 기준점). `limit` 기본 200, 상한 500.
+- **`online`** = 그 서버의 수집기 중 하트비트가 `satong_offline_sec`(180초 = 관측기 주기의 3배) 안이고 `client_connected` 인 것이 하나라도
+  있는가. 소비자(미루봇)는 이 값을 그대로 쓴다 — **`online=false` 는 "사통 없음"이 아니라 원본 장애**다(빈 `messages` 와 구분).
+- 소비자 규약: 첫 폴링(커서 없음)은 기준점만 잡고 보내지 않는다(몰아 보내기 금지) → 이후 `since_id` = 마지막으로 처리한 `id`.
+  스풀에 묵었다 늦게 올라온 사통은 큰 id + 옛 `first_seen_ts` 로 온다 — 늦은 글을 보낼지는 소비자가 `first_seen_ts` 로 정한다.
+
 ## 4. 시각·신선도
 
 - 허브 저장 시각은 `seen_ts = min(agent_ts, recv_ts)`: 스풀에 묵었다가 늦게 올라온 관측은 **관측 시각**이 남고(그때 본
@@ -332,6 +394,8 @@ HTTP 관리 라우트를 두지 않는 이유: 공개 표면을 늘리지 않고
 
 일 1회 `prune`: `market_observations.recv_ts` · `market_listings.last_seen_ts` 가 `now − retention_market_days(30)` **미만**인 행
 삭제(경계값 보존). `market_item_names` 는 지우지 않는다.
+사통(같은 루프, `prune_satong`): `satong_messages.last_seen_ts` · `satong_obs_ids.recv_ts` 가 `now − retention_satong_days(7)` 미만인 행.
+`satong_collectors` 는 기기 수만큼이라 지우지 않는다.
 
 ## 6. 설정 (`hub/config.json`, `.example` 참조)
 
@@ -350,11 +414,19 @@ HTTP 관리 라우트를 두지 않는 이유: 공개 표면을 늘리지 않고
 `register_limit_per_hour`(10) `register_slot_limit_per_hour`(5) `upload_limit_per_min`(120) `auth_fail_limit_per_min`(30). 설정은 기동 때 읽는다 — 코드 교체·슬롯 추가는
 `config.json` 수정 뒤 `docker compose restart`. 구 `invite_code`·`max_devices` 키가 있으면 이관 안내와 함께 기동 거부.
 
+사통팔달(2026-10-14, §3-8): **`satong_slots`**(슬롯 이름 목록, 기본 `[]` = 기기 토큰으로는 못 올린다; `invite_codes` 에 없는 이름이면 기동
+거부) `retention_satong_days`(7) `satong_offline_sec`(180) `max_satong_messages_per_request`(100) `satong_recent_limit_default`(200)
+`satong_recent_limit_max`(500).
+
 관측기 쪽 키(PR-Y1b, `%APPDATA%\YukTracker\config.json`): `hub_url`(공개 Funnel 주소; exe 내장 기본값) · `hub_device_id` · `hub_token`
-(§3-0 응답 저장). 초대 코드는 `--invite-code` 인자/첫 실행 프롬프트로만 받고 저장하지 않는다. 구 `hub_secret` 키는 폐기 — 관리
+(§3-0 응답 저장) · `satong_server_id`(사통 수집 서버 번호, 빈 값 = 끔; CLI `--satong N` 이 이긴다). 초대 코드는 `--invite-code` 인자/첫 실행 프롬프트로만 받고 저장하지 않는다. 구 `hub_secret` 키는 폐기 — 관리
 시크릿은 exe 에 들어가지 않는다.
 
 ## 7. 변경 이력
+
+- 2026-10-14 v1 **사통팔달**(additive; 미루봇 사통 원본을 외부 기록 사이트 → 운영자 PC 패킷 수집으로 바꾸는 계획, 사용자 결정: 육의전 허브 경유):
+  §3-8 `POST /api/satong/observations`(기기 토큰은 `satong_slots` 슬롯만, 빈 배치 = 하트비트, 재전송 dedup·10초 병합) ·
+  `GET /api/satong/recent`(관리 전용, `since_id` 커서, `online` 판정) · §1 표 셋 · §5 보존 · §6 설정 키. 기존 라우트·표 무변경.
 
 - 2026-09-23 v1 **소멸 추정**(additive; 사용자 결정 3건 — 허브+봇 계약까지 반영 · 등록일 추정은 관측 시각 경계만 · `기간` 검정 전엔 단기 고정):
   §4 게임 규칙(단기 D+2 00:00 · 장기 D+3 00:00 KST)과 추정식, §3-2 행 `expires_from_ts`·`expires_by_ts` + 응답 `expiry_days` + 기본 필터

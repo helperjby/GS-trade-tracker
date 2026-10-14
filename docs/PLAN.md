@@ -216,6 +216,17 @@ G7 은 exe 를 **지인 최대 7명**의 PC 에 돌리는 단계다. PR-Y1b 까�
   기존 내구 발송 경로).
   (2026-09-21: `Lv.`(용병) 표시는 용병 탭 캡처·가설 뒤로 보류 — 이번 파서는 아이템 탭만; `기간`(장기/단기)은 H-2609-11 검정 뒤 표시 후보.)
 
+### PR-S1 — 사통팔달 수집 (2026-10-14, 이 레포)
+배경: 미루봇-IRIS 의 사통팔달 알림 원본(외부 공개 기록 사이트)이 2026-10-06 부터 접근 차단됐다. 사용자 결정(2026-10-13): 운영자 PC 에 게임 클라를
+상시 켜 두고 사통을 패킷으로 직접 받는다 · 전달은 **육의전 허브 경유** · 수집기는 YukTracker 확장(**기본 꺼짐**) · 확장 전 자원 실측이 게이트.
+- 0단계(코드 0줄): 자원 실측 8h(클라 3개, 관측기 RSS +0.6MB·CPU 0.68%/코어 — 기준 +10MB·1% 통과) · `0x1f82` = 사통 대조(`docs/PACKET-SATONG.md` §4).
+- 관측기: `seassist/gersang_protocol.py`(`OP_SATONG`·`is_satong`·`observe_satong` 전량 대기·`take_satong`) · `seassist/packet_satong.py`(파서) ·
+  `packet_state_source.py`(`satong_cb`·헬스 6종) · `satong_observer.py`(클라 간 10초 중복 제거·봉투·`SatongUploader` 하트비트 60s·별도 스풀
+  `spool\satong`) · `--satong <서버 번호>` / 설정 `satong_server_id` · 자가진단 `사통 수집` 줄(켠 PC 에서만).
+- 허브: `/api/satong/observations`·`/api/satong/recent`, 표 셋, `satong_slots`(HUB-PROTOCOL §3-8).
+- 다음: Pi 허브 재배포(`satong_slots` 에 운영자 슬롯) → 운영자 PC `--satong 7` 상시 실행 → 1시간 뒤 `recent` 누적·`online` 확인, 클라 종료 시
+  `online=false` → 미루봇-IRIS PR(ADR 먼저, `HubSatongSource`).
+
 ## 4. 가정·미결
 - 목록은 8000 s2c `0x321f`(확정, B). 요청(c2s)은 암호화라 조회 조건은 응답에서만.
 - 모든 사용자가 같은 서버(세종)라고 가정하되 관측에 `server_ip` 를 남긴다.

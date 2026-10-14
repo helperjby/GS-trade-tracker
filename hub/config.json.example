@@ -20,5 +20,8 @@
   "listings_limit_max": 2000,
   "max_observations_per_request": 100,
   "max_rows_per_observation": 64,
-  "max_agent_ts_ahead_sec": 86400
+  "max_agent_ts_ahead_sec": 86400,
+  "satong_slots": [],
+  "retention_satong_days": 7,
+  "satong_offline_sec": 180
 }

@@ -19,6 +19,7 @@
 4. `docs/HUB-PROTOCOL.md` — 관측기 ↔ 허브 ↔ 미루봇 계약(엔드포인트·필드·정규화·신선도)의 정본
 5. `docs/DEPLOY.md` — 배포·실기기 게이트(G7) 런북(Pi 판 확인 → Funnel → exe 빌드 → 지인 안내문 → 게이트)
 6. `docs/PACKET-MARKET.md` — 육의전 프로토콜 판정의 정본(필드 표·가설 레지스트리 H-2609-07~11·재현·PATCH-RECHECK).
+   사통팔달(`0x1f82`, 운영자 PC 전용 수집)은 `docs/PACKET-SATONG.md`(H-2610-01~02).
    게이트 사다리·등급 정의 자체는 SEAssist `docs/PACKET-PROCESS.md` §1~§3 **동결 시점(main b54cb73) 참조**.
 
 ## 진실의 원천 순서

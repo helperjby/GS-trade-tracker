@@ -62,9 +62,10 @@ from typing import Callable, Optional
 
 from . import pcap_ffi
 from . import tcp_flow_map
-from .gersang_protocol import ENTER, JOCHUL_OPCODES, MARKET_OPCODES, FlowDecoder
+from .gersang_protocol import ENTER, JOCHUL_OPCODES, MARKET_OPCODES, SATONG_OPCODES, FlowDecoder
 from .logger import format_exc_brief, get_logger
 from .packet_market import parse_market_page
+from .packet_satong import parse_satong
 
 # ─────────────────────────── 튜닝 상수 ───────────────────────────
 
@@ -106,6 +107,9 @@ _JOCHUL_OPS_TEXT = "/".join(f"0x{op:04x}" for op in _JOCHUL_OPS)
 #: 육의전 번호 표기 — 헬스 줄 키(`321f=`)와 경고 문구(패킷 PR-Y2).
 _MARKET_OPS = tuple(sorted(MARKET_OPCODES))
 _MARKET_OPS_TEXT = "/".join(f"0x{op:04x}" for op in _MARKET_OPS)
+#: 사통팔달 번호 표기 — 헬스 줄 키(`1f82=`)와 경고 문구(H-2610-01).
+_SATONG_OPS = tuple(sorted(SATONG_OPCODES))
+_SATONG_OPS_TEXT = "/".join(f"0x{op:04x}" for op in _SATONG_OPS)
 
 #: 파서 드랍 사유 토큰 (health 카운터 키 — 사전 시드해 dict 크기를 고정,
 #: health_snapshot 의 무락 복사가 안전해진다).
@@ -163,7 +167,8 @@ class _Flow:
                  "last_event_ts", "lock_notified", "reset_sig",
                  "fullness_drops_seen", "jochul_rejects_seen",
                  "popup_unknown_seen",
-                 "party_malformed_seen", "market_rejects_seen", "observation_token")
+                 "party_malformed_seen", "market_rejects_seen", "satong_rejects_seen",
+                 "observation_token")
 
     def __init__(self, slot_idx: int, pid: int, local_port: int,
                  server_port: int = tcp_flow_map.MAIN_PORT, *,
@@ -185,6 +190,7 @@ class _Flow:
         self.popup_unknown_seen = 0
         self.party_malformed_seen = 0
         self.market_rejects_seen = 0
+        self.satong_rejects_seen = 0
         self.observation_token = object()
 
     @property
@@ -291,6 +297,12 @@ class PacketStateSource:
     (세그먼트마다 콜백 유무로 설정 — wordinput 과 같다). 파싱 실패는
     ``market_parse_failures`` 로만 세고 전달하지 않으며, 콜백 예외는 wordinput 처럼 삼키고
     ``market_callback_errors`` 로 센다.
+
+    ``satong_cb(slot_idx, message, observation, pid=)`` 는 사통팔달 1건 관측이다
+    (`packet_satong.SatongMessage` — 파싱 성공분만, `observation` 은 raw `SatongObservation`). 육의전과 같은
+    계약이다(H-2610-01 B — 관측 전용 배선): 콜백이 있어야 ``observe_satong`` 이 켜지고, 파싱 실패는
+    ``satong_parse_failures``, 콜백 예외는 ``satong_callback_errors`` 로 센다. 같은 외치기가 클라마다 한 번씩
+    오므로 슬롯 간 중복 제거는 소비자 몫이다(엔진은 흐름 단위만 본다).
     """
 
     def __init__(
@@ -305,6 +317,7 @@ class PacketStateSource:
         battle_cb: Optional[Callable[..., None]] = None,
         wordinput_cb: Optional[Callable[..., None]] = None,
         market_cb: Optional[Callable[..., None]] = None,
+        satong_cb: Optional[Callable[..., None]] = None,
         invalidate_cb: Optional[Callable[[int], None]] = None,
         aux_c2s: bool = False,
         enter_anchor: bool = True,
@@ -319,6 +332,7 @@ class PacketStateSource:
         self._battle_cb = battle_cb
         self._wordinput_cb = wordinput_cb
         self._market_cb = market_cb
+        self._satong_cb = satong_cb
         self._invalidate_cb = invalidate_cb
         self._aux_c2s = bool(aux_c2s)
         #: 전투 ENTER 앵커 락(기본 on). 실기기에서 유령 IN 이 의심되면 재배포 없이 끌 수 있게
@@ -356,6 +370,8 @@ class PacketStateSource:
             wordinput_dropped=0, wordinput_callback_errors=0,
             market_frames=0, market_rows=0, market_rejected=0, market_dropped=0,
             market_parse_failures=0, market_anomalies=0, market_callback_errors=0,
+            satong_frames=0, satong_rejected=0, satong_dropped=0,
+            satong_parse_failures=0, satong_anomalies=0, satong_callback_errors=0,
         )
 
     # ---------- lifecycle (소유자 스레드) ----------
@@ -622,21 +638,25 @@ class PacketStateSource:
                     f"{op:04x}={counts.get(op, 0)}" for op in _JOCHUL_OPS)
                 market_counts = " ".join(
                     f"{op:04x}={counts.get(op, 0)}" for op in _MARKET_OPS)
+                satong_counts = " ".join(
+                    f"{op:04x}={counts.get(op, 0)}" for op in _SATONG_OPS)
                 per_flow.append(
                     f"s{fl.slot_idx + 1}:frames={st.frames} lock={int(st.locked)} "
                     f"anchor={st.enter_anchor_locks} "
                     f"03f0={counts.get(0x03F0, 0)} 0fa4={counts.get(0x0FA4, 0)} "
-                    f"1772={counts.get(0x1772, 0)} {jochul_counts} {market_counts}")
+                    f"1772={counts.get(0x1772, 0)} {jochul_counts} {market_counts} "
+                    f"{satong_counts}")
             get_logger().info(
                 "[패킷] 헬스 — packets=%d fed=%d flows=%d aux_flows=%d aux_segs=%d "
                 "battle=%d jochul=%d rejected=%d popup_unknown=%d popup_suppressed=%d "
-                "market=%d mrej=%d "
+                "market=%d mrej=%d satong=%d srej=%d "
                 "fullness=%d unmapped=%d aux_unmapped=%d aux_c2s=%d invalid=%d | %s",
                 h["packets"], h["fed_segments"], h["tracked_flows"],
                 h["tracked_aux_flows"], h["aux_segments"],
                 h["battle_events"], h["jochul_events"], h["jochul_rejected"],
                 h["popup_unknown"], h["popup_unknown_suppressed"],
                 h["market_frames"], h["market_rejected"],
+                h["satong_frames"], h["satong_rejected"],
                 h["fullness_updates"], h["unmapped_segments"],
                 h["aux_unmapped_segments"], h["aux_c2s_segments"],
                 h["state_invalidations"], " ".join(per_flow) or "-")
@@ -692,11 +712,14 @@ class PacketStateSource:
         fl.decoder.framer.retain_exit_body = self._battle_cb is not None
         fl.decoder.framer.observe_wordinput = self._wordinput_cb is not None
         fl.decoder.framer.observe_market = self._market_cb is not None
+        fl.decoder.framer.observe_satong = self._satong_cb is not None
         wordinput_drops = fl.decoder.wordinput_dropped
         market_drops = fl.decoder.market_dropped
+        satong_drops = fl.decoder.satong_dropped
         events = fl.decoder.feed_segment(seg.seq, seg.payload, now)
         self._health["wordinput_dropped"] += fl.decoder.wordinput_dropped - wordinput_drops
         self._health["market_dropped"] += fl.decoder.market_dropped - market_drops
+        self._health["satong_dropped"] += fl.decoder.satong_dropped - satong_drops
         self._health["fed_segments"] += 1
         fl.reset_sig = fl.current_reset_sig()
         if fl.reset_sig != before:
@@ -851,6 +874,31 @@ class PacketStateSource:
                     mcb(fl.slot_idx, page, observation, pid=fl.pid)
                 except Exception:
                     self._health["market_callback_errors"] += 1
+
+        # 사통팔달(0x1f82, H-2610-01 B) — 관측 전용, 육의전과 같은 배선. 거부 델타도 같은 진단축이다.
+        srej = fl.decoder.satong_rejected
+        if srej != fl.satong_rejects_seen:
+            self._health["satong_rejected"] += srej - fl.satong_rejects_seen
+            fl.satong_rejects_seen = srej
+            self._warn_once(
+                "satong_rejected",
+                f"사통팔달 번호({_SATONG_OPS_TEXT}) 프레임이 판별식(본문 73B·헤더)에 불일치 — "
+                "클라 패치 드리프트 의심, docs/PACKET-SATONG.md 확인")
+        scb = self._satong_cb
+        for observation in fl.decoder.take_satong():
+            message = parse_satong(observation.body)
+            if message is None:
+                # is_satong 은 통과했는데 파서가 거부(보낸이 빈 값) — 프레임은 셌지만 전달하지 않는다.
+                self._health["satong_parse_failures"] += 1
+                continue
+            self._health["satong_frames"] += 1
+            if message.anomalies:
+                self._health["satong_anomalies"] += 1
+            if scb is not None:
+                try:
+                    scb(fl.slot_idx, message, observation, pid=fl.pid)
+                except Exception:
+                    self._health["satong_callback_errors"] += 1
 
     def _reconcile(self, flows, pids: dict[int, int],
                    flow_map: dict[_FlowKey, _Flow],

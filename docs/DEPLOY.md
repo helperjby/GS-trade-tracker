@@ -103,6 +103,27 @@ curl -s -H "Authorization: Bearer <관리 시크릿>" "http://<pi-tailnet-ip>:88
 - 기기가 하나도 안 올라오면: 그 PC 에서 `--selftest` → `기기 토큰` 줄이 401/403 인지, `패킷 흐름` 줄이 X 인지로 갈린다.
 - 결과는 `SESSION_STATE.md` 에 날짜와 함께 한 줄 기록(기기명·주소는 자리표시자로).
 
+## 6. 사통팔달 수집 게이트 (운영자 PC 1대, 2026-10-14)
+
+1. Pi `config.json` 에 `"satong_slots": ["<운영자 PC 의 슬롯>"]` → `docker compose up -d --build` → 기동 로그 `satong_slots=<슬롯>`.
+2. 운영자 PC(서버에 접속한 클라 1개 이상)에서 `YukTracker.exe --satong 7`(서버 번호; 매번 쓰기 싫으면 설정 `satong_server_id`).
+   `--selftest --satong 7` 에 `O 사통 수집 — 켬 — 서버 7` 줄.
+3. 1시간 뒤 확인(제작자 PC, tailnet 직접 접속):
+
+```bash
+curl -s -H "Authorization: Bearer <관리 시크릿>" "http://<pi-tailnet-ip>:8800/api/satong/recent?server_id=7&limit=5"
+```
+
+| # | 확인 | 기대 |
+|---|---|---|
+| 1 | `online` | true, `collectors[0].heartbeat_age_sec` < 70 |
+| 2 | `messages` | 분당 몇 건씩 누적(콘솔 `[사통] 최근 10분 N건` 과 비슷한 수) |
+| 3 | 클라를 끄고 3~5분 | `online` false(`client_connected` false) |
+| 4 | 관측기를 끄고 3분 | `online` false(`heartbeat_age_sec` > 180) |
+| 5 | 클라 2개로 접속 | `seen_count` 1 그대로(클라 간 사본은 관측기가 거른다) |
+
+`satong_not_allowed`(403)가 콘솔에 뜨면 1번의 슬롯 이름이 그 기기의 슬롯(`devices.py list`)과 다른 것이다.
+
 ## 자주 나오는 실패와 원인
 
 | 증상 | 원인 | 조치 |

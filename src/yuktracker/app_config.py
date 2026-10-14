@@ -1,6 +1,7 @@
 """관측기 설정 — `%APPDATA%\\YukTracker\\config.json`.
 
-키는 다섯이다: `hub_url` · `hub_device_id` · `hub_token` · `local_id` · `client_dir`.
+키는 여섯이다: `hub_url` · `hub_device_id` · `hub_token` · `local_id` · `client_dir` · `satong_server_id`
+(사통팔달 수집을 켤 서버 번호 — 빈 값이면 끔, 운영자 PC 에서만 쓴다. CLI `--satong N` 이 이긴다).
 **초대 코드는 저장하지 않는다**(1회용) 그리고 **허브 관리 시크릿은 여기에도 exe 에도 없다**
 (관측기는 기기 토큰만 쓴다 — `docs/HUB-PROTOCOL.md` §0).
 
@@ -31,7 +32,7 @@ except ImportError:  # pragma: no cover - 소스 실행의 정상 경로
 
 ENV_HUB_URL = "YUKTRACKER_HUB_URL"
 #: 저장하는 키 — 이 목록 밖의 키는 `extra` 로 보존만 한다.
-KEYS = ("hub_url", "hub_device_id", "hub_token", "local_id", "client_dir")
+KEYS = ("hub_url", "hub_device_id", "hub_token", "local_id", "client_dir", "satong_server_id")
 
 
 @dataclass
@@ -43,6 +44,8 @@ class Config:
     #: 재등록해도 옛 스풀의 `obs_id` 가 흔들리지 않는다.
     local_id: str = ""
     client_dir: str = ""
+    #: 사통팔달 수집 서버 번호(문자열 정수, 예 "7") — 빈 값이면 끈다(기본). 패킷에 서버 식별자가 없어 사람이 정한다.
+    satong_server_id: str = ""
     extra: dict = field(default_factory=dict)
 
     def to_json_dict(self) -> dict:
@@ -109,3 +112,21 @@ def resolve_hub_url(cli_url: str = "", cfg: Optional[Config] = None,
         if value:
             return value
     return ""
+
+
+def resolve_satong_server_id(cli_value: Optional[int] = None, cfg: Optional[Config] = None) -> Optional[int]:
+    """CLI `--satong N` > config `satong_server_id` > 끔(None). 양의 정수가 아니면 끔 — 잘못 쓴 설정이 엉뚱한 서버로
+    올리지 않게(경고 1줄)."""
+    if cli_value is not None:
+        return int(cli_value) if int(cli_value) > 0 else None
+    raw = (cfg.satong_server_id if cfg is not None else "").strip()
+    if not raw:
+        return None
+    try:
+        value = int(raw)
+    except ValueError:
+        value = 0
+    if value <= 0:
+        get_logger().warning("설정의 satong_server_id=%r 가 양의 정수가 아닙니다 — 사통 수집을 끕니다", raw)
+        return None
+    return value

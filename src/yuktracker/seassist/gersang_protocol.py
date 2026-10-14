@@ -188,6 +188,15 @@ MARKET_MAX_ROWS = 64
 _MARKET_FULL_WAIT_MAX_BODY = MARKET_HEADER_LEN + MARKET_ROW_LEN * MARKET_MAX_ROWS
 _MARKET_QUEUE_MAX = 64
 
+# ─────────────────────────── 사통팔달 (H-2610-01, B) ───────────────────────────
+#: 서버 전체 외치기(사통팔달) — 접속해 있는 클라 전부에 8000 s2c 로 온다(가만히 서 있어도). 관측된 번호만 —
+#: 패치로 옮겨 가면 여기 추가한다(docs/PACKET-SATONG.md). idle 베이스라인 6종에 이미 들어 있던 번호다.
+OP_SATONG = 0x1F82
+SATONG_OPCODES = frozenset({OP_SATONG})
+#: 본문 고정 길이 — 코퍼스 고유 252/252 프레임(기기 폴더 5개·119창, 재전송 사본 제외)이 75B(접두 포함) = 본문 73B. 길이가 판별의 핵심이다.
+SATONG_BODY_LEN = 73
+_SATONG_QUEUE_MAX = 64
+
 
 def wordinput_kind(opcode: int, body: bytes) -> str | None:
     """Classify a complete candidate body; unknown layouts return None."""
@@ -253,6 +262,7 @@ __all__ = [
     "BattleEvent",
     "WordinputObservation",
     "MarketObservation",
+    "SatongObservation",
     "wordinput_kind",
     "FramerStats",
     "FlowStats",
@@ -264,6 +274,7 @@ __all__ = [
     "is_jochul",
     "is_market",
     "market_row_count",
+    "is_satong",
     "is_party_table",
     "parse_party_table",
     "PartyRecord",
@@ -290,6 +301,9 @@ __all__ = [
     "MARKET_HEADER_LEN",
     "MARKET_ROW_LEN",
     "MARKET_MAX_ROWS",
+    "OP_SATONG",
+    "SATONG_OPCODES",
+    "SATONG_BODY_LEN",
     "SUBTYPE_OFFSET",
     "ENTER_SUBTYPE_VALUE",
     "EXIT_SUBTYPE_VALUE",
@@ -317,6 +331,15 @@ class MarketObservation:
     프레이머는 파싱하지 않는다(stdlib·상대 import 0 계약). `ts` 는 완성 시점(재정렬 흡수분은
     조립 가능해진 시점)이지 물리 도착 시각이 아니다 — 페이지는 신선도의 기준이 되는 스냅샷이다.
     """
+    ts: float
+    opcode: int
+    body: bytes
+
+
+@dataclass(frozen=True)
+class SatongObservation:
+    """사통팔달 프레임 1개(전량 대기 완료) — 파싱은 `packet_satong.parse_satong` 몫. `ts` 규칙은
+    `MarketObservation` 과 같다(완성 시점, 재정렬 흡수분은 조립 가능해진 시점)."""
     ts: float
     opcode: int
     body: bytes
@@ -530,6 +553,17 @@ def is_market(opcode: int, body: bytes) -> bool:
     count = market_row_count(body)
     return (count <= MARKET_MAX_ROWS
             and len(body) == MARKET_HEADER_LEN + MARKET_ROW_LEN * count)
+
+
+def is_satong(opcode: int, body: bytes) -> bool:
+    """사통팔달 프레임인가 — 번호(`SATONG_OPCODES`) + 본문 길이 73 + 헤더(magic, opcode u32 = body[1:5]).
+
+    본문 필드(보낸이·내용·꼬리)는 보지 않는다 — 꼬리 `body[67]` 의 0x01 은 252/252 관찰이지만 C 등급이라
+    판별 상수로 박지 않는다(H-2607-05 전례). 파서(`packet_satong`)가 anomaly 로 남긴다.
+    """
+    if opcode not in SATONG_OPCODES or len(body) != SATONG_BODY_LEN:
+        return False
+    return body[0] == MAGIC and int.from_bytes(body[1:5], "little") == opcode
 
 
 # `_probe` 반환 규약 — 오프라인 `_frame_len_at` 이 둘을 뭉뚱그려 None 으로 돌려주던 것을
@@ -851,17 +885,25 @@ class StreamFramer:
     off — 드레인하지 않는 소비자에서 큐가 상한까지 차 `market_dropped` 가 오르는 일을 막고,
     기존 소비자의 바이트 동작을 그대로 둔다. 락 앵커에는 관여하지 않는다(H-2609-08 B —
     관측 전용 배선, 2026-09-21).
+
+    사통팔달 관측 (opt-in)
+    ----------------------
+    ``observe_satong=True`` 면 `SATONG_OPCODES` 프레임(본문 73B 고정)을 전량 기다려 `take_satong()` 큐에
+    raw 본문으로 넣는다(파싱은 `packet_satong`). 기본 off 인 이유는 육의전과 같다. 번호는 맞는데
+    `is_satong`(길이 73·헤더)에 떨어지면 `satong_rejected` 로 센다(H-2610-01 B — 관측 전용 배선, 2026-10-14).
     """
 
     def __init__(self, lock_k: int = DEFAULT_LOCK_K, *,
                  retain_exit_body: bool = False,
                  observe_wordinput: bool = False,
                  observe_market: bool = False,
+                 observe_satong: bool = False,
                  popup_anchor: bool = True,
                  enter_anchor: bool = True) -> None:
         self.retain_exit_body = retain_exit_body
         self.observe_wordinput = observe_wordinput
         self.observe_market = observe_market
+        self.observe_satong = observe_satong
         self.popup_anchor = popup_anchor
         self.enter_anchor = enter_anchor
         # ENTER 앵커 탐색 재개 지점 — 이 앞의 후보는 전부 확정 거부됐다(버퍼 offset).
@@ -875,6 +917,10 @@ class StreamFramer:
         self._market: list[MarketObservation] = []
         self.market_dropped = 0
         self._market_rejected = 0
+        # 사통팔달(opt-in) — 큐·유실·거부. 거부의 의미는 육의전과 같다(번호는 왔는데 모양이 다르다).
+        self._satong: list[SatongObservation] = []
+        self.satong_dropped = 0
+        self._satong_rejected = 0
         self._lock_k = max(1, int(lock_k))
         self._buf = bytearray()
         self._locked = False
@@ -1010,12 +1056,24 @@ class StreamFramer:
         프레임 누적 수 — 0 이 아니면 본문 드리프트 의심(도착 자체는 했다는 뜻)."""
         return self._market_rejected
 
+    def take_satong(self) -> list[SatongObservation]:
+        """읽어둔 사통팔달 프레임(opt-in)을 꺼내 비운다. 드레인하지 않으면 상한까지 쌓인다."""
+        out, self._satong = self._satong, []
+        return out
+
+    @property
+    def satong_rejected(self) -> int:
+        """사통 번호지만 `is_satong`(길이 73·헤더)에 떨어진 프레임 누적 수 — 0 이 아니면 본문 드리프트 의심."""
+        return self._satong_rejected
+
     def reset(self) -> None:
         """파스 상태만 비운다 — **누적 카운터는 보존**한다(관측 연속성)."""
         self.wordinput_dropped += len(self._wordinput)
         self._wordinput.clear()
         self.market_dropped += len(self._market)
         self._market.clear()
+        self.satong_dropped += len(self._satong)
+        self._satong.clear()
         self._buf.clear()
         self._locked = False
         self._skip = 0
@@ -1030,7 +1088,8 @@ class StreamFramer:
         self._marker_waiting = False
 
     def feed(self, data: bytes, ts: float, *, wordinput_ts: float | None = None,
-             market_ts: float | None = None) -> list[BattleEvent]:
+             market_ts: float | None = None,
+             satong_ts: float | None = None) -> list[BattleEvent]:
         events: list[BattleEvent] = []
         if not data:
             return events
@@ -1149,6 +1208,12 @@ class StreamFramer:
                            and body_len <= _MARKET_FULL_WAIT_MAX_BODY)
             if market_wait and n < total:
                 break
+            # 사통팔달(opt-in) — 보낸이·내용이 `need`(8B) 밖이다. 73B 고정이라 전량 대기 비용 0. 길이가 다르면
+            # 기다리지 않고(종전대로) 아래에서 거부로 센다.
+            satong_wait = (self.observe_satong and opcode in SATONG_OPCODES
+                           and body_len == SATONG_BODY_LEN)
+            if satong_wait and n < total:
+                break
 
             self._frames += 1
             # ⚠️ max() — 재정렬 흡수 후 drain 은 **보류 당시의 ts** 로 재생되므로,
@@ -1176,6 +1241,16 @@ class StreamFramer:
                         self.market_dropped += 1
                 else:
                     self._market_rejected += 1
+            if self.observe_satong and opcode in SATONG_OPCODES:
+                body = bytes(buf[LEN_PREFIX:total]) if satong_wait else b""
+                if satong_wait and is_satong(opcode, body):
+                    if len(self._satong) < _SATONG_QUEUE_MAX:
+                        self._satong.append(SatongObservation(
+                            ts if satong_ts is None else satong_ts, opcode, body))
+                    else:
+                        self.satong_dropped += 1
+                else:
+                    self._satong_rejected += 1
             if opcode == OP_STATUS:
                 body = bytes(buf[LEN_PREFIX:total])
                 if is_fullness(opcode, body):
@@ -1284,11 +1359,13 @@ class StreamFramer:
         # 조철 번호도 같다 — 수백 전투에 한 번 오는 번호라 긴 세션에선 상한이 먼저 차고,
         # 그러면 헬스 줄의 `30dd=`/`30df=` 가 "안 왔다"와 "못 셌다"를 가르지 못한다.
         # 육의전 번호도 같다 — 유저가 육의전을 열 때만 오는 희소 번호라 긴 세션에선 상한이
-        # 먼저 차고, 그러면 `321f=` 가 "안 왔다"와 "못 셌다"를 가르지 못한다.
+        # 먼저 차고, 그러면 `321f=` 가 "안 왔다"와 "못 셌다"를 가르지 못한다. 사통 번호도 같은 이유로 통과시킨다.
         if len(self._opcodes) >= _OPCODE_HIST_CAP and opcode not in (
             OP_BATTLE_ENTER,
             OP_BATTLE_EXIT,
-        ) and opcode not in JOCHUL_OPCODES and opcode not in MARKET_OPCODES:
+        ) and opcode not in JOCHUL_OPCODES and opcode not in MARKET_OPCODES and (
+            opcode not in SATONG_OPCODES
+        ):
             self._opcodes_dropped += 1
             return
         self._opcodes[opcode] = 1
@@ -1327,12 +1404,14 @@ class FlowDecoder:
         retain_exit_body: bool = False,
         observe_wordinput: bool = False,
         observe_market: bool = False,
+        observe_satong: bool = False,
         popup_anchor: bool = True,
         enter_anchor: bool = True,
     ) -> None:
         self.framer = StreamFramer(lock_k, retain_exit_body=retain_exit_body,
                                    observe_wordinput=observe_wordinput,
                                    observe_market=observe_market,
+                                   observe_satong=observe_satong,
                                    popup_anchor=popup_anchor,
                                    enter_anchor=enter_anchor)
         self._budget_bytes = reorder_budget_bytes
@@ -1399,6 +1478,18 @@ class FlowDecoder:
     @property
     def market_rejected(self) -> int:
         return self.framer.market_rejected
+
+    def take_satong(self) -> list[SatongObservation]:
+        """`feed_segment` 직후에 꺼낸다 — 재정렬 흡수분까지 함께 나온다."""
+        return self.framer.take_satong()
+
+    @property
+    def satong_dropped(self) -> int:
+        return self.framer.satong_dropped
+
+    @property
+    def satong_rejected(self) -> int:
+        return self.framer.satong_rejected
 
     @property
     def stats(self) -> FlowStats:
@@ -1507,7 +1598,7 @@ class FlowDecoder:
                 self._dup_bytes += overlap
                 data = data[overlap:]
             events.extend(self.framer.feed(data, ts, wordinput_ts=ready_ts,
-                                           market_ts=ready_ts))
+                                           market_ts=ready_ts, satong_ts=ready_ts))
             self._next = (self._next + len(data)) % _SEQ_MOD
         if not self._pending:
             self._gap_since = None

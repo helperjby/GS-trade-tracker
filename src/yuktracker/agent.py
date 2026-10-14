@@ -18,6 +18,8 @@ SEAssist 의 패킷 엔진은 War/Mon 매크로 세션이 도는 동안에만 �
   스풀에 넣는다(`market_observer` → `spool`). 업로더 스레드가 허브로 올린다 — 첫 실행에는
   초대 코드로 기기를 등록한다(`hub_setup`, `docs/HUB-PROTOCOL.md` §3-0). 허브 주소·토큰이 없으면
   업로드 없이 관측만 한다.
+- 사통팔달(`0x1f82`)은 **운영자 PC 에서만** 켠다(`--satong <서버 번호>`, 기본 꺼짐). 켜면 `satong_cb` 로 받은
+  메시지를 별도 스풀·업로더(`satong_observer`)가 허브 §3-8 로 올리고, 1분마다 하트비트를 보낸다.
 
 스레드
 ------
@@ -38,7 +40,7 @@ import time
 from dataclasses import dataclass
 from typing import Callable, Iterable, Optional, TextIO
 
-from . import __version__, app_config, hub_setup, market_observer, spool
+from . import __version__, app_config, hub_setup, market_observer, paths, satong_observer, spool
 from .game_processes import game_pids
 from .seassist import ledger_paths
 from .seassist.logger import get_logger
@@ -72,6 +74,8 @@ _FLOW_POLL_SEC = 0.5
 #: 지인 PC 의 콘솔이 조용하면 "되고 있는지" 를 아무도 모른다(엔진의 5분 헬스 INFO 줄은 개발자용).
 FLOW_REMIND_SEC = 30.0
 IDLE_REMIND_SEC = 600.0
+#: 사통 상태 줄 주기 — 메시지마다 찍으면 하루 수천 줄이라 건수만 이 주기로.
+SATONG_REPORT_SEC = 600.0
 
 #: 종료 코드.
 RC_OK = 0
@@ -213,6 +217,8 @@ class RunOptions:
     client_dir: str = ""
     #: False 면 스풀·업로더를 아예 띄우지 않는다(`--no-upload`).
     upload: bool = True
+    #: 사통팔달 수집 서버 번호(`--satong N`) — None 이면 설정 `satong_server_id`, 그것도 없으면 끔.
+    satong_server_id: Optional[int] = None
 
 
 def _attach_console_log(console: ConsoleOut) -> None:
@@ -330,6 +336,57 @@ class Market:
             self.unsaved = up.queue_size() if up is not None else 0
 
 
+@dataclass
+class Satong(Market):
+    """사통팔달 배선 한 묶음 — 수명 규칙(`start`/`close`)은 `Market` 과 같다. 꺼져 있으면 전부 None."""
+    server_id: Optional[int] = None
+    #: 게임 서버 흐름이 살아 있는가 — 엔진이 뜬 뒤 `run()` 이 `_capturing(engine)` 으로 바꿔 끼운다(하트비트가 읽는다).
+    connected: Callable[[], bool] = lambda: False
+    #: 마지막 상태 줄 때의 누적 건수·시각(단조).
+    reported: int = 0
+    reported_at: Optional[float] = None
+
+    def collector_status(self) -> dict:
+        obs = self.observer
+        if obs is None:
+            return {"client_connected": False, "last_message_ts": None, "messages": 0, "agent_ts": time.time()}
+        try:
+            connected = bool(self.connected())
+        except Exception:
+            connected = False
+        return obs.collector(connected=connected)
+
+
+def setup_satong(opts: RunOptions, say: Callable[[str], None], market: Market, *,
+                 config_path=None, spool_dir=None, post=None, uploader_kw: Optional[dict] = None) -> Satong:
+    """사통팔달 수집 — 꺼져 있으면(기본) 빈 묶음. 켜져 있으면 관측자와, 육의전 업로더가 있을 때만(같은 허브·같은 기기
+    토큰) 사통 업로더. 육의전 업로드가 꺼져 있으면 건수만 찍는다. 주입 인자는 테스트용이다."""
+    cfg = app_config.load(config_path)
+    server_id = app_config.resolve_satong_server_id(opts.satong_server_id, cfg)
+    if server_id is None:
+        return Satong()
+    local_id = (market.observer.local_id if market.observer is not None
+                else app_config.ensure_local_id(cfg, config_path))
+    satong = Satong(server_id=server_id)
+    up = market.uploader
+    if up is not None:
+        satong.uploader = satong_observer.SatongUploader(
+            spool.Spool(spool_dir if spool_dir is not None else paths.satong_spool_dir()),
+            hub_url=up.hub_url, token=up.token, device_id=up.device_id, server_id=server_id,
+            collector=satong.collector_status, say=lambda m: say("[사통] " + m),
+            **({"post": post} if post is not None else {}), **(uploader_kw or {}))
+        say(f"[사통] 수집 켬 — 서버 {server_id}, 허브로 올립니다(하트비트 {satong_observer.HEARTBEAT_SEC:g}초)")
+        waiting = len(satong.uploader.spool.pending())
+        if waiting:
+            say(f"[사통] 지난 실행의 스풀 {waiting}건부터 올립니다.")
+    else:
+        say(f"[사통] 수집 켬 — 서버 {server_id}, 허브 업로드가 꺼져 있어 건수만 찍습니다")
+    satong.observer = satong_observer.SatongObserver(
+        local_id, say=say, enqueue=satong.uploader.enqueue if satong.uploader is not None else None)
+    satong.cb = satong.observer
+    return satong
+
+
 def setup_market(opts: RunOptions, say: Callable[[str], None], stdin: Optional[TextIO], *,
                  config_path=None, spool_dir=None, names=None,
                  register=None, post=None, uploader_kw: Optional[dict] = None) -> Market:
@@ -373,7 +430,8 @@ def run(opts: RunOptions, *, engine_factory=None, recorder=None,
         indexer: Optional[PidIndexer] = None, stdin: Optional[TextIO] = None,
         out: Optional[TextIO] = None, clock: Callable[[], float] = time.monotonic,
         sleep: Callable[[float], None] = time.sleep,
-        market_setup: Callable[..., Market] = setup_market) -> int:
+        market_setup: Callable[..., Market] = setup_market,
+        satong_setup: Callable[..., Satong] = setup_satong) -> int:
     """관측기 1회 실행. 주입 인자는 전부 테스트용(기본 = 실 엔진·전역 recorder·stdin/stdout)."""
     out = out if out is not None else sys.stdout
     stdin = stdin if stdin is not None else sys.stdin
@@ -403,11 +461,13 @@ def run(opts: RunOptions, *, engine_factory=None, recorder=None,
         say(f"[패킷] 클라{slot_idx + 1} 이벤트 — {kind}")
 
     market = market_setup(opts, say, stdin)
+    satong = satong_setup(opts, say, market)
 
     engine = factory(
         indexer.provide, status_cb=say, event_cb=event_cb,
-        segment_cb=recorder.note_segment, market_cb=market.cb,
+        segment_cb=recorder.note_segment, market_cb=market.cb, satong_cb=satong.cb,
         enter_anchor=os.environ.get("SEASSIST_PACKET_ENTER_ANCHOR", "1").strip() != "0")
+    satong.connected = lambda: _capturing(engine)
 
     def close_window(reason: str) -> None:
         if not state["window"]:
@@ -451,6 +511,7 @@ def run(opts: RunOptions, *, engine_factory=None, recorder=None,
         except Exception:
             pass
         market.close()   # 큐에 남은 관측을 스풀에 — CTRL_CLOSE 의 유예 몇 초 안에 끝난다(join 3s + 파일 쓰기)
+        satong.close()
 
     remove_close_hook = _install_console_close_hook(on_console_close)
     rc = RC_OK
@@ -458,6 +519,7 @@ def run(opts: RunOptions, *, engine_factory=None, recorder=None,
         # 엔진이 뜬 **뒤**, try 안에서 — 엔진 실패로 일찍 나가는 길에는 띄우지 않고, finally 가 반드시 close 한다.
         # 만들기만 하고 start 를 빠뜨리면 관측이 큐에 쌓인 채 전송도 스풀도 안 된다(실기기 G7 1차, 2026-09-23).
         market.start(say)
+        satong.start(say)
         console.start()   # 여기부터 콘솔 쓰기는 별도 스레드 — 스니퍼·업로더가 막힌 콘솔에 붙들리지 않는다(G7 2차)
         if opts.capture_min:
             rc = _open_window(opts, engine, recorder, indexer, state, stop, say, clock, sleep)
@@ -473,6 +535,9 @@ def run(opts: RunOptions, *, engine_factory=None, recorder=None,
                 line = _status_tick(status, capturing=_capturing(engine),
                                     pages=market.observer.pages if market.observer else 0,
                                     now=clock())
+                if line:
+                    say(line)
+                line = _satong_tick(satong, now=clock())
                 if line:
                     say(line)
                 if state["window"]:
@@ -491,6 +556,7 @@ def run(opts: RunOptions, *, engine_factory=None, recorder=None,
         except Exception:
             pass
         market.close()
+        satong.close()
         try:
             h = engine.health_snapshot()
             say(f"[패킷] 종료 헬스 — 패킷 {h.get('packets', 0)} / 세그 {h.get('fed_segments', 0)} / "
@@ -501,6 +567,7 @@ def run(opts: RunOptions, *, engine_factory=None, recorder=None,
         except Exception:
             pass
         _say_upload_health(market, say)
+        _say_satong_health(satong, say)
         console.stop()    # 밀린 표시를 비우고 동기 모드로 — 종료 안내는 바로 보이게
     return _finish(rc, opts, say, final, state)
 
@@ -553,6 +620,49 @@ def _capturing(engine) -> bool:
         return int(engine.health_snapshot().get("tracked_flows", 0)) > 0
     except Exception:
         return False
+
+
+def _satong_tick(satong: Satong, *, now: float) -> Optional[str]:
+    """사통 상태 줄 1건(없으면 None) — ``SATONG_REPORT_SEC`` 마다 그 사이 건수. 첫 틱은 기준점만 잡는다."""
+    obs = satong.observer
+    if obs is None:
+        return None
+    if satong.reported_at is None:
+        satong.reported_at, satong.reported = now, obs.messages
+        return None
+    if now - satong.reported_at < SATONG_REPORT_SEC:
+        return None
+    recent = obs.messages - satong.reported
+    satong.reported_at, satong.reported = now, obs.messages
+    line = f"[사통] 최근 {SATONG_REPORT_SEC / 60:g}분 {recent}건 · 누적 {obs.messages}건"
+    up = satong.uploader
+    if up is not None:
+        line += f" · 업로드 {up.uploaded}건 · 하트비트 {up.heartbeats}"
+        if up.halted:
+            line += f" · 정지({up.stopped_reason})"
+    if recent == 0:
+        line += (" — 사통이 안 왔습니다(게임 접속·서버를 확인하세요)" if satong.connected()
+                 else " — 게임 서버 흐름이 없습니다")
+    return line
+
+
+def _say_satong_health(satong: Satong, say: Callable[[str], None]) -> None:
+    obs, up = satong.observer, satong.uploader
+    if obs is None:
+        return
+    line = f"[사통] 서버 {satong.server_id} 관측 {obs.messages}건 / 클라 간 사본 {obs.duplicates}건"
+    if up is not None:
+        try:
+            waiting = len(up.spool.pending())
+        except Exception:
+            waiting = -1
+        line += (f" / 업로드 {up.uploaded}건 · 하트비트 {up.heartbeats} · 대기 {waiting}배치 · 격리 {up.quarantined}"
+                 f" · 큐 유실 {up.queue_dropped}")
+        if up.halted:
+            line += f" · 정지({up.stopped_reason})"
+        if satong.unsaved:
+            line += f" · 큐 미저장 {satong.unsaved}(유실)"
+    say(line)
 
 
 def _say_upload_health(market: Market, say: Callable[[str], None]) -> None:

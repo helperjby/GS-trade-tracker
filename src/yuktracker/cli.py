@@ -37,8 +37,22 @@ def build_parser() -> argparse.ArgumentParser:
                     help="아이템 id→이름 표를 찾을 거상 클라 폴더(없으면 실행 중 gersang.exe → 기본 설치 경로)")
     ap.add_argument("--no-upload", action="store_true",
                     help="허브 업로드 없이 관측만(스풀·업로더를 띄우지 않는다)")
+    ap.add_argument("--satong", type=_server_id, default=None, metavar="SERVER_ID",
+                    help="사통팔달(서버 전체 외치기)도 수집한다 — 이 클라가 접속한 서버 번호(운영자 PC 전용, 기본 꺼짐; "
+                         "설정 satong_server_id 보다 우선). 허브가 이 기기를 사통 수집 기기로 허용해야 올라간다")
     ap.add_argument("--version", action="version", version=f"yuktracker {__version__}")
     return ap
+
+
+def _server_id(text: str) -> int:
+    """`--satong` 값 — 양의 정수만(패킷에 서버 식별자가 없어 사람이 정한다; 틀리면 다른 서버 방에 올라간다)."""
+    try:
+        value = int(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError("서버 번호는 양의 정수입니다(예: 7)") from None
+    if value <= 0:
+        raise argparse.ArgumentTypeError("서버 번호는 양의 정수입니다(예: 7)")
+    return value
 
 
 def _utf8_console() -> None:
@@ -96,11 +110,13 @@ def main(argv: list[str] | None = None) -> int:
         # 승격 경로를 그대로 지난 뒤다 — Npcap 프로브·캡처 확인에 관리자 권한이 필요하다.
         return selftest.main(hub_url=args.hub_url, client_dir=args.client_dir,
                              upload=not args.no_upload, pause=not args.no_pause,
+                             satong_server_id=args.satong,
                              wait_sec=selftest.WAIT_SEC if args.wait is None else args.wait)
     opts = RunOptions(capture_min=args.capture,
                       flow_wait_sec=FLOW_WAIT_SEC if args.wait is None else args.wait,
                       pause_on_exit=not args.no_pause, hub_url=args.hub_url,
                       invite_code=args.invite_code, device_label=args.device_label,
-                      client_dir=args.client_dir, upload=not args.no_upload)
+                      client_dir=args.client_dir, upload=not args.no_upload,
+                      satong_server_id=args.satong)
     _disable_quick_edit()
     return run(opts)

@@ -19,6 +19,8 @@ ITEM_TABLE_CACHE_NAME = "item_names.json"
 CONFIG_NAME = "config.json"
 SPOOL_DIR_NAME = "spool"
 QUARANTINE_DIR_NAME = "quarantine"
+#: 사통팔달 업로드 스풀 — 육의전 스풀 폴더 **아래** 별도 폴더(파일 이름 규칙이 같아 섞이면 안 된다).
+SATONG_SPOOL_DIR_NAME = "satong"
 
 
 def app_dir() -> Path:
@@ -43,3 +45,9 @@ def spool_dir() -> Path:
 def quarantine_dir() -> Path:
     """허브가 400 으로 거부한 배치 — 재시도해도 같은 400 이라 옆으로 치운다(진단용)."""
     return spool_dir() / QUARANTINE_DIR_NAME
+
+
+def satong_spool_dir() -> Path:
+    """사통팔달 업로드 대기 배치 — 육의전 `Spool.pending()` 은 하위 폴더를 보지 않으므로 섞이지 않는다.
+    격리는 그 아래 `quarantine`(`spool.Spool` 의 규칙)."""
+    return spool_dir() / SATONG_SPOOL_DIR_NAME
