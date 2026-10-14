@@ -154,6 +154,50 @@ class UploaderTest(unittest.TestCase):
         up.tick()
         self.assertFalse(self.calls[0][3]["client_connected"])
 
+    def _backlog(self, n: int) -> None:
+        for k in range(n):
+            self.store.write([{"obs_id": f"x:{k}:{k:012x}", "agent_ts": 1.0 + k, "sender": "보낸이A", "text": f"합성 {k}"}])
+
+    def test_backlog_is_sent_in_grouped_requests(self):
+        """리뷰 반영 — 파일마다 요청하면 밀린 수천 파일이 기기 속도제한을 다 쓴다. 100건까지 한 요청으로 묶는다."""
+        self._backlog(250)
+        up = self._up()
+        up.tick()
+        self.assertEqual([len(c[2]) for c in self.calls], [100, 100, 50])
+        self.assertEqual([c[2][0]["text"] for c in self.calls], ["합성 0", "합성 100", "합성 200"])   # 오래된 것부터
+        self.assertEqual((up.uploaded, self.store.pending()), (250, []))
+
+    def test_rejected_group_falls_back_to_single_files_and_quarantines_only_the_bad_one(self):
+        self._backlog(3)
+        bad = hub_client.Response(400, {"ok": False, "error": "bad_request", "index": 1}, "bad_request")
+        self.responses += [bad, hub_client.Response(200, {"ok": True}), bad, hub_client.Response(200, {"ok": True})]
+        up = self._up()
+        up.tick()
+        self.assertEqual([len(c[2]) for c in self.calls], [3, 1, 1, 1])
+        self.assertEqual((up.uploaded, up.quarantined, self.store.pending()), (2, 1, []))
+
+    def test_group_retry_keeps_every_file(self):
+        self._backlog(3)
+        self.responses.append(hub_client.Response(0, error="network", text="down"))
+        up = self._up()
+        up.tick()
+        self.assertEqual((len(self.calls), len(self.store.pending()), up.retry_delay), (1, 3, 1.0))
+
+    def test_undeletable_file_is_not_resent_in_the_same_pass(self):
+        self._backlog(1)
+        up = self._up()
+        with mock.patch.object(self.store, "done", lambda p: None):
+            up.flush_pending()
+        self.assertEqual(len(self.calls), 1)
+
+    def test_idle_tick_does_not_rescan_the_spool_when_no_heartbeat_is_due(self):
+        up = self._up()
+        up.tick()                                                # 첫 하트비트
+        with mock.patch.object(self.store, "pending", wraps=self.store.pending) as pending:
+            self.clock.t += 2
+            up.tick()
+        self.assertEqual(pending.call_count, 1)                  # flush_pending 의 한 번뿐
+
 
 class SetupSatongTest(unittest.TestCase):
     def setUp(self) -> None:
@@ -215,6 +259,40 @@ class SetupSatongTest(unittest.TestCase):
         line = A._satong_tick(s, now=2 * A.SATONG_REPORT_SEC)
         self.assertIn("0건", line)
         self.assertIn("사통이 안 왔습니다", line)
+
+
+class CloseBudgetTest(unittest.TestCase):
+    def test_uploaders_share_one_join_budget(self):
+        """리뷰 반영 — 둘을 3초씩 차례로 기다리면 6초가 돼 콘솔 닫기 유예(약 5초)를 넘긴다. 먼저 둘 다 멈추라고 알리고,
+        남은 예산 안에서 기다린다."""
+        clock = _Clock(0.0)
+        log: list = []
+
+        class _Stuck:
+            def __init__(self, name):
+                self.name = name
+
+            def stop(self):
+                log.append(("stop", self.name, clock.t))
+
+            def is_alive(self):
+                return True
+
+            def join(self, timeout):
+                log.append(("join", self.name, round(timeout, 3)))
+                clock.t += timeout                                  # POST 에 붙들려 끝까지 기다린다
+
+            def drain_queue(self, wait=True):
+                return None
+
+            def queue_size(self):
+                return 0
+
+        a, b = A.Market(uploader=_Stuck("market")), A.Satong(uploader=_Stuck("satong"))
+        A._close_uploads(a, b, budget=3.0, clock=clock)
+        self.assertEqual(log[:2], [("stop", "market", 0.0), ("stop", "satong", 0.0)])
+        self.assertEqual([e for e in log if e[0] == "join"], [("join", "market", 3.0), ("join", "satong", 0.0)])
+        self.assertEqual(len([e for e in log if e[0] == "stop"]), 2, "close() 가 stop 을 다시 부르지 않는다")
 
 
 class ConfigCliTest(unittest.TestCase):

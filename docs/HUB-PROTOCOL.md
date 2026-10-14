@@ -34,7 +34,7 @@
   자격 없음·불일치·범위 밖(기기 토큰으로 조회, 공개 요청의 관리 시크릿)은 전부 `401 {"error":"unauthorized"}`.
 - 속도제한(프로세스 메모리, 재기동이면 리셋; 두 리스너가 버킷을 공유): 등록 IP 당 `register_limit_per_hour`(10)·등록 **슬롯당**
   `register_slot_limit_per_hour`(5, 성공한 교체만 — 새어 나간 코드로 한 슬롯을 계속 갈아치우지 못하게), 업로드 기기 당
-  `upload_limit_per_min`(120 — 관리 시크릿은 무제한; 취소 검사보다 먼저라 취소된 클라의 폭주도 기기 단위로 429), 인증 실패 **공개
+  `upload_limit_per_min`(120 — 사통 라우트는 별도 버킷 `satong_upload_limit_per_min`(60); 관리 시크릿은 무제한; 취소 검사보다 먼저라 취소된 클라의 폭주도 기기 단위로 429), 인증 실패 **공개
   요청** IP 당 `auth_fail_limit_per_min`(30) — 토큰 검사 **뒤** 실패에만 센다(공유 NAT 뒤의 고장난 클라 하나가 같은 IP 의 정상
   기기를 막지 않게; 직접 접속은 브리지 IP 를 봇과 공유하므로 세지 않는다). 초과는 `429 {"ok":false,"error":"rate_limited",
   "retry_after":N}` + `Retry-After: N` — N 초 뒤 재시도(§3-1 관측기 규약).
@@ -79,6 +79,7 @@ CREATE TABLE devices (                  -- 초대 코드로 자기등록한 관�
 CREATE TABLE satong_messages (          -- 사통팔달 1건 (§3-8, 2026-10-14)
   id INTEGER PRIMARY KEY AUTOINCREMENT, -- 소비자 커서 — 지운 번호를 다시 쓰지 않는다
   server_id INTEGER NOT NULL, sender TEXT NOT NULL, text TEXT NOT NULL,
+  anchor_ts REAL NOT NULL,              -- 첫 사본의 seen_ts — 병합 창의 기준(고정, §3-8)
   first_seen_ts REAL NOT NULL, last_seen_ts REAL NOT NULL, seen_count INTEGER NOT NULL DEFAULT 1,   -- 병합된 사본 수
   first_device TEXT NOT NULL, last_obs_id TEXT NOT NULL, recv_ts REAL NOT NULL,
   payload_json TEXT NOT NULL DEFAULT '{}');  -- 열로 안 간 키(opcode·anomalies·mid·tail…)
@@ -337,12 +338,15 @@ HTTP 관리 라우트를 두지 않는 이유: 공개 표면을 늘리지 않고
   메시지 배치에도 같은 `collector` 를 싣는다(하트비트 겸용). `collector.client_connected`(bool)는 필수, 나머지는 null 허용.
 - **허용 슬롯**: 기기 토큰이면 그 기기의 `slot` 이 설정 `satong_slots` 에 있어야 한다 — 아니면 `403 {"ok":false,"error":"satong_not_allowed"}`
   (아무것도 쓰지 않고 `last_seen_ts` 만 남긴다; 관측기는 업로더를 멈춘다). 사통은 그대로 카톡방에 나가므로 지인 기기 아무나 올리지 못하게 한다.
-  관리 시크릿(직접 접속)은 항상 허용. 그 밖의 인증·속도제한(업로드 버킷 공유)·`device_mismatch` 는 §3-1 과 같다.
+  관리 시크릿(직접 접속)은 항상 허용. 그 밖의 인증·`device_mismatch` 는 §3-1 과 같고, 속도제한은 **사통 전용 버킷**
+  `satong_upload_limit_per_min`(60)이다. 하트비트는 `devices.last_seen_ts` 만 쓰고 `upload_count` 는 메시지가 있을 때만 올린다.
 - 검증(전건, 위반 시 400 + 아무것도 안 씀): `server_id` 0 이상 정수 · `messages` 목록 ≤ `max_satong_messages_per_request`(100) · 메시지마다
   `obs_id` 1~128자 · `agent_ts` 는 `[now − retention_satong_days, now + max_agent_ts_ahead_sec]` · `sender` 비지 않은 문자열 ≤64자 · `text`
-  문자열 ≤128자(빈 문자열 허용). 미지 키는 통과해 `payload_json` 에 남는다.
+  문자열 ≤128자(빈 문자열 허용). 미지 키는 통과해 `payload_json` 에 남는다. 보낸이·내용의 **인쇄 불가 문자(줄바꿈·탭·제어 문자)는
+  공백으로 바꿔** 저장한다 — 글이 그대로 카톡방에 나가므로 가짜 줄을 만들 수 없게(공백만 남는 보낸이는 400).
 - 반영(트랜잭션 1개): `obs_id` 가 이미 있으면 **재전송 → `duplicates`**. 아니면 `seen_ts = min(agent_ts, recv_ts)` 로 같은 (서버, 보낸이, 내용)
-  행 중 **10초**(`SATONG_MERGE_SEC`) 안의 것을 찾아 **병합 → `merged`**(`seen_count` +1, 시각 창 넓힘 — 다른 PC 가 같은 외치기를 올린 경우),
+  행 중 첫 사본 시각 `anchor_ts` 가 **10초**(`SATONG_MERGE_SEC`) 안인 것을 찾아 **병합 → `merged`**(`seen_count` +1, first/last 갱신 —
+  다른 PC 가 같은 외치기를 올린 경우; 기준이 고정이라 시계가 어긋난 두 PC 의 사본이 다음 순번 외치기까지 사슬로 잇지 못한다),
   없으면 **새 행 → `accepted`**. 서버는 사통을 약 15초 간격으로 내보내므로 같은 사람이 같은 글을 다음 순번에 또 외치면 새 행이다.
   관측기도 같은 PC 의 클라 간 사본을 같은 10초 규칙으로 먼저 거른다.
 
@@ -416,7 +420,7 @@ HTTP 관리 라우트를 두지 않는 이유: 공개 표면을 늘리지 않고
 
 사통팔달(2026-10-14, §3-8): **`satong_slots`**(슬롯 이름 목록, 기본 `[]` = 기기 토큰으로는 못 올린다; `invite_codes` 에 없는 이름이면 기동
 거부) `retention_satong_days`(7) `satong_offline_sec`(180) `max_satong_messages_per_request`(100) `satong_recent_limit_default`(200)
-`satong_recent_limit_max`(500).
+`satong_recent_limit_max`(500) `satong_upload_limit_per_min`(60).
 
 관측기 쪽 키(PR-Y1b, `%APPDATA%\YukTracker\config.json`): `hub_url`(공개 Funnel 주소; exe 내장 기본값) · `hub_device_id` · `hub_token`
 (§3-0 응답 저장) · `satong_server_id`(사통 수집 서버 번호, 빈 값 = 끔; CLI `--satong N` 이 이긴다). 초대 코드는 `--invite-code` 인자/첫 실행 프롬프트로만 받고 저장하지 않는다. 구 `hub_secret` 키는 폐기 — 관리
@@ -427,6 +431,8 @@ HTTP 관리 라우트를 두지 않는 이유: 공개 표면을 늘리지 않고
 - 2026-10-14 v1 **사통팔달**(additive; 미루봇 사통 원본을 외부 기록 사이트 → 운영자 PC 패킷 수집으로 바꾸는 계획, 사용자 결정: 육의전 허브 경유):
   §3-8 `POST /api/satong/observations`(기기 토큰은 `satong_slots` 슬롯만, 빈 배치 = 하트비트, 재전송 dedup·10초 병합) ·
   `GET /api/satong/recent`(관리 전용, `since_id` 커서, `online` 판정) · §1 표 셋 · §5 보존 · §6 설정 키. 기존 라우트·표 무변경.
+  리뷰 반영: 사통 전용 속도제한 버킷 · 병합 기준 `anchor_ts` 고정(사슬 병합 방지) · 하트비트는 `upload_count` 미가산 · 인쇄 불가 문자 → 공백 ·
+  `(server_id, last_seen_ts)` 인덱스.
 
 - 2026-09-23 v1 **소멸 추정**(additive; 사용자 결정 3건 — 허브+봇 계약까지 반영 · 등록일 추정은 관측 시각 경계만 · `기간` 검정 전엔 단기 고정):
   §4 게임 규칙(단기 D+2 00:00 · 장기 D+3 00:00 KST)과 추정식, §3-2 행 `expires_from_ts`·`expires_by_ts` + 응답 `expiry_days` + 기본 필터

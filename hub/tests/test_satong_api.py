@@ -271,3 +271,83 @@ def test_config_satong_slots_validation(tmp_path):
         load(satong_slots="slot1")
     with pytest.raises(SystemExit, match="retention_satong_days"):
         load(retention_satong_days=0)
+
+
+def test_skewed_collectors_do_not_chain_merge_two_shouts(tmp_path):
+    """리뷰 반영 — 병합 기준은 첫 사본 시각(anchor)이다. PC B 시계가 8초 빠르면 [first,last] 기준은 15초 간격의 두 외치기를
+    사슬로 한 행에 잇는다(0·8·15·23)."""
+    async def scn():
+        app, client = await start_client(make_cfg(tmp_path))
+        try:
+            t0 = time.time() - 120
+            for n, (dev, dt) in enumerate((("DEV-A", 0), ("DEV-B", 8), ("DEV-A", 15), ("DEV-B", 23))):
+                await _post(client, _body(_msg(n, agent_ts=t0 + dt, obs_id=f"{dev}:{n}:{n:012x}"), device_id=dev))
+            _, data = await _recent(client)
+            assert [m["seen_count"] for m in data["messages"]] == [2, 2]
+            assert [round(m["first_seen_ts"] - t0) for m in data["messages"]] == [0, 15]
+        finally:
+            await client.close()
+    _run(scn())
+
+
+def test_heartbeat_does_not_count_as_upload(tmp_path):
+    async def scn():
+        app, client = await start_client(make_cfg(tmp_path, satong_slots=["slot1"]))
+        try:
+            st, d1 = await register(client, label="PC-1")
+            hdr = device_auth(d1["token"])
+            for _ in range(3):
+                await _post(client, _body(device_id=d1["device_id"]), headers=hdr)
+            (dev,) = app_db(app).list_devices()
+            assert dev["upload_count"] == 0 and dev["last_seen_ts"] is not None
+            await _post(client, _body(_msg(1), device_id=d1["device_id"]), headers=hdr)
+            (dev,) = app_db(app).list_devices()
+            assert dev["upload_count"] == 1
+        finally:
+            await client.close()
+    _run(scn())
+
+
+def test_control_characters_are_blanked(tmp_path):
+    async def scn():
+        app, client = await start_client(make_cfg(tmp_path))
+        try:
+            st, data = await _post(client, _body(_msg(1, sender="보낸\x1b[2J이", text="첫 줄\n[운영] 가짜 공지\t끝")))
+            assert st == 200
+            _, data = await _recent(client)
+            (m,) = data["messages"]
+            assert (m["sender"], m["text"]) == ("보낸 [2J이", "첫 줄 [운영] 가짜 공지 끝")
+            st, data = await _post(client, _body(_msg(2, sender="\n\r")))
+            assert (st, data["field"]) == (400, "sender")
+        finally:
+            await client.close()
+    _run(scn())
+
+
+def test_satong_has_its_own_rate_bucket(tmp_path):
+    """밀린 사통이 같은 기기의 육의전 업로드를 429 로 막지 않는다 — 버킷이 따로다."""
+    async def scn():
+        app, client = await start_client(make_cfg(tmp_path, satong_slots=["slot1"], satong_upload_limit_per_min=2,
+                                                  upload_limit_per_min=2))
+        try:
+            st, d1 = await register(client, label="PC-1")
+            hdr = device_auth(d1["token"])
+            codes = [(await _post(client, _body(device_id=d1["device_id"]), headers=hdr))[0] for _ in range(3)]
+            assert codes == [200, 200, 429]
+            st, data = await get(client, "/api/market/ping", headers=hdr)
+            assert st == 200, "육의전 버킷은 그대로"
+        finally:
+            await client.close()
+    _run(scn())
+
+
+def test_recent_last_message_uses_an_index(tmp_path):
+    async def scn():
+        app, client = await start_client(make_cfg(tmp_path))
+        try:
+            plan = app_db(app)._con.execute(
+                "EXPLAIN QUERY PLAN SELECT MAX(last_seen_ts) FROM satong_messages WHERE server_id = ?", (7,)).fetchall()
+            assert any("idx_satong_server_seen" in str(tuple(r)) for r in plan), plan
+        finally:
+            await client.close()
+    _run(scn())

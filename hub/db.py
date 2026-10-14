@@ -22,6 +22,8 @@
 - ``satong_messages`` — 외치기 1건 = 1행. ``id`` 는 AUTOINCREMENT 라 지운 번호를 다시 쓰지 않는다(소비자의 커서).
   같은 (서버, 보낸이, 내용)이 ``SATONG_MERGE_SEC`` 안에 다시 오면(같은 PC 의 다른 클라·다른 수집 PC) 새 행 대신
   ``seen_count`` 만 올린다. 서버는 사통을 약 15초 간격으로 내보내므로 창이 그보다 짧으면 진짜 반복 외치기는 따로 남는다.
+  창의 기준은 **첫 사본의 시각 ``anchor_ts``(고정)** 다 — 병합마다 넓어지는 [first, last] 에 대면 시계가 어긋난 두 수집
+  PC 의 사본이 15초 간격의 두 외치기를 사슬처럼 한 행으로 잇는다.
 - ``satong_obs_ids`` — 받은 ``obs_id``(재전송 dedup). 병합된 사본도 여기 남아 같은 배치가 다시 와도 두 번 세지 않는다.
 - ``satong_collectors`` — 수집 기기마다 마지막 하트비트(허브 수신 시각)와 클라 연결 상태. 봇은 이것으로 "사통이 없다"와
   "수집기가 죽었다"를 가른다.
@@ -83,11 +85,13 @@ CREATE TABLE IF NOT EXISTS devices (
 CREATE TABLE IF NOT EXISTS satong_messages (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   server_id INTEGER NOT NULL, sender TEXT NOT NULL, text TEXT NOT NULL,
+  anchor_ts REAL NOT NULL,
   first_seen_ts REAL NOT NULL, last_seen_ts REAL NOT NULL, seen_count INTEGER NOT NULL DEFAULT 1,
   first_device TEXT NOT NULL, last_obs_id TEXT NOT NULL, recv_ts REAL NOT NULL,
   payload_json TEXT NOT NULL DEFAULT '{}');
-CREATE INDEX IF NOT EXISTS idx_satong_merge ON satong_messages(server_id, sender, text, last_seen_ts);
+CREATE INDEX IF NOT EXISTS idx_satong_merge ON satong_messages(server_id, sender, text, anchor_ts);
 CREATE INDEX IF NOT EXISTS idx_satong_server_id ON satong_messages(server_id, id);
+CREATE INDEX IF NOT EXISTS idx_satong_server_seen ON satong_messages(server_id, last_seen_ts);
 CREATE TABLE IF NOT EXISTS satong_obs_ids (
   obs_id TEXT PRIMARY KEY, message_id INTEGER NOT NULL, recv_ts REAL NOT NULL);
 CREATE TABLE IF NOT EXISTS satong_collectors (
@@ -542,10 +546,11 @@ class Database:
                       seen_device: str | None = None) -> tuple:
         """검증이 끝난 사통 배치를 **트랜잭션 1개**로 반영 → (새 행 수, 재전송 중복 수, 병합 수).
 
-        메시지마다: ``obs_id`` 가 이미 있으면 재전송 → 중복. 없으면 ``seen_ts = min(agent_ts, recv_ts)`` 를 기준으로 같은
-        (서버, 보낸이, 내용) 행 중 ``SATONG_MERGE_SEC`` 안의 것을 찾아 병합하거나(``seen_count`` +1, 시각 창 넓힘),
-        없으면 새 행. 수집기 상태(``collector``)는 메시지가 없어도(하트비트) ``satong_collectors`` 에 upsert 한다.
-        ``seen_device`` 가 있으면 육의전 업로드와 같이 기기의 ``last_seen_ts``·``upload_count`` 도 같은 트랜잭션에서.
+        메시지마다: ``obs_id`` 가 이미 있으면 재전송 → 중복. 없으면 ``seen_ts = min(agent_ts, recv_ts)`` 가 같은
+        (서버, 보낸이, 내용) 행의 ``anchor_ts`` 와 ``SATONG_MERGE_SEC`` 안이면 병합(``seen_count`` +1, first/last 갱신 —
+        ``anchor_ts`` 는 그대로), 없으면 새 행. 수집기 상태(``collector``)는 메시지가 없어도(하트비트) ``satong_collectors``
+        에 upsert 한다. ``seen_device`` 가 있으면 기기의 ``last_seen_ts`` 를 쓰고, ``upload_count`` 는 **메시지가 있을 때만**
+        올린다(60초 하트비트가 육의전 활동 지표를 부풀리지 않게).
         """
         accepted = duplicates = merged = 0
         with self._tx() as con:
@@ -558,8 +563,9 @@ class Database:
                 sender, text = str(msg["sender"]), str(msg["text"])
                 row = con.execute(
                     "SELECT id FROM satong_messages WHERE server_id = ? AND sender = ? AND text = ? "
-                    "AND last_seen_ts >= ? AND first_seen_ts <= ? ORDER BY id DESC LIMIT 1",
-                    (int(server_id), sender, text, seen_ts - SATONG_MERGE_SEC, seen_ts + SATONG_MERGE_SEC)).fetchone()
+                    "AND anchor_ts > ? AND anchor_ts < ? ORDER BY ABS(anchor_ts - ?), id LIMIT 1",
+                    (int(server_id), sender, text, seen_ts - SATONG_MERGE_SEC, seen_ts + SATONG_MERGE_SEC,
+                     seen_ts)).fetchone()
                 if row is not None:
                     message_id = int(row[0])
                     con.execute("UPDATE satong_messages SET first_seen_ts = MIN(first_seen_ts, ?), "
@@ -569,9 +575,10 @@ class Database:
                 else:
                     extras = {k: v for k, v in msg.items() if k not in SATONG_NORMALIZED_KEYS}
                     cur = con.execute(
-                        "INSERT INTO satong_messages (server_id, sender, text, first_seen_ts, last_seen_ts, seen_count, "
-                        "first_device, last_obs_id, recv_ts, payload_json) VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?, ?)",
-                        (int(server_id), sender, text, seen_ts, seen_ts, device_id, obs_id, recv_ts,
+                        "INSERT INTO satong_messages (server_id, sender, text, anchor_ts, first_seen_ts, last_seen_ts, "
+                        "seen_count, first_device, last_obs_id, recv_ts, payload_json) "
+                        "VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?)",
+                        (int(server_id), sender, text, seen_ts, seen_ts, seen_ts, device_id, obs_id, recv_ts,
                          json.dumps(extras, ensure_ascii=False)))
                     message_id = int(cur.lastrowid)
                     accepted += 1
@@ -586,8 +593,8 @@ class Database:
                 (device_id, int(server_id), recv_ts, 1 if collector.get("client_connected") else 0,
                  collector.get("last_message_ts"), collector.get("messages"), collector.get("agent_ts")))
             if seen_device is not None:
-                con.execute("UPDATE devices SET last_seen_ts = ?, upload_count = upload_count + 1 WHERE device_id = ?",
-                            (recv_ts, seen_device))
+                con.execute("UPDATE devices SET last_seen_ts = ?, upload_count = upload_count + ? WHERE device_id = ?",
+                            (recv_ts, 1 if messages else 0, seen_device))
         return accepted, duplicates, merged
 
     def satong_recent(self, server_id: int, limit: int, since_id: int | None = None) -> list[dict]:

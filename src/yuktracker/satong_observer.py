@@ -33,6 +33,13 @@ DEDUP_SEC = 10.0
 _DEDUP_SWEEP_AT = 256
 #: 하트비트 주기(초) — 허브·봇은 3배(180s)를 넘기면 수집기 오프라인으로 본다(HUB-PROTOCOL §3-8).
 HEARTBEAT_SEC = 60.0
+#: 콘솔 상태 줄 주기(초) — 메시지마다 찍으면 하루 수천 줄이라 건수만 이 주기로(`agent._satong_tick`).
+REPORT_SEC = 600.0
+
+
+def offline_collector() -> dict:
+    """수집기 상태를 못 만들 때(관측자 없음·예외) 보내는 값 — 허브는 이것을 '클라 끊김'으로 본다."""
+    return {"client_connected": False, "last_message_ts": None, "messages": 0, "agent_ts": time.time()}
 
 
 class SatongObserver:
@@ -96,7 +103,8 @@ class SatongObserver:
             if self._enqueue is not None:
                 self._enqueue(env)
             if self.messages == 1 and self._say is not None:
-                self._say(f"[사통] 클라{slot_idx + 1} 에서 첫 사통팔달을 받았습니다 — 이후는 10분마다 건수만 찍습니다")
+                self._say(f"[사통] 클라{slot_idx + 1} 에서 첫 사통팔달을 받았습니다 — 이후는 {REPORT_SEC / 60:g}분마다 "
+                          "건수만 찍습니다")
         except Exception:
             get_logger().exception("사통 관측 처리 실패 — 이 메시지는 버린다")
 
@@ -111,6 +119,10 @@ class SatongUploader(spool.Uploader):
 
     배치는 `spool.Spool` 파일 1개 = 메시지 N건(관측기가 죽어도 남는다). 하트비트는 스풀에 쓰지 않는다 — 지난 상태를
     나중에 올려 봐야 쓸모가 없다. 보낼 스풀이 남아 있으면 그 배치가 하트비트를 겸하므로 따로 보내지 않는다.
+
+    밀린 스풀은 **여러 파일을 요청 하나로** 묶어 보낸다(``MAX_OBSERVATIONS`` 까지). 사통은 15초에 한 건이라 파일 1개가
+    대개 1건인데, 허브가 몇 시간 죽어 있다 살아나면 수천 개가 쌓인다 — 파일마다 요청하면 육의전 업로드와 같은 기기의
+    속도제한을 다 써 버린다(허브도 사통 버킷을 따로 둔다, HUB-PROTOCOL §0).
     """
 
     def __init__(self, store: spool.Spool, *, hub_url: str, token: str, device_id: Callable[[], str],
@@ -136,8 +148,49 @@ class SatongUploader(spool.Uploader):
         try:
             status = self._collector()
         except Exception:
-            status = {"client_connected": False, "last_message_ts": None, "messages": 0, "agent_ts": time.time()}
+            status = offline_collector()
         return self._satong_post(hub_url, token, device_id, self.server_id, messages, status)
+
+    def _send_group(self, paths: list, messages: list) -> str:
+        """스풀 파일 여러 개를 요청 하나로. 200 이면 전부 지운다. 격리·분할(배치 안의 어느 파일이 문제인지 모른다)이면
+        파일 하나씩 다시 보내 문제 파일만 격리되게 한다. 나머지 행동은 `react`(spool.Uploader 와 같은 규칙)."""
+        resp = self._post(self.hub_url, self.token, self.device_id(), messages)
+        action, why = hub_client.classify_upload(resp)
+        if action == "ok":
+            for p in paths:
+                self.spool.done(p)
+            self.uploaded += len(messages)
+            self._backoff = spool.BACKOFF_MIN_SEC
+            return action
+        if action in ("quarantine", "split"):
+            for p in paths:
+                one = self.send_one(p)
+                if one in ("retry", "wait", "stop"):
+                    return one
+            return "ok"
+        return self.react(action, why, resp)
+
+    def flush_pending(self) -> None:
+        """오래된 것부터, 요청당 ``MAX_OBSERVATIONS`` 건까지 파일을 묶어서. 멈춤·대기 규칙은 `spool.Uploader` 와 같다."""
+        if self._clock() < self.retry_at:
+            return
+        pending = self.spool.pending()
+        tried: set = set()   # 이번 바퀴에 보낸 파일 — 200 뒤 삭제가 실패해 남아도 같은 바퀴에서 다시 보내지 않는다
+        while pending and not self._stop.is_set() and not self.halted:
+            group: list = []
+            batch: list = []
+            for p in pending:
+                obs = self.spool.read(p)
+                if group and len(batch) + len(obs) > hub_client.MAX_OBSERVATIONS:
+                    break
+                group.append(p)
+                batch.extend(obs)
+            tried.update(group)
+            action = self.send_one(group[0]) if len(group) == 1 else self._send_group(group, batch)
+            if action in ("retry", "wait"):
+                return  # 다음 시도 시각이 정해졌다 — 그때 같은 파일부터
+            # 분할·격리가 파일을 바꿀 수 있어 다시 본다(분할로 생긴 새 파일은 이름이 달라 이번 바퀴에 보낸다)
+            pending = [p for p in self.spool.pending() if p not in tried]
 
     def heartbeat_due(self) -> bool:
         if self.halted or self._clock() < self.retry_at:
@@ -178,7 +231,8 @@ class SatongUploader(spool.Uploader):
         if self.halted:
             return
         self.flush_pending()
-        if not self.halted and not self.spool.pending() and self.heartbeat_due():
+        # 하트비트 시각부터 — 대개 아니므로 스풀 폴더를 다시 훑지 않는다(2초 박자의 루프다).
+        if self.heartbeat_due() and not self.spool.pending():
             self.send_heartbeat()
 
     def run(self) -> None:  # pragma: no cover - 스레드 진입점(본체는 drain_queue·tick)

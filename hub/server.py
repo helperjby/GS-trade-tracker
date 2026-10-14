@@ -92,6 +92,8 @@ DEFAULTS = {
     #: IP 상한과 별개 키: IP 쪽은 실패까지 세는 무차별 대입 상한이고, 이쪽은 성공한 교체만 센다.
     "register_slot_limit_per_hour": 5,
     "upload_limit_per_min": 120,
+    #: 사통 업로드·하트비트의 기기당 분당 상한 — 육의전 버킷과 **따로** 센다(밀린 사통 스풀이 육의전 업로드를 429 로 막지 않게).
+    "satong_upload_limit_per_min": 60,
     "auth_fail_limit_per_min": 30,
     #: 사통팔달(§3-8) — 업로드를 받을 슬롯 이름 목록(빈 목록 = 기기 토큰으로는 못 올린다, 관리 시크릿만). 사통은 그대로 카톡방에
     #: 나가므로 지인 기기 아무나 올리게 두지 않는다(2026-10-14).
@@ -172,7 +174,7 @@ def load_config(path: str, env=None) -> dict:
     if cfg["port"] == cfg["public_port"]:
         raise SystemExit("config: 'public_port' 는 'port' 와 달라야 합니다 — 공개 리스너(Funnel 대상)와 관리 리스너를 나눈다")
     for key in ("register_limit_per_hour", "register_slot_limit_per_hour", "upload_limit_per_min",
-                "auth_fail_limit_per_min", "listing_expiry_days", "retention_satong_days", "satong_offline_sec",
+                "satong_upload_limit_per_min", "auth_fail_limit_per_min", "listing_expiry_days", "retention_satong_days", "satong_offline_sec",
                 "max_satong_messages_per_request", "satong_recent_limit_default", "satong_recent_limit_max"):
         v = cfg.get(key)
         if not _is_int(v) or v < 1:
@@ -309,7 +311,9 @@ def _auth_middleware():
                 log.exception("기기 토큰 조회 실패")
                 return _storage_error(time.time())
             if dev is not None:
-                wait = limits["upload"].hit(dev["device_id"])      # 취소 검사보다 먼저 — 취소된 클라의 폭주도 기기 단위로 429
+                # 취소 검사보다 먼저 — 취소된 클라의 폭주도 기기 단위로 429. 사통은 버킷이 따로다(§0).
+                bucket = "satong_upload" if request.path.startswith("/api/satong/") else "upload"
+                wait = limits[bucket].hit(dev["device_id"])
                 if wait:
                     return _too_many(wait)
                 if dev["revoked_ts"] is not None:
@@ -494,12 +498,18 @@ def validate_upload(body, cfg: dict, now: float) -> tuple:
     return device_id.strip(), obs_list
 
 
+def clean_line(value: str) -> str:
+    """사통 보낸이·내용의 인쇄 불가 문자(줄바꿈·탭·터미널 이스케이프 등)를 공백으로 — 받은 글은 그대로 카톡방과 운영자 로그로
+    나가므로 줄을 끊어 가짜 줄을 만들 수 없게 한다(2026-10-14 리뷰). 글자 수는 바뀌지 않는다."""
+    return "".join(ch if ch.isprintable() else " " for ch in value)
+
+
 def validate_satong_upload(body, cfg: dict, now: float) -> tuple:
     """사통 POST 본문 전건 검증 → (device_id, server_id, collector, messages). 첫 위반에서 ``_Bad``.
 
     ``messages`` 는 빈 목록이 정상이다(하트비트). ``collector.client_connected`` 는 필수 bool — 봇의 오프라인 판정 근거라
     빠지면 거부한다. 메시지의 미지 키는 통과(payload_json 에 남는다). ``agent_ts`` 범위는 육의전과 같은 이유로 검사한다
-    (보존 기간 이전·하루 넘게 미래 = 400).
+    (보존 기간 이전·하루 넘게 미래 = 400). 통과한 메시지는 보낸이·내용을 `clean_line` 으로 정리한 **사본**으로 돌려준다.
     """
     if not isinstance(body, dict):
         raise _Bad()
@@ -539,10 +549,11 @@ def validate_satong_upload(body, cfg: dict, now: float) -> tuple:
         if not oldest <= float(agent_ts) <= newest:
             raise _Bad("agent_ts_out_of_range", index=i, field="agent_ts")
         sender = msg.get("sender")
-        if not _is_str_max(sender, MAX_SATONG_SENDER_LEN) or not sender.strip():
+        if not _is_str_max(sender, MAX_SATONG_SENDER_LEN) or not clean_line(sender).strip():
             raise _Bad(index=i, field="sender")
         if not _is_str_max(msg.get("text"), MAX_SATONG_TEXT_LEN):
             raise _Bad(index=i, field="text")
+    messages = [{**m, "sender": clean_line(m["sender"]), "text": clean_line(m["text"])} for m in messages]
     clean = {"client_connected": collector["client_connected"],
              "last_message_ts": collector.get("last_message_ts"),
              "messages": collector.get("messages"), "agent_ts": collector.get("agent_ts")}
@@ -585,18 +596,18 @@ def _q_num(request: web.Request, key: str, default, cast, lo=None, hi=None):
     return v
 
 
-def _q_item_id(request: web.Request):
-    """``item_id`` 는 있으면 정확해야 한다 — 음수·비정수·i64 초과는 400. 조용히 0 으로 깎거나 버리면 틀린 결과가
-    옳은 것처럼 나간다(예: ``item_id=abc&q=봉인`` 이 id 필터 없이 전부 반환)."""
-    raw = request.query.get("item_id")
+def _q_id(request: web.Request, key: str):
+    """id 류 쿼리(``item_id``·``server_id``·``since_id``) — 없으면 None, 있으면 0~i64 정수여야 한다(아니면 400). 조용히 0 으로
+    깎거나 버리면 틀린 결과가 옳은 것처럼 나간다(예: ``item_id=abc&q=봉인`` 이 id 필터 없이 전부 반환). 필수 여부는 호출자 몫."""
+    raw = request.query.get(key)
     if raw is None or raw == "":
         return None
     try:
         v = int(raw)
     except ValueError:
-        raise _Bad(field="item_id") from None
+        raise _Bad(field=key) from None
     if not 0 <= v <= I64_MAX:
-        raise _Bad(field="item_id")
+        raise _Bad(field=key)
     return v
 
 
@@ -764,29 +775,15 @@ async def api_satong_observations(request: web.Request) -> web.Response:
                               "server_time": now})
 
 
-def _q_required_id(request: web.Request, key: str):
-    """필수(``server_id``)·선택(``since_id``) 정수 쿼리 — 있으면 0~i64 정수여야 한다(조용히 깎으면 틀린 서버를 보여 준다)."""
-    raw = request.query.get(key)
-    if raw is None or raw == "":
-        return None
-    try:
-        v = int(raw)
-    except ValueError:
-        raise _Bad(field=key) from None
-    if not 0 <= v <= I64_MAX:
-        raise _Bad(field=key)
-    return v
-
-
 async def api_satong_recent(request: web.Request) -> web.Response:
     """봇의 사통 폴링(§3-8) — 메시지(id 오름차순)와 수집기 상태. ``online`` 은 봇이 그대로 쓰는 판정이다:
     하트비트가 ``satong_offline_sec`` 안이고 클라가 연결된 수집기가 하나라도 있으면 true."""
     cfg = request.app[CFG_KEY]
     try:
-        server_id = _q_required_id(request, "server_id")
+        server_id = _q_id(request, "server_id")
         if server_id is None:
             raise _Bad(field="server_id")
-        since_id = _q_required_id(request, "since_id")
+        since_id = _q_id(request, "since_id")
     except _Bad as e:
         return e.response()
     limit = _q_num(request, "limit", int(cfg["satong_recent_limit_default"]), int, 1,
@@ -811,7 +808,7 @@ async def api_market_search(request: web.Request) -> web.Response:
     q = request.query.get("q", "")
     q_norm = db_mod.norm_item_name(q)
     try:
-        item_id = _q_item_id(request)
+        item_id = _q_id(request, "item_id")
         if not q_norm and item_id is None:
             raise _Bad(field="q")
     except _Bad as e:
@@ -878,6 +875,7 @@ def make_limiters(cfg: dict) -> dict:
             # 슬롯당 같은 상한 — 코드가 새면 한 슬롯을 시간당 N번 이상 교체해 명단을 불리지 못한다(정원 검사 폐지의 보완).
             "register_slot": RateLimiter(cfg["register_slot_limit_per_hour"], 3600),
             "upload": RateLimiter(cfg["upload_limit_per_min"], 60),
+            "satong_upload": RateLimiter(cfg["satong_upload_limit_per_min"], 60),
             "auth_fail": RateLimiter(cfg["auth_fail_limit_per_min"], 60)}
 
 

@@ -74,8 +74,11 @@ _FLOW_POLL_SEC = 0.5
 #: 지인 PC 의 콘솔이 조용하면 "되고 있는지" 를 아무도 모른다(엔진의 5분 헬스 INFO 줄은 개발자용).
 FLOW_REMIND_SEC = 30.0
 IDLE_REMIND_SEC = 600.0
-#: 사통 상태 줄 주기 — 메시지마다 찍으면 하루 수천 줄이라 건수만 이 주기로.
-SATONG_REPORT_SEC = 600.0
+#: 사통 상태 줄 주기 — 정의는 관측자 쪽(첫 메시지 안내 문구가 같은 값을 말한다).
+SATONG_REPORT_SEC = satong_observer.REPORT_SEC
+#: 종료 때 업로더 스레드를 기다리는 상한 — 육의전·사통 **합계**다. 콘솔 닫기(CTRL_CLOSE)는 Windows 가 약 5초를 주고,
+#: 그 안에 남은 큐를 스풀로 내리는 파일 쓰기까지 끝나야 한다.
+CLOSE_JOIN_SEC = 3.0
 
 #: 종료 코드.
 RC_OK = 0
@@ -307,6 +310,8 @@ class Market:
     observer: Optional[market_observer.MarketObserver] = None
     #: `close()` 뒤 스풀에도 못 내린 관측 수(스레드가 POST 에 붙들려 있고 마지막 내림도 실패한 경우) — 종료 요약에 찍는다.
     unsaved: int = 0
+    #: 업로더에 멈추라고 이미 알렸는가 — `close()` 가 여러 번(콘솔 종료 훅·finally) 불려도 `stop()` 은 한 번.
+    stop_requested: bool = False
 
     def start(self, say: Callable[[str], None]) -> None:
         """업로더 스레드를 띄운다. 못 띄우면(스레드 한도) 업로드 없이 관측만 — 관측 콜백은 그대로 산다."""
@@ -318,16 +323,26 @@ class Market:
             say(f"[허브] 업로더를 띄우지 못했습니다 — 업로드 없이 관측만 합니다: {e}")
             self.uploader = None
 
-    def close(self) -> None:
-        """업로더를 멈추고 잠깐 기다린 뒤, 스레드가 아직 POST 에 붙들려 있으면 큐를 **메인 스레드에서** 스풀에 내린다
-        (다음 실행이 올린다). 여러 번 불러도 된다(콘솔 종료 훅과 finally 가 둘 다 부른다)."""
+    def request_stop(self) -> None:
+        """멈추라고만 알린다(기다리지 않는다, 한 번만) — 업로더 여럿을 한 시간 예산 안에서 같이 닫으려고(`_close_uploads`)."""
+        up = self.uploader
+        if up is not None and not self.stop_requested:
+            self.stop_requested = True
+            try:
+                up.stop()
+            except Exception:
+                pass
+
+    def close(self, timeout: float = CLOSE_JOIN_SEC) -> None:
+        """업로더를 멈추고 ``timeout`` 까지 기다린 뒤, 스레드가 아직 POST 에 붙들려 있으면 큐를 **메인 스레드에서** 스풀에
+        내린다(다음 실행이 올린다). 여러 번 불러도 된다(콘솔 종료 훅과 finally 가 둘 다 부른다)."""
         up = self.uploader
         if up is None:
             return
         try:
-            up.stop()
+            self.request_stop()
             if up.is_alive():
-                up.join(timeout=3.0)
+                up.join(timeout=max(0.0, timeout))
             if up.is_alive() or up.queue_size():
                 while up.drain_queue(wait=False) is not None:
                     pass
@@ -349,7 +364,7 @@ class Satong(Market):
     def collector_status(self) -> dict:
         obs = self.observer
         if obs is None:
-            return {"client_connected": False, "last_message_ts": None, "messages": 0, "agent_ts": time.time()}
+            return satong_observer.offline_collector()
         try:
             connected = bool(self.connected())
         except Exception:
@@ -510,8 +525,7 @@ def run(opts: RunOptions, *, engine_factory=None, recorder=None,
             engine.stop()
         except Exception:
             pass
-        market.close()   # 큐에 남은 관측을 스풀에 — CTRL_CLOSE 의 유예 몇 초 안에 끝난다(join 3s + 파일 쓰기)
-        satong.close()
+        _close_uploads(market, satong)   # 큐에 남은 관측을 스풀에 — CTRL_CLOSE 의 유예 안에(join 합계 3s + 파일 쓰기)
 
     remove_close_hook = _install_console_close_hook(on_console_close)
     rc = RC_OK
@@ -555,8 +569,7 @@ def run(opts: RunOptions, *, engine_factory=None, recorder=None,
             engine.stop()
         except Exception:
             pass
-        market.close()
-        satong.close()
+        _close_uploads(market, satong)
         try:
             h = engine.health_snapshot()
             say(f"[패킷] 종료 헬스 — 패킷 {h.get('packets', 0)} / 세그 {h.get('fed_segments', 0)} / "
@@ -620,6 +633,17 @@ def _capturing(engine) -> bool:
         return int(engine.health_snapshot().get("tracked_flows", 0)) > 0
     except Exception:
         return False
+
+
+def _close_uploads(*bundles: Market, budget: float = CLOSE_JOIN_SEC,
+                   clock: Callable[[], float] = time.monotonic) -> None:
+    """업로더 여럿을 **한 예산 안에서** 닫는다 — 전부에 먼저 멈추라고 알리고(동시에 마무리), 남은 시간을 나눠 기다린다.
+    하나씩 3초씩 기다리면 둘이 6초가 돼 콘솔 닫기 유예(약 5초)를 넘기고, 뒤쪽 큐가 스풀에 내려가기 전에 프로세스가 죽는다."""
+    for b in bundles:
+        b.request_stop()
+    deadline = clock() + max(0.0, budget)
+    for b in bundles:
+        b.close(timeout=deadline - clock())
 
 
 def _satong_tick(satong: Satong, *, now: float) -> Optional[str]:
