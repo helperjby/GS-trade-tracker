@@ -28,6 +28,11 @@
 - ``satong_collectors`` — 수집 기기마다 마지막 하트비트(허브 수신 시각)와 클라 연결 상태. 봇은 이것으로 "사통이 없다"와
   "수집기가 죽었다"를 가른다.
 
+귓속말 표 하나(2026-10-14, HUB-PROTOCOL §3-9 — 다른 표와 독립):
+- ``whisper_messages`` — 받은 귓속말 1건 = 1행(받은 캐릭터·보낸이·본문). ``obs_id`` UNIQUE 가 재전송 dedup, ``id`` 는
+  AUTOINCREMENT(봇의 커서). 병합 없음(같은 글을 두 번 보내면 두 건). 미지 키는 저장하지 않고(사적 메시지), 보존은 시간 단위
+  (``prune_whisper``, ``recv_ts`` 기준).
+
 writer: market 표는 서버 이벤트루프 하나만 쓴다. ``devices`` 는 ``devices.py``(관리 CLI, 별도 프로세스)가 드물게
 한 행 UPDATE 를 넣는다 — WAL + busy timeout(``Database(timeout=)``) 아래서 서버의 업로드 트랜잭션과 안전하게 교차하고,
 최악은 서버 쪽 ``storage_error``(500) 한 번인데 관측기는 5xx 를 재시도한다.
@@ -98,6 +103,12 @@ CREATE TABLE IF NOT EXISTS satong_collectors (
   device_id TEXT PRIMARY KEY, server_id INTEGER NOT NULL,
   last_heartbeat_ts REAL NOT NULL, client_connected INTEGER NOT NULL,
   last_message_ts REAL, messages INTEGER, agent_ts REAL);
+CREATE TABLE IF NOT EXISTS whisper_messages (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  obs_id TEXT NOT NULL UNIQUE, device_id TEXT NOT NULL,
+  receiver TEXT NOT NULL, sender TEXT NOT NULL, text TEXT NOT NULL,
+  agent_ts REAL NOT NULL, seen_ts REAL NOT NULL, recv_ts REAL NOT NULL);
+CREATE INDEX IF NOT EXISTS idx_whisper_recv ON whisper_messages(recv_ts);
 """
 
 DEFAULT_CATEGORY = "item"
@@ -636,6 +647,49 @@ class Database:
             cur_m = con.execute("DELETE FROM satong_messages WHERE last_seen_ts < ?", (cutoff,))
             cur_o = con.execute("DELETE FROM satong_obs_ids WHERE recv_ts < ?", (cutoff,))
         return cur_m.rowcount, cur_o.rowcount
+
+    # ---- 귓속말 (POST /api/whisper/observations · GET /api/whisper/recent) ----
+
+    def insert_whisper(self, device_id: str, messages: list, recv_ts: float, seen_device: str | None = None) -> tuple:
+        """검증이 끝난 귓속말 배치를 **트랜잭션 1개**로 반영 → (새 행 수, 재전송 중복 수). ``obs_id`` 가 이미 있으면 중복.
+        ``seen_ts = min(agent_ts, recv_ts)``. ``seen_device`` 가 있으면 기기의 ``last_seen_ts``·``upload_count`` 도 같은 트랜잭션."""
+        accepted = duplicates = 0
+        with self._tx() as con:
+            for msg in messages:
+                agent_ts = float(msg["agent_ts"])
+                cur = con.execute(
+                    "INSERT OR IGNORE INTO whisper_messages (obs_id, device_id, receiver, sender, text, agent_ts, "
+                    "seen_ts, recv_ts) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    (msg["obs_id"], device_id, str(msg["receiver"]), str(msg["sender"]), str(msg["text"]), agent_ts,
+                     min(agent_ts, recv_ts), recv_ts))
+                if cur.rowcount == 1:
+                    accepted += 1
+                else:
+                    duplicates += 1
+            if seen_device is not None:
+                con.execute("UPDATE devices SET last_seen_ts = ?, upload_count = upload_count + 1 WHERE device_id = ?",
+                            (recv_ts, seen_device))
+        return accepted, duplicates
+
+    def whisper_recent(self, limit: int, since_id: int | None = None) -> list[dict]:
+        """``since_id`` 가 있으면 그보다 큰 id 를 오래된 순으로 ``limit`` 개(증분 폴링), 없으면 **가장 최근** ``limit`` 개를
+        id 오름차순으로(첫 폴링·기준점) — ``satong_recent`` 와 같은 규칙."""
+        cols = "id, receiver, sender, text, seen_ts, recv_ts"
+        if since_id is not None:
+            rows = self._con.execute(f"SELECT {cols} FROM whisper_messages WHERE id > ? ORDER BY id ASC LIMIT ?",
+                                     (int(since_id), int(limit))).fetchall()
+        else:
+            rows = self._con.execute(
+                f"SELECT * FROM (SELECT {cols} FROM whisper_messages ORDER BY id DESC LIMIT ?) ORDER BY id ASC",
+                (int(limit),)).fetchall()
+        return [dict(r) for r in rows]
+
+    def prune_whisper(self, now: float, hours: int = 24) -> int:
+        """보존 시간 초과분(``recv_ts`` < cutoff) 삭제 → 삭제 수. AUTOINCREMENT 라 지워도 id 는 재사용되지 않는다(봇 커서 안전)."""
+        cutoff = now - int(hours) * 3600
+        with self._tx() as con:
+            cur = con.execute("DELETE FROM whisper_messages WHERE recv_ts < ?", (cutoff,))
+        return cur.rowcount
 
     # ---- 보존 ----
 

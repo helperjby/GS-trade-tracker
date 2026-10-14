@@ -30,11 +30,13 @@
   | `GET /api/market/search` `listings` `stats` | **`403 {"ok":false,"error":"not_public"}`**(자격 검사 전) | 관리 시크릿 `Authorization: Bearer <secret>` |
   | `POST /api/satong/observations` | 허용 | 기기 토큰 + 그 기기의 슬롯이 `satong_slots` 에 있어야 함(§3-8); 직접 접속이면 관리 시크릿도 |
   | `GET /api/satong/recent` | **`403 not_public`**(자격 검사 전) | 관리 시크릿 |
+  | `POST /api/whisper/observations` | **`403 not_public`**(자격 검사 전, `admin_public` 무관) | 기기 토큰 + 그 기기의 슬롯이 `whisper_slots` 에 있어야 함(§3-9); 관리 시크릿도 |
+  | `GET /api/whisper/recent` | **`403 not_public`**(자격 검사 전) | 관리 시크릿 |
 
   자격 없음·불일치·범위 밖(기기 토큰으로 조회, 공개 요청의 관리 시크릿)은 전부 `401 {"error":"unauthorized"}`.
 - 속도제한(프로세스 메모리, 재기동이면 리셋; 두 리스너가 버킷을 공유): 등록 IP 당 `register_limit_per_hour`(10)·등록 **슬롯당**
   `register_slot_limit_per_hour`(5, 성공한 교체만 — 새어 나간 코드로 한 슬롯을 계속 갈아치우지 못하게), 업로드 기기 당
-  `upload_limit_per_min`(120 — 사통 라우트는 별도 버킷 `satong_upload_limit_per_min`(60); 관리 시크릿은 무제한; 취소 검사보다 먼저라 취소된 클라의 폭주도 기기 단위로 429), 인증 실패 **공개
+  `upload_limit_per_min`(120 — 사통 라우트는 별도 버킷 `satong_upload_limit_per_min`(60), 귓속말은 `whisper_upload_limit_per_min`(30); 관리 시크릿은 무제한; 취소 검사보다 먼저라 취소된 클라의 폭주도 기기 단위로 429), 인증 실패 **공개
   요청** IP 당 `auth_fail_limit_per_min`(30) — 토큰 검사 **뒤** 실패에만 센다(공유 NAT 뒤의 고장난 클라 하나가 같은 IP 의 정상
   기기를 막지 않게; 직접 접속은 브리지 IP 를 봇과 공유하므로 세지 않는다). 초과는 `429 {"ok":false,"error":"rate_limited",
   "retry_after":N}` + `Retry-After: N` — N 초 뒤 재시도(§3-1 관측기 규약).
@@ -89,6 +91,12 @@ CREATE TABLE satong_collectors (        -- 수집 기기마다 마지막 하트�
   device_id TEXT PRIMARY KEY, server_id INTEGER NOT NULL,
   last_heartbeat_ts REAL NOT NULL,      -- 허브 수신 시각(관측기 시계 무관)
   client_connected INTEGER NOT NULL, last_message_ts REAL, messages INTEGER, agent_ts REAL);
+CREATE TABLE whisper_messages (         -- 받은 귓속말 1건 (§3-9, 2026-10-14); 병합 없음, 미지 키 저장 안 함
+  id INTEGER PRIMARY KEY AUTOINCREMENT, -- 소비자 커서 — 지운 번호를 다시 쓰지 않는다
+  obs_id TEXT NOT NULL UNIQUE,          -- 재전송 dedup
+  device_id TEXT NOT NULL,
+  receiver TEXT NOT NULL, sender TEXT NOT NULL, text TEXT NOT NULL,   -- 받은 캐릭터·보낸이·본문
+  agent_ts REAL NOT NULL, seen_ts REAL NOT NULL, recv_ts REAL NOT NULL);   -- seen_ts = min(agent_ts, recv_ts)
 ```
 
 - `listing_key` 에 아이템 id·판매자를 붙이는 이유: 등록 id 가 재사용돼도 다른 판매 건이 섞이지 않게. 같은 등록의
@@ -370,6 +378,46 @@ HTTP 관리 라우트를 두지 않는 이유: 공개 표면을 늘리지 않고
 - 소비자 규약: 첫 폴링(커서 없음)은 기준점만 잡고 보내지 않는다(몰아 보내기 금지) → 이후 `since_id` = 마지막으로 처리한 `id`.
   스풀에 묵었다 늦게 올라온 사통은 큰 id + 옛 `first_seen_ts` 로 온다 — 늦은 글을 보낼지는 소비자가 `first_seen_ts` 로 정한다.
 
+### 3-9. 귓속말 중계 — `POST /api/whisper/observations` · `GET /api/whisper/recent` (2026-10-14)
+
+운영자가 게임 보조 도구(별도 배포 단위, 이 레포 밖)에서 받은 **귓속말**을 미루봇이 운영자 개인방에 알리는 경로. 허브는 중계·보존만 하고
+패킷 해석은 보내는 쪽 몫이다(이 레포에 opcode 주장 없음). 귓속말은 제3자의 1:1 사적 메시지라 사통보다 좁게 연다:
+
+- **업로드 라우트도 직접 접속 전용**이다 — 공개 요청(공개 리스너·Funnel 헤더)은 자격 검사 **전에** `403 not_public`(`admin_public` 이 true 여도).
+  보내는 PC 는 tailnet·LAN 으로 관리 리스너(8800)에 붙는다.
+- **허용 슬롯**: 기기 토큰이면 그 기기의 `slot` 이 설정 `whisper_slots` 에 있어야 한다 — 아니면 `403 {"ok":false,"error":"whisper_not_allowed"}`
+  (아무것도 안 쓰고 `last_seen_ts` 만). 등록은 §3-0 과 같은 초대 코드 흐름이되 **전용 슬롯**을 쓴다(같은 슬롯 재등록은 그 슬롯의 옛 기기를
+  제거하므로 관측기 슬롯을 같이 쓰면 관측기가 떨어진다). 관리 시크릿(직접 접속)은 항상 허용.
+- 하트비트·`online` 없음 — 보내는 쪽은 게임 세션 중에만 살아 있어 "없음"이 정상 상태다.
+
+```jsonc
+// → POST /api/whisper/observations   (Bearer <기기 토큰>, 직접 접속 전용)
+{"v":1, "device_id":"d-5e0b2a9c41",
+ "messages":[{"obs_id":"9f2c…(uuid)", "agent_ts":1760400000.5, "receiver":"캐릭A", "sender":"보낸이A", "text":"합성 귓속말"}]}
+// ← 200
+{"ok":true, "accepted":1, "duplicates":0, "server_time":1760400001.0}
+```
+
+- 검증(전건, 위반 시 400 + 아무것도 안 씀): `messages` 비지 않은 목록 ≤ `max_whisper_messages_per_request`(20) · 메시지마다 `obs_id` 1~128자 ·
+  `agent_ts` 는 `[now − retention_whisper_hours, now + max_agent_ts_ahead_sec]` · `receiver`·`sender` 비지 않은 문자열 ≤64자 · `text` 문자열 ≤256자
+  (빈 문자열 허용 — 공백 한 칸 귓속말은 본문 0자로 온다). 인쇄 불가 문자는 공백으로(§3-8 과 같은 이유), 이름은 앞뒤 공백을 벗긴다.
+  **미지 키는 저장하지 않는다**(`payload_json` 없음). `device_mismatch`·속도제한(`whisper_upload_limit_per_min`, 전용 버킷)은 §3-1·§3-8 과 같다.
+- 반영(트랜잭션 1개): `obs_id` 가 이미 있으면 `duplicates`, 아니면 새 행(`accepted`) — **병합 없음**(같은 글을 두 번 보내면 두 건).
+  기기 토큰이면 `devices.last_seen_ts`·`upload_count` 도 같은 트랜잭션. 허브 로그는 건수만 남긴다(이름·본문 없음).
+
+```jsonc
+// → GET /api/whisper/recent?since_id=41&limit=100   (Bearer <관리 시크릿>, 직접 접속 전용)
+// ← 200
+{"v":1, "server_time":1760400030.0, "since_id":41, "limit":100, "count":1,
+ "messages":[{"id":42, "receiver":"캐릭A", "sender":"보낸이A", "text":"합성 귓속말",
+              "seen_ts":1760400000.5, "recv_ts":1760400001.0}]}
+```
+
+- `since_id` 가 있으면 **그보다 큰 id 를 오래된 순으로** `limit` 개, 없으면 **가장 최근** `limit` 개를 id 오름차순으로(기준점). `limit` 기본 100,
+  상한 200. 정수가 아닌 `since_id` 는 400.
+- 소비자 규약: 첫 폴링(커서 없음)은 기준점만 잡고 보내지 않는다 → 이후 `since_id` = 마지막으로 처리한 `id`. 보존이 짧으므로(§5) 소비자가
+  보존 시간보다 오래 멈췄다 돌아오면 그 사이 건은 없다(재전송 요청 수단 없음 — 수용).
+
 ## 4. 시각·신선도
 
 - 허브 저장 시각은 `seen_ts = min(agent_ts, recv_ts)`: 스풀에 묵었다가 늦게 올라온 관측은 **관측 시각**이 남고(그때 본
@@ -400,6 +448,8 @@ HTTP 관리 라우트를 두지 않는 이유: 공개 표면을 늘리지 않고
 삭제(경계값 보존). `market_item_names` 는 지우지 않는다.
 사통(같은 루프, `prune_satong`): `satong_messages.last_seen_ts` · `satong_obs_ids.recv_ts` 가 `now − retention_satong_days(7)` 미만인 행.
 `satong_collectors` 는 기기 수만큼이라 지우지 않는다.
+귓속말(별도 루프, **1시간마다** `prune_whisper`): `whisper_messages.recv_ts` 가 `now − retention_whisper_hours(24)×3600` 미만인 행 — 사적 메시지라
+봇이 가져간 뒤 오래 두지 않는다(최대 생존 ≈ 보존 + 1시간).
 
 ## 6. 설정 (`hub/config.json`, `.example` 참조)
 
@@ -422,12 +472,20 @@ HTTP 관리 라우트를 두지 않는 이유: 공개 표면을 늘리지 않고
 거부) `retention_satong_days`(7) `satong_offline_sec`(180) `max_satong_messages_per_request`(100) `satong_recent_limit_default`(200)
 `satong_recent_limit_max`(500) `satong_upload_limit_per_min`(60).
 
+귓속말 중계(2026-10-14, §3-9): **`whisper_slots`**(슬롯 이름 목록, 기본 `[]` = 기기 토큰으로는 못 올린다; `invite_codes` 에 없는 이름이면 기동
+거부 — 보내는 PC 전용 슬롯을 `invite_codes` 에 하나 더 두고 그 이름을 적는다) `retention_whisper_hours`(24) `whisper_upload_limit_per_min`(30)
+`max_whisper_messages_per_request`(20) `whisper_recent_limit_default`(100) `whisper_recent_limit_max`(200).
+
 관측기 쪽 키(PR-Y1b, `%APPDATA%\YukTracker\config.json`): `hub_url`(공개 Funnel 주소; exe 내장 기본값) · `hub_device_id` · `hub_token`
 (§3-0 응답 저장) · `satong_server_id`(사통 수집 서버 번호, 빈 값 = 끔; CLI `--satong N` 이 이긴다). 초대 코드는 `--invite-code` 인자/첫 실행 프롬프트로만 받고 저장하지 않는다. 구 `hub_secret` 키는 폐기 — 관리
 시크릿은 exe 에 들어가지 않는다.
 
 ## 7. 변경 이력
 
+- 2026-10-14 v1 **귓속말 중계**(additive; 사용자 결정: 운영자가 받은 귓속말을 미루봇 개인방으로, 육의전 허브 경유):
+  §3-9 `POST /api/whisper/observations`(직접 접속 전용 — 공개 요청은 자격 검사 전 403, 기기 토큰은 `whisper_slots` 슬롯만, obs_id dedup,
+  미지 키 저장 안 함) · `GET /api/whisper/recent`(관리 전용, `since_id` 커서) · §1 `whisper_messages` · §5 시간 단위 보존(1시간 루프) ·
+  §6 설정 키 · §0 전용 속도제한 버킷. 기존 라우트·표 무변경.
 - 2026-10-14 v1 **사통팔달**(additive; 미루봇 사통 원본을 외부 기록 사이트 → 운영자 PC 패킷 수집으로 바꾸는 계획, 사용자 결정: 육의전 허브 경유):
   §3-8 `POST /api/satong/observations`(기기 토큰은 `satong_slots` 슬롯만, 빈 배치 = 하트비트, 재전송 dedup·10초 병합) ·
   `GET /api/satong/recent`(관리 전용, `since_id` 커서, `online` 판정) · §1 표 셋 · §5 보존 · §6 설정 키. 기존 라우트·표 무변경.

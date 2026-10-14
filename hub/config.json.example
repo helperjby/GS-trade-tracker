@@ -24,5 +24,8 @@
   "satong_slots": [],
   "satong_upload_limit_per_min": 60,
   "retention_satong_days": 7,
-  "satong_offline_sec": 180
+  "satong_offline_sec": 180,
+  "whisper_slots": [],
+  "whisper_upload_limit_per_min": 30,
+  "retention_whisper_hours": 24
 }

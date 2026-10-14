@@ -5,7 +5,8 @@
 ``GET /api/market/ping``(기기 토큰 확인 — 관측기 ``--selftest``) ·
 ``GET /api/market/search`` · ``GET /api/market/listings`` · ``GET /api/market/stats``(관리 시크릿, **직접 접속 전용**) ·
 ``POST /api/satong/observations``(사통 수집기 — 기기 토큰이면 ``satong_slots`` 슬롯만) · ``GET /api/satong/recent``(관리 시크릿,
-직접 접속 전용). 계약 정본은 docs/HUB-PROTOCOL.md.
+직접 접속 전용) · ``POST /api/whisper/observations``(귓속말 중계 — 기기 토큰이면 ``whisper_slots`` 슬롯만, **직접 접속 전용**) ·
+``GET /api/whisper/recent``(관리 시크릿, 직접 접속 전용). 계약 정본은 docs/HUB-PROTOCOL.md.
 
 리스너 둘(``serve``): **관리 리스너** ``port``(8800) 는 전 라우트, Pi 안(봇)·LAN·tailnet 의 직접 접속용. **공개 리스너**
 ``public_port``(8801) 는 Tailscale Funnel 이 가리키는 포트 — 여기로 온 요청은 헤더와 무관하게 전부 "공개"라 관리 시크릿을
@@ -104,6 +105,15 @@ DEFAULTS = {
     "max_satong_messages_per_request": 100,
     "satong_recent_limit_default": 200,
     "satong_recent_limit_max": 500,
+    #: 귓속말 중계(§3-9) — 업로드를 받을 슬롯 이름 목록(빈 목록 = 기기 토큰으로는 못 올린다). 귓속말은 제3자의 1:1 사적
+    #: 메시지라 사통보다 더 좁게: 업로드 라우트 자체가 직접 접속(tailnet·LAN) 전용이고 공개 리스너에서는 403 ``not_public``.
+    "whisper_slots": [],
+    #: 귓속말은 봇이 한 번 가져가면 끝이라 오래 둘 이유가 없다 — 시간 단위, 보존 루프는 1시간마다.
+    "retention_whisper_hours": 24,
+    "whisper_upload_limit_per_min": 30,
+    "max_whisper_messages_per_request": 20,
+    "whisper_recent_limit_default": 100,
+    "whisper_recent_limit_max": 200,
 }
 #: 관측 100건 × 행 64 × 행당 ~180B ≈ 1.2MB — aiohttp 기본 1MiB 보다 넉넉하게.
 CLIENT_MAX_SIZE = 4 * 1024 * 1024
@@ -135,6 +145,11 @@ MAX_DEVICE_ID_LEN = MAX_OBS_ID_LEN - len(":") - 13 - len(":") - 12  # 101
 #: 사통 문자열 상한 — 프레임 필드는 보낸이 20B·내용 40B(cp949)라 글자 수는 그 이하다. 넉넉히 두되 무한은 아니다.
 MAX_SATONG_SENDER_LEN = 64
 MAX_SATONG_TEXT_LEN = 128
+#: 귓속말 문자열 상한 — 받는 캐릭터·보낸이는 게임 이름(짧다), 본문은 채팅 한 줄. 넉넉히 두되 무한은 아니다.
+MAX_WHISPER_NAME_LEN = 64
+MAX_WHISPER_TEXT_LEN = 256
+#: 귓속말 메시지에서 저장하는 키 — 이 밖의 키는 **버린다**(사적 메시지라 tolerant reader 의 미지 키 보존을 하지 않는다).
+WHISPER_KEYS = ("obs_id", "agent_ts", "receiver", "sender", "text")
 
 CFG_KEY = web.AppKey("cfg", dict)
 DB_KEY = web.AppKey("db", db_mod.Database)
@@ -143,9 +158,13 @@ RL_KEY = web.AppKey("limits", dict)
 PUBLIC_KEY = web.AppKey("public_only", bool)
 #: request[DEVICE_KEY] — 기기 토큰 인증이면 기기 dict(device_id·label·…), 관리 시크릿이면 None.
 DEVICE_KEY = "device"
-#: 라우트별 인증 모드 — 없는 경로는 "admin"(관리 시크릿, 직접 접속 전용).
+#: 라우트별 인증 모드 — 없는 경로는 "admin"(관리 시크릿, 직접 접속 전용). "device_direct" 는 기기 토큰·관리 시크릿을
+#: 받되 공개 요청이면 자격 검사 전에 403 ``not_public``(``admin_public`` 과 무관 — 사적 메시지 업로드는 Funnel 로 열지 않는다).
 ROUTE_AUTH = {"/api/market/register": "open", "/api/market/observations": "device_or_admin",
-              "/api/market/ping": "device_or_admin", "/api/satong/observations": "device_or_admin"}
+              "/api/market/ping": "device_or_admin", "/api/satong/observations": "device_or_admin",
+              "/api/whisper/observations": "device_direct"}
+#: 기기 토큰 업로드의 속도제한 버킷 — 경로 접두사별로 따로 센다(밀린 한 종류가 다른 종류를 429 로 막지 않게).
+_UPLOAD_BUCKETS = (("/api/satong/", "satong_upload"), ("/api/whisper/", "whisper_upload"))
 
 
 def load_config(path: str, env=None) -> dict:
@@ -175,7 +194,9 @@ def load_config(path: str, env=None) -> dict:
         raise SystemExit("config: 'public_port' 는 'port' 와 달라야 합니다 — 공개 리스너(Funnel 대상)와 관리 리스너를 나눈다")
     for key in ("register_limit_per_hour", "register_slot_limit_per_hour", "upload_limit_per_min",
                 "satong_upload_limit_per_min", "auth_fail_limit_per_min", "listing_expiry_days", "retention_satong_days", "satong_offline_sec",
-                "max_satong_messages_per_request", "satong_recent_limit_default", "satong_recent_limit_max"):
+                "max_satong_messages_per_request", "satong_recent_limit_default", "satong_recent_limit_max",
+                "retention_whisper_hours", "whisper_upload_limit_per_min", "max_whisper_messages_per_request",
+                "whisper_recent_limit_default", "whisper_recent_limit_max"):
         v = cfg.get(key)
         if not _is_int(v) or v < 1:
             raise SystemExit(f"config: '{key}' 는 1 이상의 정수여야 합니다")
@@ -185,7 +206,8 @@ def load_config(path: str, env=None) -> dict:
     if not isinstance(proxy_header, str) or not proxy_header.strip():
         raise SystemExit("config: 'proxy_header' 는 비어 있지 않은 문자열이어야 합니다")
     cfg["proxy_header"] = proxy_header.strip()
-    cfg["satong_slots"] = _load_satong_slots(cfg.get("satong_slots"), cfg["invite_codes"])
+    cfg["satong_slots"] = _load_slot_list("satong_slots", cfg.get("satong_slots"), cfg["invite_codes"])
+    cfg["whisper_slots"] = _load_slot_list("whisper_slots", cfg.get("whisper_slots"), cfg["invite_codes"])
     db_path = env.get(ENV_DB_PATH) or cfg.get("db_path")
     if not isinstance(db_path, str) or not db_path:
         raise SystemExit("config: 'db_path' 가 비어 있습니다")
@@ -297,22 +319,22 @@ def _auth_middleware():
         cfg, limits = request.app[CFG_KEY], request.app[RL_KEY]
         public = _is_public(request)
         admin_allowed = bool(cfg["admin_public"]) or not public
-        if mode == "admin" and not admin_allowed:
+        if (mode == "admin" and not admin_allowed) or (mode == "device_direct" and public):
             # 자격 검사보다 먼저 — 시크릿을 맞혀도 403 이라 추측 오라클이 없다.
             return web.json_response({"ok": False, "error": "not_public"}, status=403)
         token = _bearer(request)
         if token and admin_allowed and _secret_eq(token, cfg["secret"]):
             request[DEVICE_KEY] = None
             return await handler(request)
-        if token and mode == "device_or_admin":
+        if token and mode in ("device_or_admin", "device_direct"):
             try:
                 dev = request.app[DB_KEY].get_device_by_token_hash(_token_hash(token))
             except sqlite3.Error:
                 log.exception("기기 토큰 조회 실패")
                 return _storage_error(time.time())
             if dev is not None:
-                # 취소 검사보다 먼저 — 취소된 클라의 폭주도 기기 단위로 429. 사통은 버킷이 따로다(§0).
-                bucket = "satong_upload" if request.path.startswith("/api/satong/") else "upload"
+                # 취소 검사보다 먼저 — 취소된 클라의 폭주도 기기 단위로 429. 사통·귓속말은 버킷이 따로다(§0).
+                bucket = next((b for prefix, b in _UPLOAD_BUCKETS if request.path.startswith(prefix)), "upload")
                 wait = limits[bucket].hit(dev["device_id"])
                 if wait:
                     return _too_many(wait)
@@ -389,20 +411,20 @@ def _load_invite_codes(raw, secret: str) -> dict:
     return codes
 
 
-def _load_satong_slots(raw, codes: dict) -> list:
-    """`satong_slots` 검증 → 슬롯 이름 목록(strip). 없음·null = 빈 목록. `invite_codes` 에 없는 이름은 거부 — 오타가 조용히
-    "아무도 못 올린다"가 되지 않게."""
+def _load_slot_list(key: str, raw, codes: dict) -> list:
+    """`satong_slots`·`whisper_slots` 검증 → 슬롯 이름 목록(strip). 없음·null = 빈 목록. `invite_codes` 에 없는 이름은 거부 —
+    오타가 조용히 "아무도 못 올린다"가 되지 않게."""
     if raw is None:
         return []
     if not isinstance(raw, list):
-        raise SystemExit("config: 'satong_slots' 는 슬롯 이름 목록이어야 합니다(예: [\"slot1\"], 빈 목록 = 기기 토큰 업로드 닫힘)")
+        raise SystemExit(f"config: '{key}' 는 슬롯 이름 목록이어야 합니다(예: [\"slot1\"], 빈 목록 = 기기 토큰 업로드 닫힘)")
     out: list[str] = []
     for item in raw:
         name = item.strip() if isinstance(item, str) else ""
         if not name:
-            raise SystemExit(f"config: 'satong_slots' 의 {item!r} — 비어 있지 않은 문자열이어야 합니다")
+            raise SystemExit(f"config: '{key}' 의 {item!r} — 비어 있지 않은 문자열이어야 합니다")
         if name not in codes:
-            raise SystemExit(f"config: 'satong_slots' 의 '{name}' 이 'invite_codes' 에 없습니다 — 슬롯 이름을 확인하세요")
+            raise SystemExit(f"config: '{key}' 의 '{name}' 이 'invite_codes' 에 없습니다 — 슬롯 이름을 확인하세요")
         if name not in out:
             out.append(name)
     return out
@@ -558,6 +580,47 @@ def validate_satong_upload(body, cfg: dict, now: float) -> tuple:
              "last_message_ts": collector.get("last_message_ts"),
              "messages": collector.get("messages"), "agent_ts": collector.get("agent_ts")}
     return device_id.strip(), int(server_id), clean, messages
+
+
+def validate_whisper_upload(body, cfg: dict, now: float) -> tuple:
+    """귓속말 POST 본문 전건 검증 → (device_id, messages). 첫 위반에서 ``_Bad``.
+
+    하트비트가 없으므로 빈 ``messages`` 는 400. ``receiver``(받은 캐릭터)·``sender`` 는 `clean_line` 뒤 비어 있으면 안 되고,
+    ``text`` 는 빈 문자열을 허용한다(공백 한 칸 귓속말은 게임이 공백을 잘라 본문 0자로 온다). ``agent_ts`` 는 보존 시간 안이어야
+    한다. 통과한 메시지는 ``WHISPER_KEYS`` 만 남긴 **사본**(이름·본문은 `clean_line`) — 미지 키는 버린다.
+    """
+    if not isinstance(body, dict):
+        raise _Bad()
+    device_id = body.get("device_id")
+    if not isinstance(device_id, str) or not device_id.strip() or len(device_id) > MAX_DEVICE_ID_LEN:
+        raise _Bad(field="device_id")
+    messages = body.get("messages")
+    if not isinstance(messages, list) or not messages:
+        raise _Bad(field="messages")
+    if len(messages) > int(cfg["max_whisper_messages_per_request"]):
+        raise _Bad("too_many", field="messages")
+    oldest = now - int(cfg["retention_whisper_hours"]) * 3600
+    newest = now + float(cfg["max_agent_ts_ahead_sec"])
+    for i, msg in enumerate(messages):
+        if not isinstance(msg, dict):
+            raise _Bad(index=i)
+        obs_id = msg.get("obs_id")
+        if not isinstance(obs_id, str) or not 1 <= len(obs_id) <= MAX_OBS_ID_LEN:
+            raise _Bad(index=i, field="obs_id")
+        agent_ts = msg.get("agent_ts")
+        if not _is_num(agent_ts):
+            raise _Bad(index=i, field="agent_ts")
+        if not oldest <= float(agent_ts) <= newest:
+            raise _Bad("agent_ts_out_of_range", index=i, field="agent_ts")
+        for k in ("receiver", "sender"):
+            v = msg.get(k)
+            if not _is_str_max(v, MAX_WHISPER_NAME_LEN) or not clean_line(v).strip():
+                raise _Bad(index=i, field=k)
+        if not _is_str_max(msg.get("text"), MAX_WHISPER_TEXT_LEN):
+            raise _Bad(index=i, field="text")
+    clean = [{"obs_id": m["obs_id"], "agent_ts": float(m["agent_ts"]), "receiver": clean_line(m["receiver"]).strip(),
+              "sender": clean_line(m["sender"]).strip(), "text": clean_line(m["text"])} for m in messages]
+    return device_id.strip(), clean
 
 
 def validate_register(body) -> tuple:
@@ -803,6 +866,54 @@ async def api_satong_recent(request: web.Request) -> web.Response:
                               "count": len(messages), "messages": messages})
 
 
+async def api_whisper_observations(request: web.Request) -> web.Response:
+    """귓속말 중계 업로드(§3-9). 직접 접속 전용(공개 요청은 미들웨어가 이미 403). 기기 토큰이면 그 기기의 슬롯이
+    ``whisper_slots`` 에 있어야 한다(403 ``whisper_not_allowed``). 로그에는 건수만 — 이름·본문은 남기지 않는다."""
+    cfg = request.app[CFG_KEY]
+    db = request.app[DB_KEY]
+    dev = request.get(DEVICE_KEY)
+    now = time.time()
+    if dev is not None and (dev.get("slot") or "") not in cfg["whisper_slots"]:
+        _touch_device(db, dev, now)
+        return web.json_response({"ok": False, "error": "whisper_not_allowed"}, status=403)
+    try:
+        body = await request.json()
+    except (ValueError, LookupError):
+        body = None
+    try:
+        device_id, messages = validate_whisper_upload(body, cfg, now)
+    except _Bad as e:
+        _touch_device(db, dev, now)
+        return e.response()
+    if dev is not None and device_id != dev["device_id"]:
+        _touch_device(db, dev, now)
+        return web.json_response({"ok": False, "error": "device_mismatch", "device_id": dev["device_id"]}, status=403)
+    try:
+        accepted, duplicates = db.insert_whisper(
+            device_id, messages, now, seen_device=dev["device_id"] if dev is not None else None)
+    except sqlite3.Error:
+        log.exception("귓속말 저장 실패: %s", device_id)
+        return _storage_error(now)
+    log.info("귓속말 수신: %s%s 신규 %d / 중복 %d", device_id,
+             f"({_device_name(dev)})" if _device_name(dev) else "", accepted, duplicates)
+    return web.json_response({"ok": True, "accepted": accepted, "duplicates": duplicates, "server_time": now})
+
+
+async def api_whisper_recent(request: web.Request) -> web.Response:
+    """봇의 귓속말 폴링(§3-9) — ``since_id`` 보다 큰 id 를 오름차순으로(없으면 가장 최근 ``limit`` 개 = 기준점). 하트비트·
+    ``online`` 은 없다 — 보내는 쪽(SEAssist)은 세션 중에만 살아 있어 "없음"이 정상 상태다."""
+    cfg = request.app[CFG_KEY]
+    try:
+        since_id = _q_id(request, "since_id")
+    except _Bad as e:
+        return e.response()
+    limit = _q_num(request, "limit", int(cfg["whisper_recent_limit_default"]), int, 1,
+                   int(cfg["whisper_recent_limit_max"]))
+    messages = request.app[DB_KEY].whisper_recent(limit, since_id)
+    return web.json_response({"v": PROTO_V, "server_time": time.time(), "since_id": since_id, "limit": limit,
+                              "count": len(messages), "messages": messages})
+
+
 async def api_market_search(request: web.Request) -> web.Response:
     cfg = request.app[CFG_KEY]
     q = request.query.get("q", "")
@@ -864,6 +975,19 @@ async def _retention_loop(app: web.Application) -> None:
         await asyncio.sleep(86400)
 
 
+async def _whisper_retention_loop(app: web.Application) -> None:
+    """귓속말은 보존이 시간 단위라 하루 주기 루프와 따로 1시간마다 지운다(보존 24h 면 최대 25h 생존)."""
+    cfg = app[CFG_KEY]
+    while True:
+        try:
+            n = app[DB_KEY].prune_whisper(time.time(), int(cfg["retention_whisper_hours"]))
+            if n:
+                log.info("retention: 귓속말 %d건 삭제", n)
+        except Exception:
+            log.exception("귓속말 retention 오류 — 태스크 유지")
+        await asyncio.sleep(3600)
+
+
 # ---------------------------------------------------------------- app
 
 def _open_db(cfg: dict) -> db_mod.Database:
@@ -876,6 +1000,7 @@ def make_limiters(cfg: dict) -> dict:
             "register_slot": RateLimiter(cfg["register_slot_limit_per_hour"], 3600),
             "upload": RateLimiter(cfg["upload_limit_per_min"], 60),
             "satong_upload": RateLimiter(cfg["satong_upload_limit_per_min"], 60),
+            "whisper_upload": RateLimiter(cfg["whisper_upload_limit_per_min"], 60),
             "auth_fail": RateLimiter(cfg["auth_fail_limit_per_min"], 60)}
 
 
@@ -924,11 +1049,14 @@ def make_app(cfg: dict, database: db_mod.Database | None = None, *, limits: dict
     app.router.add_get("/api/market/stats", api_market_stats)
     app.router.add_post("/api/satong/observations", api_satong_observations)
     app.router.add_get("/api/satong/recent", api_satong_recent)
+    app.router.add_post("/api/whisper/observations", api_whisper_observations)
+    app.router.add_get("/api/whisper/recent", api_whisper_recent)
 
     async def _lifecycle(app_: web.Application):
-        task = asyncio.create_task(_retention_loop(app_)) if retention else None
+        tasks = ([asyncio.create_task(_retention_loop(app_)), asyncio.create_task(_whisper_retention_loop(app_))]
+                 if retention else [])
         yield
-        if task is not None:
+        for task in tasks:
             task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await task
@@ -979,10 +1107,12 @@ def main(argv=None) -> None:
     logging.basicConfig(level=logging.INFO,
                         format="%(asctime)s %(levelname)s %(name)s %(message)s")
     cfg = load_config(args.config)
-    log.info("db_path=%s host=%s port=%s public_port=%s registration=%s admin_public=%s proxy_header=%s satong_slots=%s",
+    log.info("db_path=%s host=%s port=%s public_port=%s registration=%s admin_public=%s proxy_header=%s satong_slots=%s "
+             "whisper_slots=%s",
              cfg["db_path"], cfg["host"], cfg["port"], cfg["public_port"],
              f"open({len(cfg['invite_codes'])} slots)" if cfg["invite_codes"] else "closed",
-             cfg["admin_public"], cfg["proxy_header"], ",".join(cfg["satong_slots"]) or "-")
+             cfg["admin_public"], cfg["proxy_header"], ",".join(cfg["satong_slots"]) or "-",
+             ",".join(cfg["whisper_slots"]) or "-")
     try:
         asyncio.run(serve(cfg))
     except KeyboardInterrupt:
